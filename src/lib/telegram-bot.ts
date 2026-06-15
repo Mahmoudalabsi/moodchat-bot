@@ -270,6 +270,7 @@ export async function handleTelegramUpdate(update: {
   callback_query?: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number } }; };
 }) {
   try {
+    // رد على الأزرار التفاعلية
     if (update.callback_query) {
       await telegramAPI('answerCallbackQuery', { callback_query_id: update.callback_query.id });
       return { ok: true };
@@ -281,116 +282,37 @@ export async function handleTelegramUpdate(update: {
     const userId = message.from.id;
     const chatId = message.chat.id;
     const text = message.text.trim();
+    const isAdm = isAdmin(userId);
+
+    // إنشاء أو تحديث المستخدم
     const user = await getOrCreateUser(message.from);
+    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} waiting:${user.waitingForPassword} admin:${isAdm} | msg: "${text.substring(0, 40)}"`);
 
-    // نظام كلمة المرور - يعمل مع كل المستخدمين غير المفعلين
-    if (!user.isApproved && !isAdmin(userId)) {
-      // إذا المستخدم مش مفعل، نطلب كلمة المرور
-      if (!user.waitingForPassword) {
-        await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
-        await db.joinLog.create({ data: { userId, action: 'attempt' } });
-      }
-
-      // تجاهل الأوامر (ما عدا /start)
-      if (text.startsWith('/')) {
-        await sendMessage(chatId, "**هذا البوت خاص ومحمي بكلمة مرور!**\n\nأرسل كلمة المرور أولاً لتفعيل حسابك:");
-        return { ok: true };
-      }
-
-      // تحقق من كلمة المرور
-      const pw = await getJoinPassword();
-      if (text === pw) {
-        await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
-        await db.joinLog.create({ data: { userId, action: 'success' } });
-        await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\nابدأ محادثتك الآن! اكتب أي شيء 🎉");
-      } else {
-        await db.telegramUser.update({ where: { userId }, data: { joinAttempts: { increment: 1 } } });
-        await db.joinLog.create({ data: { userId, action: 'fail', passwordTried: text.substring(0, 50) } });
-        const attempts = (user.joinAttempts || 0) + 1;
-        if (attempts >= 5) {
-          await db.telegramUser.update({ where: { userId }, data: { isBlocked: true, waitingForPassword: false } });
-          await sendMessage(chatId, "🚫 تم حظرك بسبب 5 محاولات خاطئة متتالية.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
-        } else {
-          await sendMessage(chatId, `❌ كلمة المرور خاطئة!\n\nالمحاولات: ${attempts}/5\n\nحاول مرة أخرى:`);
-        }
-      }
-      return { ok: true };
-    }
-
-    // أمر /start
-    if (text === '/start') {
-      if (isAdmin(userId)) {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة");
-      } else if (user.isApproved) {
-        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة");
-      } else {
-        await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
-        await db.joinLog.create({ data: { userId, action: 'attempt' } });
-        await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nأرسل كلمة المرور لتفعيل حسابك:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
-      }
-      return { ok: true };
-    }
-
-    // حظر المستخدم
+    // ==========================================
+    // 1) المستخدم المحظور - لا يمكنه فعل أي شيء
+    // ==========================================
     if (user.isBlocked) {
       await sendMessage(chatId, "🚫 تم حظرك من استخدام هذا البوت.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
       return { ok: true };
     }
 
-    // مستخدم غير مفعل (مفترض تم معالجته فوق، لكن للتأكيد)
-    if (!user.isApproved && !isAdmin(userId)) {
-      await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
-      await sendMessage(chatId, "🔒 أرسل كلمة المرور لتفعيل حسابك:");
-      return { ok: true };
-    }
+    // ==========================================
+    // 2) الأدمن - صلاحيات كاملة بدون كلمة مرور
+    // ==========================================
+    if (isAdm) {
+      // التأكد أن الأدمن مفعل دائماً
+      if (!user.isApproved) {
+        await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
+      }
 
-    if (text === '/help') {
-      const helpText = isAdmin(userId)
-        ? `**🤖 مود شات - المساعدة**
-
-🧠 **الذاكرة:** أتذكر آخر ${MAX_HISTORY} رسالة في محادثتك
-🌍 **اللغات:** أتحدث أي لغة تريدها
-🤖 **المحرك:** Z-AI (GLM-4 Plus)
-
-**أوامر عامة:**
-/clear - مسح سجل المحادثة
-/help - عرض هذه المساعدة
-/start - إعادة بدء المحادثة
-
-**أوامر المدير:** 👑
-/stats - إحصائيات البوت
-/users - قائمة المستخدمين
-/aistatus - حالة مزودي AI
-/workerstatus - حالة الـ Worker
-/chatlog [user_id] - سجل محادثة مستخدم
-/block [user_id] - حظر مستخدم
-/unblock [user_id] - إلغاء حظر
-/kick [user_id] - حذف مستخدم نهائياً
-/broadcast [رسالة] - إرسال لجميع المستخدمين
-/setpass [كلمة] - تغيير كلمة المرور`
-        : `**🤖 مود شات - المساعدة**
-
-🧠 **الذاكرة:** أتذكر آخر ${MAX_HISTORY} رسالة في محادثتك
-🌍 **اللغات:** أتحدث أي لغة تريدها
-🤖 **المحرك:** Z-AI (GLM-4 Plus)
-
-**الأوامر:**
-/clear - مسح سجل المحادثة
-/help - عرض هذه المساعدة
-/start - إعادة بدء المحادثة
-
-اكتب أي شيء وسأرد عليك! 🎉`;
-      await sendMessage(chatId, helpText);
-      return { ok: true };
-    }
-    if (text === '/clear') {
-      await db.message.deleteMany({ where: { userId } });
-      await sendMessage(chatId, "تم مسح سجل محادثتك.\n\nابدأ محادثة جديدة!");
-      return { ok: true };
-    }
-
-    // أوامر المدير
-    if (isAdmin(userId)) {
+      if (text === '/start') {
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة");
+        return { ok: true };
+      }
+      if (text === '/help') {
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**أوامر عامة:** /clear /help /start\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        return { ok: true };
+      }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
       if (text === '/users') { await handleUsersCommand(chatId); return { ok: true }; }
       if (text.startsWith('/chatlog')) { await handleChatLogCommand(chatId, text); return { ok: true }; }
@@ -403,7 +325,10 @@ export async function handleTelegramUpdate(update: {
       }
       if (text.startsWith('/unblock ')) {
         const tid = parseInt(text.split(' ')[1]);
-        if (tid) { await db.telegramUser.update({ where: { userId: tid }, data: { isBlocked: false } }); await sendMessage(chatId, `تم إلغاء حظر \`${tid}\``); }
+        if (tid) {
+          await db.telegramUser.update({ where: { userId: tid }, data: { isBlocked: false, isApproved: false, waitingForPassword: true, joinAttempts: 0 } });
+          await sendMessage(chatId, `تم إلغاء حظر \`${tid}\` - يجب عليه إدخال كلمة المرور مجدداً`);
+        }
         return { ok: true };
       }
       if (text.startsWith('/kick ')) {
@@ -420,52 +345,142 @@ export async function handleTelegramUpdate(update: {
       }
       if (text.startsWith('/setpass ')) {
         const np = text.replace('/setpass ', '').trim();
-        if (np.length >= 3) { await db.botConfig.upsert({ where: { key: 'join_password' }, update: { value: np }, create: { key: 'join_password', value: np } }); await sendMessage(chatId, `تم تغيير كلمة المرور`); }
+        if (np.length >= 3) { await db.botConfig.upsert({ where: { key: 'join_password' }, update: { value: np }, create: { key: 'join_password', value: np } }); await sendMessage(chatId, `✅ تم تغيير كلمة المرور إلى: \`${np}\``); }
         else await sendMessage(chatId, "كلمة المرور يجب أن تكون 3 أحرف على الأقل");
+        return { ok: true };
+      }
+      // أمر /clear للأدمن أيضاً
+      if (text === '/clear') {
+        await db.message.deleteMany({ where: { userId } });
+        await sendMessage(chatId, "تم مسح سجل محادثتك.");
+        return { ok: true };
+      }
+      // الأدمن يقدر يتكلم مع AI مباشرة
+      // (يقع في قسم المحادثة أدناه)
+    }
+
+    // ==========================================
+    // 3) المستخدم غير المفعل (غير الأدمن) - نظام كلمة المرور
+    // ==========================================
+    if (!user.isApproved && !isAdm) {
+      // أمر /start - اعرض رسالة الترحيب مع طلب كلمة المرور
+      if (text === '/start') {
+        if (!user.waitingForPassword) {
+          await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
+        }
+        await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nلتفعيل حسابك والمحادثة مع الذكاء الاصطناعي، أرسل كلمة المرور:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
+        return { ok: true };
+      }
+
+      // أي أمر ثاني - اطلب كلمة المرور
+      if (text.startsWith('/')) {
+        await sendMessage(chatId, "🔒 أرسل كلمة المرور أولاً لتفعيل حسابك!");
+        return { ok: true };
+      }
+
+      // تحقق من كلمة المرور
+      const pw = await getJoinPassword();
+      if (text === pw) {
+        // ✅ كلمة المرور صحيحة - فعّل الحساب
+        await db.telegramUser.update({
+          where: { userId },
+          data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false, joinAttempts: 0 }
+        });
+        await db.joinLog.create({ data: { userId, action: 'success' } });
+        console.log(`[Bot] User ${userId} activated successfully!`);
+        await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\nابدأ محادثتك الآن! اكتب أي شيء 🎉");
+        return { ok: true };
+      } else {
+        // ❌ كلمة المرور خاطئة
+        const newAttempts = (user.joinAttempts || 0) + 1;
+        await db.telegramUser.update({
+          where: { userId },
+          data: { joinAttempts: newAttempts }
+        });
+        await db.joinLog.create({ data: { userId, action: 'fail', passwordTried: text.substring(0, 50) } });
+
+        if (newAttempts >= 5) {
+          // حظر بعد 5 محاولات
+          await db.telegramUser.update({
+            where: { userId },
+            data: { isBlocked: true, waitingForPassword: false }
+          });
+          console.log(`[Bot] User ${userId} blocked after 5 failed attempts`);
+          await sendMessage(chatId, "🚫 تم حظرك بسبب 5 محاولات خاطئة متتالية.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
+        } else {
+          await sendMessage(chatId, `❌ كلمة المرور خاطئة!\n\nالمحاولات المتبقية: ${5 - newAttempts}/5\n\nحاول مرة أخرى:`);
+        }
         return { ok: true };
       }
     }
 
-    // ============================
-    // محادثة عادية - النظام الهجين الذكي
-    // ============================
-    await sendChatAction(chatId);
-    const workerAlive = await isWorkerAlive();
-
-    if (workerAlive) {
-      // ✅ الوضع الهجين: احفظ كـ "pending" والـ Worker سيعالجها بـ Z-AI SDK
-      await db.message.create({
-        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
-      });
-      console.log(`[Webhook] Message saved as pending (worker alive). User: ${userId}`);
-      return { ok: true, mode: 'hybrid-pending' };
+    // ==========================================
+    // 4) المستخدم المفعل (غير الأدمن) - أوامر عامة
+    // ==========================================
+    if (user.isApproved && !isAdm) {
+      if (text === '/start') {
+        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة");
+        return { ok: true };
+      }
+      if (text === '/help') {
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n\nاكتب أي شيء وسأرد عليك! 🎉`);
+        return { ok: true };
+      }
+      if (text === '/clear') {
+        await db.message.deleteMany({ where: { userId } });
+        await sendMessage(chatId, "تم مسح سجل محادثتك.\n\nابدأ محادثة جديدة!");
+        return { ok: true };
+      }
+      // المحادثة مع AI تقع في القسم أدناه
     }
 
-    // ❌ Worker غير متاح: عالج مباشرة باستخدام AI fallback
-    console.log(`[Webhook] Worker offline, processing inline. User: ${userId}`);
+    // ==========================================
+    // 5) المحادثة مع الذكاء الاصطناعي (المستخدم المفعل + الأدمن)
+    // ==========================================
+    if ((user.isApproved || isAdm) && !user.isBlocked) {
+      await sendChatAction(chatId);
+      const workerAlive = await isWorkerAlive();
 
-    await db.message.create({
-      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
-    });
+      if (workerAlive) {
+        // ✅ الوضع الهجين: احفظ كـ "pending" والـ Worker سيعالجها بـ Z-AI SDK
+        await db.message.create({
+          data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
+        });
+        console.log(`[Webhook] Message saved as pending (worker alive). User: ${userId}`);
+        return { ok: true, mode: 'hybrid-pending' };
+      }
 
-    const [dbMessages, config] = await Promise.all([
-      db.message.findMany({ where: { userId, status: 'done' }, orderBy: { timestamp: 'asc' }, take: MAX_HISTORY, select: { role: true, content: true } }),
-      getAIConfig(),
-    ]);
+      // ❌ Worker غير متاح: عالج مباشرة باستخدام AI fallback
+      console.log(`[Webhook] Worker offline, processing inline. User: ${userId}`);
 
-    const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-    ];
+      await db.message.create({
+        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
+      });
 
-    const { reply, provider } = await getAIResponseFallback(aiMessages, config);
+      const [dbMessages, config] = await Promise.all([
+        db.message.findMany({ where: { userId, status: 'done' }, orderBy: { timestamp: 'asc' }, take: MAX_HISTORY, select: { role: true, content: true } }),
+        getAIConfig(),
+      ]);
 
-    await db.message.create({
-      data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
-    });
+      const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      ];
 
-    await sendMessage(chatId, sanitizeMarkdown(reply));
-    return { ok: true, mode: 'inline-fallback', provider };
+      const { reply, provider } = await getAIResponseFallback(aiMessages, config);
+
+      await db.message.create({
+        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
+      });
+
+      await sendMessage(chatId, sanitizeMarkdown(reply));
+      return { ok: true, mode: 'inline-fallback', provider };
+    }
+
+    // إذا وصلنا هنا - شيء غير متوقع
+    console.log(`[Bot] Unhandled state for user ${userId}: approved=${user.isApproved} blocked=${user.isBlocked} admin=${isAdm}`);
+    await sendMessage(chatId, "أرسل /start للبدء.");
+    return { ok: true };
 
   } catch (error) {
     console.error('[Webhook] Error:', error);
