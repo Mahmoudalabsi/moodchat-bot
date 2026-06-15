@@ -36,6 +36,9 @@ const GEMINI_CONFIG = {
   model: 'gemini-2.0-flash',
 };
 
+// Default Gemini API key for Vercel deployment (free tier)
+const DEFAULT_GEMINI_API_KEY = 'AIzaSyA8nEh5LOPIaKh3m3mh5oXzR3g3BkSGi5I';
+
 const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
 
 قواعد أساسية:
@@ -312,12 +315,16 @@ async function analyzeImageWithGemini(
   userPrompt: string,
   lang: string
 ): Promise<string> {
+  // Priority: env variable > database config > default key
   let apiKey = GEMINI_CONFIG.apiKey;
   if (!apiKey) {
     try {
       const cfg = await db.botConfig.findUnique({ where: { key: 'gemini_api_key' } });
       apiKey = cfg?.value || '';
     } catch {}
+  }
+  if (!apiKey) {
+    apiKey = DEFAULT_GEMINI_API_KEY;
   }
   if (!apiKey) throw new Error('No Gemini API key for vision');
 
@@ -358,7 +365,7 @@ async function analyzeImageWithGemini(
   }
 }
 
-/** تحليل صورة مع fallback بين المزودين - URL أولاً ثم base64 */
+/** تحليل صورة - Gemini أولاً (يعمل على Vercel) ثم Z-AI SDK كـ fallback */
 async function analyzeImage(
   imageBase64: string | null,
   mimeType: string,
@@ -369,59 +376,7 @@ async function analyzeImage(
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // المحاولة 1 (الأولوية): Z-AI SDK VLM مع URL مباشر - لا يحتاج تحميل الصورة!
-  if (imageUrl) {
-    try {
-      console.log('[VLM] Attempting URL-based VLM analysis...');
-      const ZAIModule = await import('z-ai-web-dev-sdk');
-      const ZAIClass = ZAIModule.default;
-      const zai = new ZAIClass(ZAI_CONFIG);
-
-      const imageContent = [
-        { type: 'text', text: userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل' : 'Analyze this image in detail') },
-        { type: 'image_url', image_url: { url: imageUrl } },
-      ];
-
-      const messages = [
-        { role: 'system' as const, content: SYSTEM_PROMPT },
-        ...conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        { role: 'user' as const, content: imageContent },
-      ];
-
-      const completion = await zai.chat.completions.createVision({
-        model: 'glm-4v-plus',
-        messages: messages as any,
-        thinking: { type: 'disabled' },
-      });
-
-      const reply = completion?.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log('[VLM] ✅ Image analysis via URL OK (provider: vlm-zsdk-url)');
-        return { reply: reply.trim(), provider: 'vlm-zsdk-url' };
-      }
-      console.warn('[VLM] URL-based VLM returned empty response');
-    } catch (err: any) {
-      const errMsg = err?.message?.substring(0, 80) || String(err);
-      console.error(`[VLM] ❌ URL-based VLM failed: ${errMsg}`);
-      errors.push(`Z-AI VLM URL: ${errMsg}`);
-    }
-  }
-
-  // المحاولة 2: Z-AI SDK VLM مع base64
-  if (imageBase64) {
-    try {
-      console.log('[VLM] Attempting base64-based VLM analysis...');
-      const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
-      console.log('[VLM] ✅ Image analysis via base64 OK (provider: vlm-zsdk)');
-      return { reply, provider: 'vlm-zsdk' };
-    } catch (err: any) {
-      const errMsg = err?.message?.substring(0, 80) || String(err);
-      console.error(`[VLM] ❌ Base64 VLM failed: ${errMsg}`);
-      errors.push(`Z-AI VLM: ${errMsg}`);
-    }
-  }
-
-  // المحاولة 3: Gemini Vision (fallback)
+  // المحاولة 1: Gemini Vision (الأولوية - يعمل على Vercel)
   if (imageBase64) {
     try {
       console.log('[VLM] Attempting Gemini Vision analysis...');
@@ -431,7 +386,21 @@ async function analyzeImage(
     } catch (err: any) {
       const errMsg = err?.message?.substring(0, 80) || String(err);
       console.error(`[VLM] ❌ Gemini Vision failed: ${errMsg}`);
-      errors.push(`Gemini Vision: ${errMsg}`);
+      errors.push(`Gemini: ${errMsg}`);
+    }
+  }
+
+  // المحاولة 2: Z-AI SDK VLM مع base64 (يعمل فقط محلياً داخل شبكة Z.ai)
+  if (imageBase64) {
+    try {
+      console.log('[VLM] Attempting Z-AI SDK VLM analysis...');
+      const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
+      console.log('[VLM] ✅ Z-AI VLM OK (provider: vlm-zsdk)');
+      return { reply, provider: 'vlm-zsdk' };
+    } catch (err: any) {
+      const errMsg = err?.message?.substring(0, 80) || String(err);
+      console.error(`[VLM] ❌ Z-AI VLM failed: ${errMsg}`);
+      errors.push(`Z-AI VLM: ${errMsg}`);
     }
   }
 
@@ -511,6 +480,9 @@ async function callGeminiDirect(messages: Array<{ role: string; content: string 
       const cfg = await db.botConfig.findUnique({ where: { key: 'gemini_api_key' } });
       apiKey = cfg?.value || '';
     } catch {}
+  }
+  if (!apiKey) {
+    apiKey = DEFAULT_GEMINI_API_KEY;
   }
   if (!apiKey) throw new Error('No Gemini API key');
 
