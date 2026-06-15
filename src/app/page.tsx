@@ -999,7 +999,7 @@ export default function Dashboard() {
 
           {/* ========== MESSAGES TAB ========== */}
           <TabsContent value="messages" className="animate-fade-in mt-6">
-            <div className={`grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4`}>
+            <div className={`grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 min-w-0`}>
               {/* Users List */}
               <Card className="border-border/50 overflow-hidden">
                 <CardHeader className="p-4 pb-2">
@@ -1067,7 +1067,7 @@ export default function Dashboard() {
               </Card>
 
               {/* Chat View */}
-              <Card className="border-border/50 overflow-hidden flex flex-col">
+              <Card className="border-border/50 overflow-hidden flex flex-col min-w-0">
                 {/* Chat Header */}
                 <div className="p-4 border-b border-border/50 flex items-center justify-between bg-card">
                   <div className="flex items-center gap-2">
@@ -1152,7 +1152,7 @@ export default function Dashboard() {
                               </div>
                             )}
 
-                            <div className={`max-w-[80%] sm:max-w-[70%] rounded-2xl px-4 py-3 ${
+                            <div className={`max-w-[80%] sm:max-w-[70%] min-w-0 rounded-2xl px-4 py-3 ${
                               m.role === 'user'
                                 ? 'bg-primary/10 border border-primary/20 chat-bubble-user'
                                 : 'bg-emerald-500/10 border border-emerald-500/20 chat-bubble-bot'
@@ -1218,7 +1218,7 @@ export default function Dashboard() {
                               )}
 
                               {/* Message content */}
-                              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words overflow-wrap-anywhere">
                                 {m.content}
                               </p>
 

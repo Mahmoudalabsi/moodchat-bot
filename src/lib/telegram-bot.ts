@@ -14,7 +14,8 @@ import { db } from './db';
 // الإعدادات
 // ============================
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+// Hardcoded token - Vercel env sometimes returns wrong/empty value causing 401 errors
+const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;

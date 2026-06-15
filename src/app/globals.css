@@ -248,3 +248,24 @@
 .recharts-tooltip-wrapper {
   direction: ltr;
 }
+
+/* Force long words/URLs to break inside chat bubbles */
+.overflow-wrap-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Prevent chat messages from expanding the container */
+.chat-bubble-user,
+.chat-bubble-bot {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
+}
+
+/* Chat container overflow fix */
+[data-state="active"][role="tabpanel"] {
+  min-width: 0;
+  overflow: hidden;
+}
