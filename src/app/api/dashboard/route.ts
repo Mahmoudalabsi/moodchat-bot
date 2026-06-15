@@ -69,9 +69,9 @@ export async function GET(request: NextRequest) {
         where: { timestamp: { gte: weekAgo } },
         select: { timestamp: true },
       }),
-      // آخر 200 رسالة (للمحادثات)
+      // آخر 200 رسالة (للمحادثات) - من الأقدم للأحدث
       db.message.findMany({
-        orderBy: { timestamp: 'desc' },
+        orderBy: { timestamp: 'asc' },
         take: 200,
         include: { user: { select: { firstName: true, username: true, userId: true } } },
       }),
@@ -113,7 +113,7 @@ export async function GET(request: NextRequest) {
         topUsers, recentJoins, dailyMessages,
       },
       users: allUsers,
-      messages: allMessages.reverse(),
+      messages: allMessages,
       config: {
         ai_provider: configMap.ai_provider || 'zsdk',
         api_base_url: configMap.api_base_url || '',

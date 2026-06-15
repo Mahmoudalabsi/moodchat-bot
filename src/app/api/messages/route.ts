@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
       const [messages, total] = await Promise.all([
         db.message.findMany({
           where,
-          orderBy: { timestamp: 'desc' },
+          orderBy: { timestamp: 'asc' },
           take: limit,
           ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
         }),
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
       // Search messages
       const messages = await db.message.findMany({
         where: { content: { contains: search } },
-        orderBy: { timestamp: 'desc' },
+        orderBy: { timestamp: 'asc' },
         take: limit,
         include: includeUser,
       });
@@ -59,7 +59,7 @@ export async function GET(request: NextRequest) {
     const [messages, total] = await Promise.all([
       db.message.findMany({
         where,
-        orderBy: { timestamp: 'desc' },
+        orderBy: { timestamp: 'asc' },
         take: limit,
         ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
         include: includeUser,
