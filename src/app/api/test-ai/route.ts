@@ -1,14 +1,28 @@
 import { NextResponse } from 'next/server';
 
+const ZAI_PUBLIC_URL = 'https://chat.z.ai/api/v1';
+const ZAI_INTERNAL_URL = 'https://internal-api.z.ai/v1';
+const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
+const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || 'chat-c2ae3234-5685-4053-8998-96e9a664f658';
+const ZAI_USER_ID = process.env.ZAI_USER_ID || '014c4da7-4f7f-4efa-9157-9091a73a3570';
+const ZAI_TOKEN = process.env.ZAI_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0';
+
 export async function GET() {
   const results: Record<string, string> = {};
 
-  // 1. Z-AI SDK (Primary)
+  // 1. Z-AI SDK with direct instance (no config file!)
   try {
     const start = Date.now();
     const ZAIModule = await import('z-ai-web-dev-sdk');
     const ZAI = ZAIModule.default;
-    const zai = await ZAI.create();
+    // Use constructor directly - bypasses config file reading
+    const zai = new ZAI({
+      baseUrl: ZAI_PUBLIC_URL,
+      apiKey: ZAI_API_KEY,
+      chatId: ZAI_CHAT_ID,
+      userId: ZAI_USER_ID,
+      token: ZAI_TOKEN,
+    });
     const completion = await zai.chat.completions.create({
       messages: [{ role: 'user', content: 'قل مرحبا بكلمة واحدة' }],
       model: 'glm-4-plus',
@@ -22,52 +36,48 @@ export async function GET() {
     results['zai-sdk'] = `❌ ${e?.message?.substring(0, 120) || String(e).substring(0, 80)}`;
   }
 
-  // 2. Z-AI Direct API
-  try {
-    const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
-    const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
-    const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
-    const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
-    const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
+  // 2. Z-AI Direct API (public endpoint)
+  for (const [name, baseUrl] of [['zai-direct-public', ZAI_PUBLIC_URL], ['zai-direct-internal', ZAI_INTERNAL_URL]] as const) {
+    try {
+      const start = Date.now();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ZAI_API_KEY}`,
+        'X-Z-AI-From': 'Z',
+      };
+      if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
+      if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
+      if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
 
-    const start = Date.now();
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${ZAI_API_KEY}`,
-      'X-Z-AI-From': 'Z',
-    };
-    if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
-    if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
-    if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
-
-    const r = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers,
-      signal: AbortSignal.timeout(30000),
-      body: JSON.stringify({
-        model: 'glm-4-plus',
-        messages: [{ role: 'user', content: 'قل مرحبا بكلمة واحدة' }],
-        temperature: 0.7,
-        max_tokens: 50,
-        thinking: { type: 'disabled' },
-      }),
-    });
-    const ms = Date.now() - start;
-    if (r.ok) {
-      const data = await r.json();
-      const reply = data?.choices?.[0]?.message?.content;
-      results['zai-direct'] = reply ? `✅ ${ms}ms: ${reply.substring(0, 80)}` : `❌ Empty (${ms}ms)`;
-    } else if (r.status === 429) {
-      results['zai-direct'] = `⏳ Rate limited (${ms}ms)`;
-    } else {
-      const errText = await r.text().catch(() => '');
-      results['zai-direct'] = `❌ ${r.status} (${ms}ms): ${errText.substring(0, 100)}`;
+      const r = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(30000),
+        body: JSON.stringify({
+          model: 'glm-4-plus',
+          messages: [{ role: 'user', content: 'قل مرحبا بكلمة واحدة' }],
+          temperature: 0.7,
+          max_tokens: 50,
+          thinking: { type: 'disabled' },
+        }),
+      });
+      const ms = Date.now() - start;
+      if (r.ok) {
+        const data = await r.json();
+        const reply = data?.choices?.[0]?.message?.content;
+        results[name] = reply ? `✅ ${ms}ms: ${reply.substring(0, 80)}` : `❌ Empty (${ms}ms)`;
+      } else if (r.status === 429) {
+        results[name] = `⏳ Rate limited (${ms}ms)`;
+      } else {
+        const errText = await r.text().catch(() => '');
+        results[name] = `❌ ${r.status} (${ms}ms): ${errText.substring(0, 80)}`;
+      }
+    } catch (e: any) {
+      results[name] = `❌ ${e?.message?.substring(0, 120) || String(e).substring(0, 80)}`;
     }
-  } catch (e: any) {
-    results['zai-direct'] = `❌ ${e?.message?.substring(0, 120) || String(e).substring(0, 80)}`;
   }
 
-  // 3. Pollinations.ai POST
+  // 3. Pollinations.ai
   try {
     const start = Date.now();
     const r = await fetch('https://text.pollinations.ai/openai', {
@@ -85,20 +95,18 @@ export async function GET() {
     if (r.ok) {
       const data = await r.json();
       const reply = data.choices?.[0]?.message?.content;
-      results['pollinations-post'] = reply ? `✅ ${ms}ms: ${reply.substring(0, 50)}` : `❌ Empty (${ms}ms)`;
+      results['pollinations'] = reply ? `✅ ${ms}ms: ${reply.substring(0, 50)}` : `❌ Empty (${ms}ms)`;
     } else if (r.status === 429) {
-      results['pollinations-post'] = `⏳ Rate limited (${ms}ms)`;
+      results['pollinations'] = `⏳ Rate limited (${ms}ms)`;
     } else {
-      results['pollinations-post'] = `❌ ${r.status} (${ms}ms)`;
+      results['pollinations'] = `❌ ${r.status} (${ms}ms)`;
     }
   } catch (e: any) {
-    results['pollinations-post'] = `❌ ${e?.message?.substring(0, 80) || String(e).substring(0, 80)}`;
+    results['pollinations'] = `❌ ${e?.message?.substring(0, 80) || String(e).substring(0, 80)}`;
   }
 
-  // 4. Smart Fallback (always works)
-  results['smart-fallback'] = '✅ Always available - generates contextual Arabic responses';
-
-  results['system'] = 'Z-AI SDK → Z-AI Direct → Pollinations → Smart Fallback';
+  results['smart-fallback'] = '✅ Always available';
+  results['system'] = 'Z-AI SDK (direct) → Z-AI Direct → Pollinations → Smart Fallback';
 
   return NextResponse.json(results, { headers: { 'Cache-Control': 'no-cache' } });
 }
