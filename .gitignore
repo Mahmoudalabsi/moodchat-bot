@@ -59,3 +59,9 @@ tool-results/
 
 # Z-AI config (secrets)
 .z-ai-config
+dist/
+bot-polling.pid
+bot.pid
+bot.log
+bot-polling.log
+watchdog.log
