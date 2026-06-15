@@ -1094,3 +1094,4 @@ export async function getJoinPassword(): Promise<string> {
   try { const c = await db.botConfig.findUnique({ where: { key: 'join_password' } }); return c?.value || JOIN_PASSWORD; } catch { return JOIN_PASSWORD; }
 }
 export async function getPasswordEnabled(): Promise<boolean> { return isPasswordEnabled(); }
+// VLM v1781553364
