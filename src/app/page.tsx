@@ -6,7 +6,7 @@ import {
   UserCheck, UserX, Clock, Search, RefreshCw,
   Eye, Ban, Trash2, CheckCircle, BarChart3,
   Send, Key, Wifi, WifiOff, Settings, Moon,
-  ChevronLeft, Save, Zap
+  ChevronLeft, Save, Zap, LogOut, Lock
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -61,6 +61,13 @@ interface BotConfig {
 }
 
 export default function Dashboard() {
+  // تسجيل الدخول
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -83,6 +90,50 @@ export default function Dashboard() {
   const [cfgZaiUserId, setCfgZaiUserId] = useState('');
   const [cfgZaiToken, setCfgZaiToken] = useState('');
   const [cfgPassword, setCfgPassword] = useState('');
+
+  // تسجيل الدخول
+  const handleLogin = async () => {
+    setLoginLoading(true);
+    setLoginError('');
+    try {
+      const r = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'login', password: loginPassword }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setIsLoggedIn(true);
+        setLoginPassword('');
+      } else {
+        setLoginError(d.error || 'كلمة المرور خاطئة');
+      }
+    } catch {
+      setLoginError('حدث خطأ في الاتصال');
+    }
+    setLoginLoading(false);
+  };
+
+  // تسجيل الخروج
+  const handleLogout = async () => {
+    await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'logout' }),
+    });
+    setIsLoggedIn(false);
+  };
+
+  // التحقق من الجلسة عند التحميل
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/auth');
+        if (r.ok) { setIsLoggedIn(true); }
+      } catch {}
+      setCheckingAuth(false);
+    })();
+  }, []);
 
   // Fetch stats
   const fetchStats = useCallback(async () => {
@@ -184,7 +235,7 @@ export default function Dashboard() {
     fetchUsers(); fetchStats();
   };
 
-  useEffect(() => { fetchStats(); fetchUsers(); fetchMessages(); fetchConfig(); checkWebhook(); }, []);
+  useEffect(() => { if (isLoggedIn) { fetchStats(); fetchUsers(); fetchMessages(); fetchConfig(); checkWebhook(); } }, [isLoggedIn]);
   useEffect(() => { fetchUsers(); }, [userFilter, searchQuery]);
   useEffect(() => {
     if (selectedUserId) fetchUserMessages(selectedUserId);
@@ -199,6 +250,55 @@ export default function Dashboard() {
     { label: 'جدد اليوم', value: stats.newUsersToday, icon: Zap, color: '#A78BFA' },
   ] : [];
 
+  // شاشة التحميل
+  if (checkingAuth) {
+    return <div style={{ background: C.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', direction: 'rtl' }}>
+      <div style={{ textAlign: 'center' }}>
+        <Moon size={48} style={{ color: C.accent, filter: 'drop-shadow(0 0 20px rgba(212,168,83,0.5))', animation: 'pulse 2s ease-in-out infinite' }} />
+        <p style={{ color: C.textSec, marginTop: 16 }}>جاري التحميل...</p>
+      </div>
+    </div>;
+  }
+
+  // شاشة تسجيل الدخول
+  if (!isLoggedIn) {
+    return <div style={{ background: C.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', direction: 'rtl' }}>
+      <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } } @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }`}</style>
+      <div style={{ width: 400, maxWidth: '90vw' }}>
+        <div style={{ textAlign: 'center', marginBottom: 40 }}>
+          <div style={{ animation: 'float 3s ease-in-out infinite', display: 'inline-block' }}>
+            <Moon size={64} style={{ color: C.accent, filter: 'drop-shadow(0 0 25px rgba(212,168,83,0.6))' }} />
+          </div>
+          <h1 style={{ fontSize: 32, fontWeight: 800, color: C.accent, margin: '20px 0 8px', letterSpacing: '-0.5px' }}>مود شات</h1>
+          <p style={{ color: C.textSec, fontSize: 14 }}>لوحة تحكم البوت الذكي</p>
+        </div>
+        <Card style={{ background: `linear-gradient(145deg, ${C.card} 0%, #0F2847 100%)`, border: `1px solid ${C.border}`, borderRadius: 20 }}>
+          <CardContent style={{ padding: '32px 28px' }}>
+            <div style={{ textAlign: 'center', marginBottom: 24 }}>
+              <Lock size={28} style={{ color: C.accent, marginBottom: 8 }} />
+              <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: 0 }}>تسجيل الدخول</h2>
+              <p style={{ color: C.textSec, fontSize: 13, marginTop: 4 }}>هذه اللوحة خاصة بالمالك فقط</p>
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 6 }}>كلمة المرور</label>
+              <Input type="password" value={loginPassword} onChange={e => { setLoginPassword(e.target.value); setLoginError(''); }}
+                onKeyDown={e => e.key === 'Enter' && handleLogin()}
+                placeholder="أدخل كلمة المرور"
+                style={{ background: C.bg, border: `1px solid ${loginError ? C.danger : C.border}`, color: C.text, borderRadius: 12, padding: '12px 16px', fontSize: 15, textAlign: 'center', letterSpacing: loginPassword ? '4px' : 'normal' }} />
+            </div>
+            {loginError && <p style={{ color: C.danger, fontSize: 13, textAlign: 'center', marginBottom: 12 }}>{loginError}</p>}
+            <Button onClick={handleLogin} disabled={loginLoading || !loginPassword}
+              style={{ width: '100%', background: C.accent, color: C.bg, fontWeight: 700, borderRadius: 12, padding: '12px', fontSize: 15, border: 'none' }}>
+              {loginLoading ? 'جاري التحقق...' : 'دخول'}
+            </Button>
+          </CardContent>
+        </Card>
+        <p style={{ textAlign: 'center', color: `${C.textSec}60`, fontSize: 11, marginTop: 20 }}>🔒 محمي بنظام مصادقة خاص</p>
+      </div>
+    </div>;
+  }
+
+  // لوحة التحكم الرئيسية
   return (
     <div style={{ background: C.bg, minHeight: '100vh', direction: 'rtl', color: C.text }}>
       {/* Header */}
@@ -221,6 +321,10 @@ export default function Dashboard() {
             </Badge>
             <Button variant="ghost" size="sm" onClick={() => { fetchStats(); fetchUsers(); fetchMessages(); fetchConfig(); checkWebhook(); }} style={{ color: C.textSec }}>
               <RefreshCw size={16} />
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleLogout} style={{ color: C.danger, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <LogOut size={16} />
+              <span style={{ fontSize: 12 }}>خروج</span>
             </Button>
           </div>
         </div>
