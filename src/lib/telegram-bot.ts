@@ -25,6 +25,9 @@ const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
 const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
 
+// Optional: Gemini API key (free at https://aistudio.google.com/apikey)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+
 // ============================
 // Telegram API Helpers
 // ============================
@@ -53,47 +56,80 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
 }
 
 // ============================
-// AI Chat with Z-AI API directly (Vercel compatible)
+// AI Chat - Multi-provider with fallback
 // ============================
 
 async function chatWithAI(userId: number, userMessage: string): Promise<string> {
-  try {
-    // بناء سجل المحادثة من قاعدة البيانات
-    const dbMessages = await db.message.findMany({
-      where: { userId },
-      orderBy: { timestamp: 'asc' },
-      take: MAX_HISTORY,
+  // بناء سجل المحادثة من قاعدة البيانات
+  const dbMessages = await db.message.findMany({
+    where: { userId },
+    orderBy: { timestamp: 'asc' },
+    take: MAX_HISTORY,
+  });
+
+  // تحويل لصيغة API
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    { role: 'system', content: SYSTEM_PROMPT },
+  ];
+
+  for (const msg of dbMessages) {
+    messages.push({
+      role: msg.role as 'user' | 'assistant',
+      content: msg.content,
     });
+  }
 
-    // تحويل لصيغة API
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-      { role: 'system', content: SYSTEM_PROMPT },
-    ];
+  // إضافة الرسالة الحالية
+  messages.push({ role: 'user', content: userMessage });
 
-    for (const msg of dbMessages) {
-      messages.push({
-        role: msg.role as 'user' | 'assistant',
-        content: msg.content,
-      });
+  // محاولة مع مزود AI مختلف
+  const errors: string[] = [];
+
+  // 1. محاولة مع Z-AI (يعمل من بيئة Z.ai)
+  try {
+    return await callZaiAPI(messages);
+  } catch (e) {
+    errors.push(`Z-AI: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 2. محاولة مع Pollinations.ai (مجاني، بدون مفتاح)
+  try {
+    return await callPollinationsAPI(messages);
+  } catch (e) {
+    errors.push(`Pollinations: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 3. محاولة مع Gemini (إذا كان المفتاح متوفر)
+  if (GEMINI_API_KEY) {
+    try {
+      return await callGeminiAPI(messages);
+    } catch (e) {
+      errors.push(`Gemini: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
 
-    // إضافة الرسالة الحالية
-    messages.push({ role: 'user', content: userMessage });
+  throw new Error(`All AI providers failed: ${errors.join(' | ')}`);
+}
 
-    // استدعاء Z-AI API مباشرة
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${ZAI_API_KEY}`,
-      'X-Z-AI-From': 'Z',
-    };
+async function callZaiAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${ZAI_API_KEY}`,
+    'X-Z-AI-From': 'Z',
+  };
 
-    if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
-    if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
-    if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
+  if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
+  if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
+  if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  try {
     const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         messages,
         temperature: 0.7,
@@ -104,19 +140,89 @@ async function chatWithAI(userId: number, userMessage: string): Promise<string> 
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(`Z-AI API error ${response.status}: ${errorBody}`);
+      throw new Error(`Z-AI ${response.status}: ${errorBody.substring(0, 200)}`);
     }
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content;
-    if (reply && reply.trim()) {
-      return reply.trim();
+    if (reply && reply.trim()) return reply.trim();
+    throw new Error('Empty Z-AI response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callPollinationsAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages,
+        model: 'openai',
+        temperature: 0.7,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Pollinations ${response.status}: ${errorBody.substring(0, 200)}`);
     }
 
-    throw new Error('Empty AI response');
-  } catch (error) {
-    console.error('Z-AI API Error:', error);
-    throw error;
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply && reply.trim()) return reply.trim();
+    throw new Error('Empty Pollinations response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callGeminiAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    // تحويل لصيغة Gemini API
+    const contents = messages
+      .filter(m => m.role !== 'system')
+      .map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
+
+    const systemInstruction = messages.find(m => m.role === 'system');
+
+    const body: Record<string, unknown> = { contents };
+    if (systemInstruction) {
+      body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
+    }
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify(body),
+      }
+    );
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Gemini ${response.status}: ${errorBody.substring(0, 200)}`);
+    }
+
+    const data = await response.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (reply && reply.trim()) return reply.trim();
+    throw new Error('Empty Gemini response');
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
