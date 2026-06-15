@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model TelegramUser {
+  id                 String    @id @default(cuid())
+  userId             Int       @unique
+  username           String?
+  firstName          String?
+  lastName           String?
+  languageCode       String?
+  isBot              Boolean   @default(false)
+  firstSeen          DateTime  @default(now())
+  lastActive         DateTime  @updatedAt
+  totalMessages      Int       @default(0)
+  isBlocked          Boolean   @default(false)
+  isApproved         Boolean   @default(false)
+  approvedAt         DateTime?
+  joinAttempts       Int       @default(0)
+  waitingForPassword Boolean   @default(false)
+  messages           Message[]
+  joinLogs           JoinLog[]
+}
+
+model Message {
+  id        String       @id @default(cuid())
+  userId    Int
+  role      String
+  content   String
+  modelUsed String?
+  timestamp DateTime     @default(now())
+  user      TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([timestamp])
+}
+
+model JoinLog {
+  id            String       @id @default(cuid())
+  userId        Int
+  action        String
+  passwordTried String?
+  timestamp     DateTime     @default(now())
+  user          TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model BotConfig {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}

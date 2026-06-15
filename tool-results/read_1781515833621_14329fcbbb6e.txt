@@ -1,0 +1,1023 @@
+     1→"""
+     2→بوت تيليجرام الذكاء الاصطناعي - خاص ومحمي بكلمة سر
+     3→فقط المالك (أنت) يتحكم بالبوت والمستخدمين يحتاجون كلمة سر للانضمام
+     4→"""
+     5→
+     6→import logging
+     7→import asyncio
+     8→import io
+     9→from datetime import datetime
+    10→from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    11→from telegram.ext import (
+    12→    Application, CommandHandler, MessageHandler,
+    13→    CallbackQueryHandler, filters, ContextTypes
+    14→)
+    15→
+    16→from config import (
+    17→    TELEGRAM_BOT_TOKEN, AI_PROVIDER, ADMIN_IDS,
+    18→    WELCOME_MESSAGE, HELP_MESSAGE,
+    19→    JOIN_PASSWORD, JOIN_REQUEST_MESSAGE,
+    20→    JOIN_SUCCESS_MESSAGE, JOIN_FAIL_MESSAGE,
+    21→    DAILY_MESSAGE_LIMIT
+    22→)
+    23→from ai_provider import AIProvider
+    24→from database import Database
+    25→
+    26→# إعداد السجلات
+    27→logging.basicConfig(
+    28→    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    29→    level=logging.INFO
+    30→)
+    31→logger = logging.getLogger(__name__)
+    32→
+    33→# إنشاء قاعدة البيانات والذكاء الاصطناعي
+    34→db = Database()
+    35→ai = AIProvider(db=db)
+    36→
+    37→# تتبع المستخدمين الذين ينتظرون كلمة السر
+    38→waiting_for_password = set()  # user_ids
+    39→
+    40→
+    41→def is_admin(user_id: int) -> bool:
+    42→    """التحقق مما إذا كان المستخدم هو المدير (أنت فقط)"""
+    43→    return user_id in ADMIN_IDS
+    44→
+    45→
+    46→# ============================
+    47→# نظام كلمة السر
+    48→# ============================
+    49→
+    50→async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    51→    """معالجة أمر /start - بوابة كلمة السر"""
+    52→    user = update.effective_user
+    53→
+    54→    # المدير يدخل مباشرة
+    55→    if is_admin(user.id):
+    56→        db.register_user(
+    57→            user_id=user.id,
+    58→            username=user.username,
+    59→            first_name=user.first_name,
+    60→            last_name=user.last_name,
+    61→            language_code=user.language_code,
+    62→            is_approved=True
+    63→        )
+    64→        if not db.is_approved(user.id):
+    65→            db.approve_user(user.id)
+    66→        ai.load_history_from_db(user.id)
+    67→
+    68→        await update.message.reply_text(
+    69→            "👑 **مرحباً يا مالك البوت!**\n\n"
+    70→            f"🤖 النموذج: {ai.get_provider_info()}\n"
+    71→            "📊 /dashboard - لوحة التحكم\n"
+    72→            "👥 /users - عرض المستخدمين\n"
+    73→            "📈 /stats - الإحصائيات",
+    74→            parse_mode="Markdown"
+    75→        )
+    76→        return
+    77→
+    78→    # التحقق من حظر المستخدم
+    79→    if db.is_blocked(user.id):
+    80→        await update.message.reply_text("⛔ تم حظرك من استخدام هذا البوت.")
+    81→        return
+    82→
+    83→    # تسجيل المستخدم كغير موافق عليه
+    84→    db.register_user(
+    85→        user_id=user.id,
+    86→        username=user.username,
+    87→        first_name=user.first_name,
+    88→        last_name=user.last_name,
+    89→        language_code=user.language_code,
+    90→        is_approved=False
+    91→    )
+    92→    db.log_join_action(user.id, "start")
+    93→
+    94→    # إذا كان موافقاً عليه سابقاً، يدخل مباشرة
+    95→    if db.is_approved(user.id):
+    96→        ai.load_history_from_db(user.id)
+    97→        await update.message.reply_text(WELCOME_MESSAGE)
+    98→        return
+    99→
+   100→    # طلب كلمة السر
+   101→    waiting_for_password.add(user.id)
+   102→    await update.message.reply_text(JOIN_REQUEST_MESSAGE, parse_mode="Markdown")
+   103→
+   104→    # إعلام المدير بمحاولة انضمام جديدة
+   105→    for admin_id in ADMIN_IDS:
+   106→        try:
+   107→            username = f"@{user.username}" if user.username else "بدون معرف"
+   108→            await context.bot.send_message(
+   109→                chat_id=admin_id,
+   110→                text=(
+   111→                    f"🔔 **محاولة انضمام جديدة!**\n\n"
+   112→                    f"👤 الاسم: {user.first_name}\n"
+   113→                    f"📎 المعرف: {username}\n"
+   114→                    f"🆔 ID: `{user.id}`\n\n"
+   115→                    f"⏳ في انتظار إدخال كلمة السر..."
+   116→                ),
+   117→                parse_mode="Markdown"
+   118→            )
+   119→        except Exception:
+   120→            pass
+   121→
+   122→
+   123→async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   124→    """معالجة إدخال كلمة السر"""
+   125→    user = update.effective_user
+   126→    text = update.message.text.strip()
+   127→
+   128→    # المدير لا يحتاج كلمة سر
+   129→    if is_admin(user.id):
+   130→        await handle_message(update, context)
+   131→        return
+   132→
+   133→    # إذا كان المستخدم ينتظر كلمة السر
+   134→    if user.id in waiting_for_password:
+   135→        db.log_join_action(user.id, "password_attempt", text)
+   136→
+   137→        if text == JOIN_PASSWORD:
+   138→            # كلمة السر صحيحة
+   139→            waiting_for_password.discard(user.id)
+   140→            db.approve_user(user.id)
+   141→            ai.load_history_from_db(user.id)
+   142→            await update.message.reply_text(JOIN_SUCCESS_MESSAGE, parse_mode="Markdown")
+   143→
+   144→            # إعلام المدير
+   145→            for admin_id in ADMIN_IDS:
+   146→                try:
+   147→                    username = f"@{user.username}" if user.username else "بدون معرف"
+   148→                    await context.bot.send_message(
+   149→                        chat_id=admin_id,
+   150→                        text=(
+   151→                            f"✅ **عضو جديد انضم!**\n\n"
+   152→                            f"👤 {user.first_name} {username}\n"
+   153→                            f"🆔 `{user.id}`"
+   154→                        ),
+   155→                        parse_mode="Markdown"
+   156→                    )
+   157→                except Exception:
+   158→                    pass
+   159→        else:
+   160→            # كلمة السر خاطئة
+   161→            db.increment_join_attempt(user.id)
+   162→            await update.message.reply_text(JOIN_FAIL_MESSAGE, parse_mode="Markdown")
+   163→
+   164→            # إعلام المدير بمحاولة خاطئة
+   165→            for admin_id in ADMIN_IDS:
+   166→                try:
+   167→                    username = f"@{user.username}" if user.username else "بدون معرف"
+   168→                    await context.bot.send_message(
+   169→                        chat_id=admin_id,
+   170→                        text=(
+   171→                            f"⚠️ **محاولة كلمة سر خاطئة!**\n\n"
+   172→                            f"👤 {user.first_name} {username}\n"
+   173→                            f"🆔 `{user.id}`\n"
+   174→                            f"🔑 المحاولة: `{text}`"
+   175→                        ),
+   176→                        parse_mode="Markdown"
+   177→                    )
+   178→                except Exception:
+   179→                    pass
+   180→        return
+   181→
+   182→    # إذا لم يكن موافقاً عليه ولم يكن ينتظر كلمة السر
+   183→    if not db.is_approved(user.id) and not is_admin(user.id):
+   184→        waiting_for_password.add(user.id)
+   185→        await update.message.reply_text(JOIN_REQUEST_MESSAGE, parse_mode="Markdown")
+   186→        return
+   187→
+   188→    # مستخدم عادي موافق عليه - معالجة الرسالة
+   189→    await handle_message(update, context)
+   190→
+   191→
+   192→async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   193→    """معالجة الرسائل العادية - إرسالها للذكاء الاصطناعي والرد"""
+   194→    user = update.effective_user
+   195→    user_message = update.message.text
+   196→
+   197→    # التحقق من الحظر
+   198→    if db.is_blocked(user.id):
+   199→        await update.message.reply_text("⛔ تم حظرك من استخدام هذا البوت.")
+   200→        return
+   201→
+   202→    # التحقق من الموافقة
+   203→    if not db.is_approved(user.id) and not is_admin(user.id):
+   204→        waiting_for_password.add(user.id)
+   205→        await update.message.reply_text(JOIN_REQUEST_MESSAGE, parse_mode="Markdown")
+   206→        return
+   207→
+   208→    # تسجيل/تحديث المستخدم
+   209→    db.register_user(
+   210→        user_id=user.id,
+   211→        username=user.username,
+   212→        first_name=user.first_name,
+   213→        last_name=user.last_name,
+   214→        language_code=user.language_code
+   215→    )
+   216→
+   217→    logger.info(f"رسالة من {user.first_name} (ID: {user.id}): {user_message[:50]}...")
+   218→
+   219→    # إظهار حالة الكتابة
+   220→    await update.message.chat.send_action("typing")
+   221→
+   222→    try:
+   223→        reply = await ai.chat(user.id, user_message)
+   224→
+   225→        if len(reply) <= 4096:
+   226→            await update.message.reply_text(reply)
+   227→        else:
+   228→            parts = [reply[i:i+4096] for i in range(0, len(reply), 4096)]
+   229→            for part in parts:
+   230→                await update.message.reply_text(part)
+   231→                await asyncio.sleep(0.5)
+   232→
+   233→    except Exception as e:
+   234→        logger.error(f"خطأ في معالجة الرسالة: {e}")
+   235→        await update.message.reply_text(
+   236→            "❌ حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى."
+   237→        )
+   238→
+   239→
+   240→# ============================
+   241→# أوامر المستخدمين
+   242→# ============================
+   243→
+   244→async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   245→    """معالجة أمر /help"""
+   246→    user = update.effective_user
+   247→    if not db.is_approved(user.id) and not is_admin(user.id):
+   248→        await update.message.reply_text(JOIN_REQUEST_MESSAGE, parse_mode="Markdown")
+   249→        return
+   250→    await update.message.reply_text(HELP_MESSAGE, parse_mode="Markdown")
+   251→
+   252→
+   253→async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   254→    """معالجة أمر /clear"""
+   255→    user = update.effective_user
+   256→    if not db.is_approved(user.id) and not is_admin(user.id):
+   257→        await update.message.reply_text(JOIN_REQUEST_MESSAGE, parse_mode="Markdown")
+   258→        return
+   259→    ai.clear_history(user.id)
+   260→    db.clear_user_messages(user.id)
+   261→    await update.message.reply_text("🗑️ تم مسح سجل المحادثة! يمكنك البدء من جديد.")
+   262→
+   263→
+   264→# ============================
+   265→# أوامر المدير فقط
+   266→# ============================
+   267→
+   268→async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   269→    """لوحة تحكم المدير"""
+   270→    if not is_admin(update.effective_user.id):
+   271→        await update.message.reply_text("❌ هذا الأمر للمدير فقط.")
+   272→        return
+   273→
+   274→    stats = db.get_stats()
+   275→
+   276→    dashboard_text = (
+   277→        f"👑 **لوحة تحكم المالك**\n"
+   278→        f"━━━━━━━━━━━━━━━━━\n\n"
+   279→        f"👥 **المستخدمين:**\n"
+   280→        f"  • الإجمالي: {stats['total_users']}\n"
+   281→        f"  • موافق عليهم: {stats['approved_users']}\n"
+   282→        f"  • في الانتظار: {stats['pending_users']}\n"
+   283→        f"  • نشطين (7 أيام): {stats['active_users_7d']}\n\n"
+   284→        f"💬 **الرسائل:**\n"
+   285→        f"  • الإجمالي: {stats['total_messages']}\n"
+   286→        f"  • اليوم: {stats['messages_today']}\n\n"
+   287→        f"🤖 **النموذج:** {ai.get_provider_info()}\n"
+   288→        f"🔑 **كلمة السر:** `{JOIN_PASSWORD}`"
+   289→    )
+   290→
+   291→    keyboard = [
+   292→        [
+   293→            InlineKeyboardButton("👥 الموافق عليهم", callback_data="admin_approved"),
+   294→            InlineKeyboardButton("⏳ المنتظرون", callback_data="admin_pending")
+   295→        ],
+   296→        [
+   297→            InlineKeyboardButton("💬 آخر الرسائل", callback_data="admin_messages"),
+   298→            InlineKeyboardButton("📈 الإحصائيات", callback_data="admin_stats")
+   299→        ],
+   300→        [
+   301→            InlineKeyboardButton("🔍 بحث", callback_data="admin_search"),
+   302→            InlineKeyboardButton("📤 تصدير", callback_data="admin_export")
+   303→        ],
+   304→        [
+   305→            InlineKeyboardButton("🔑 تغيير كلمة السر", callback_data="admin_changepass"),
+   306→            InlineKeyboardButton("🚫 حظر/إلغاء", callback_data="admin_block_menu")
+   307→        ],
+   308→        [
+   309→            InlineKeyboardButton("📢 إرسال للجميع", callback_data="admin_broadcast_info"),
+   310→            InlineKeyboardButton("🔄 تغيير النموذج", callback_data="admin_model")
+   311→        ]
+   312→    ]
+   313→
+   314→    await update.message.reply_text(
+   315→        dashboard_text,
+   316→        parse_mode="Markdown",
+   317→        reply_markup=InlineKeyboardMarkup(keyboard)
+   318→    )
+   319→
+   320→
+   321→async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   322→    """معالجة أزرار لوحة التحكم"""
+   323→    query = update.callback_query
+   324→    await query.answer()
+   325→
+   326→    if not is_admin(query.from_user.id):
+   327→        await query.answer("❌ للمدير فقط", show_alert=True)
+   328→        return
+   329→
+   330→    data = query.data
+   331→
+   332→    if data == "admin_approved":
+   333→        await _show_approved_users(query)
+   334→    elif data == "admin_pending":
+   335→        await _show_pending_users(query)
+   336→    elif data == "admin_messages":
+   337→        await _show_recent_messages(query)
+   338→    elif data == "admin_stats":
+   339→        await _show_detailed_stats(query)
+   340→    elif data == "admin_search":
+   341→        await query.message.reply_text("🔍 استخدم: /search <كلمة مفتاحية>")
+   342→    elif data == "admin_export":
+   343→        await _export_data(query, context)
+   344→    elif data == "admin_changepass":
+   345→        await query.message.reply_text("🔑 استخدم: /setpass <كلمة_السر_الجديدة>")
+   346→    elif data == "admin_block_menu":
+   347→        await query.message.reply_text(
+   348→            "🚫 أوامر الحظر:\n"
+   349→            "/block <user_id> - حظر مستخدم\n"
+   350→            "/unblock <user_id> - إلغاء حظر\n"
+   351→            "/kick <user_id> - حذف مستخدم نهائياً"
+   352→        )
+   353→    elif data == "admin_broadcast_info":
+   354→        await query.message.reply_text("📢 استخدم: /broadcast <الرسالة>")
+   355→    elif data == "admin_model":
+   356→        await query.message.reply_text(
+   357→            "🔄 تغيير النموذج:\n"
+   358→            "/model groq\n"
+   359→            "/model google\n"
+   360→            "/model openrouter"
+   361→        )
+   362→    elif data.startswith("user_chat_"):
+   363→        user_id = int(data.replace("user_chat_", ""))
+   364→        await _show_user_chat(query, user_id)
+   365→    elif data.startswith("user_approve_"):
+   366→        user_id = int(data.replace("user_approve_", ""))
+   367→        db.approve_user(user_id)
+   368→        await query.message.reply_text(f"✅ تم الموافقة على المستخدم {user_id}")
+   369→    elif data.startswith("user_block_"):
+   370→        user_id = int(data.replace("user_block_", ""))
+   371→        db.block_user(user_id)
+   372→        await query.message.reply_text(f"🚫 تم حظر المستخدم {user_id}")
+   373→
+   374→
+   375→async def _show_approved_users(query):
+   376→    """عرض المستخدمين الموافق عليهم"""
+   377→    users = db.get_approved_users()
+   378→    if not users:
+   379→        await query.message.reply_text("❌ لا يوجد مستخدمين موافق عليهم بعد.")
+   380→        return
+   381→
+   382→    text = "✅ **المستخدمين الموافق عليهم:**\n━━━━━━━━━━━━━━━━━\n\n"
+   383→
+   384→    for i, u in enumerate(users[:20], 1):
+   385→        username = f"@{u['username']}" if u['username'] else "بدون معرف"
+   386→        text += (
+   387→            f"{i}. **{u['first_name']}** {username}\n"
+   388→            f"   ID: `{u['user_id']}` | الرسائل: {u['total_messages']}\n"
+   389→            f"   آخر نشاط: {u['last_active'][:16]}\n\n"
+   390→        )
+   391→
+   392→    if len(users) > 20:
+   393→        text += f"\n... و {len(users) - 20} آخرين"
+   394→
+   395→    keyboard = []
+   396→    for u in users[:5]:
+   397→        keyboard.append([
+   398→            InlineKeyboardButton(
+   399→                f"💬 {u['first_name']} ({u['total_messages']} رسالة)",
+   400→                callback_data=f"user_chat_{u['user_id']}"
+   401→            )
+   402→        ])
+   403→
+   404→    await query.message.reply_text(
+   405→        text, parse_mode="Markdown",
+   406→        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+   407→    )
+   408→
+   409→
+   410→async def _show_pending_users(query):
+   411→    """عرض المستخدمين في الانتظار"""
+   412→    users = db.get_pending_users()
+   413→    if not users:
+   414→        await query.message.reply_text("✅ لا يوجد مستخدمين في الانتظار.")
+   415→        return
+   416→
+   417→    text = "⏳ **مستخدمين في الانتظار:**\n━━━━━━━━━━━━━━━━━\n\n"
+   418→
+   419→    for i, u in enumerate(users, 1):
+   420→        username = f"@{u['username']}" if u['username'] else "بدون معرف"
+   421→        attempts = u.get('join_attempts', 0)
+   422→        text += (
+   423→            f"{i}. **{u['first_name']}** {username}\n"
+   424→            f"   ID: `{u['user_id']}` | محاولات: {attempts}\n\n"
+   425→        )
+   426→
+   427→    keyboard = []
+   428→    for u in users[:5]:
+   429→        keyboard.append([
+   430→            InlineKeyboardButton(
+   431→                f"✅ موافقة {u['first_name']}",
+   432→                callback_data=f"user_approve_{u['user_id']}"
+   433→            ),
+   434→            InlineKeyboardButton(
+   435→                f"🚫 حظر",
+   436→                callback_data=f"user_block_{u['user_id']}"
+   437→            )
+   438→        ])
+   439→
+   440→    await query.message.reply_text(
+   441→        text, parse_mode="Markdown",
+   442→        reply_markup=InlineKeyboardMarkup(keyboard)
+   443→    )
+   444→
+   445→
+   446→async def _show_user_chat(query, user_id: int):
+   447→    """عرض محادثة مستخدم"""
+   448→    messages = db.get_user_messages(user_id, limit=30)
+   449→    user = db.get_user(user_id)
+   450→
+   451→    if not messages:
+   452→        await query.message.reply_text("❌ لا توجد رسائل.")
+   453→        return
+   454→
+   455→    name = user['first_name'] if user else str(user_id)
+   456→    text = f"💬 **محادثة {name}:**\n━━━━━━━━━━━━━━━━━\n\n"
+   457→
+   458→    messages.reverse()
+   459→
+   460→    for msg in messages[:30]:
+   461→        role_icon = "👤" if msg['role'] == "user" else "🤖"
+   462→        role_name = "المستخدم" if msg['role'] == "user" else "البوت"
+   463→        content = msg['content'][:200]
+   464→        if len(msg['content']) > 200:
+   465→            content += "..."
+   466→        time = msg['timestamp'][:16]
+   467→        text += f"{role_icon} **{role_name}** ({time}):\n{content}\n\n"
+   468→
+   469→    if len(text) > 4096:
+   470→        parts = [text[i:i+4096] for i in range(0, len(text), 4096)]
+   471→        for part in parts:
+   472→            await query.message.reply_text(part, parse_mode="Markdown")
+   473→            await asyncio.sleep(0.5)
+   474→    else:
+   475→        await query.message.reply_text(text, parse_mode="Markdown")
+   476→
+   477→
+   478→async def _show_recent_messages(query):
+   479→    """عرض آخر الرسائل"""
+   480→    all_users = db.get_approved_users()
+   481→    messages_list = []
+   482→
+   483→    for u in all_users[:10]:
+   484→        user_msgs = db.get_user_messages(u['user_id'], limit=3)
+   485→        for m in user_msgs:
+   486→            m['first_name'] = u['first_name']
+   487→            m['username'] = u['username']
+   488→            messages_list.append(m)
+   489→
+   490→    messages_list.sort(key=lambda x: x['timestamp'], reverse=True)
+   491→    messages_list = messages_list[:20]
+   492→
+   493→    if not messages_list:
+   494→        await query.message.reply_text("❌ لا توجد رسائل بعد.")
+   495→        return
+   496→
+   497→    text = "💬 **آخر الرسائل:**\n━━━━━━━━━━━━━━━━━\n\n"
+   498→
+   499→    for msg in messages_list:
+   500→        role_icon = "👤" if msg['role'] == "user" else "🤖"
+   501→        name = msg.get('first_name', str(msg['user_id']))
+   502→        content = msg['content'][:150]
+   503→        if len(msg['content']) > 150:
+   504→            content += "..."
+   505→        time = msg['timestamp'][:16]
+   506→        text += f"{role_icon} **{name}** ({time}):\n{content}\n\n"
+   507→
+   508→    await query.message.reply_text(text, parse_mode="Markdown")
+   509→
+   510→
+   511→async def _show_detailed_stats(query):
+   512→    """عرض إحصائيات مفصلة"""
+   513→    stats = db.get_stats()
+   514→
+   515→    text = (
+   516→        f"📈 **إحصائيات مفصلة**\n"
+   517→        f"━━━━━━━━━━━━━━━━━\n\n"
+   518→        f"👥 **المستخدمين:**\n"
+   519→        f"  • الإجمالي: {stats['total_users']}\n"
+   520→        f"  • موافق عليهم: {stats['approved_users']}\n"
+   521→        f"  • في الانتظار: {stats['pending_users']}\n"
+   522→        f"  • نشطين (7 أيام): {stats['active_users_7d']}\n"
+   523→        f"  • جدد اليوم: {stats['new_users_today']}\n\n"
+   524→        f"💬 **الرسائل:**\n"
+   525→        f"  • الإجمالي: {stats['total_messages']}\n"
+   526→        f"  • اليوم: {stats['messages_today']}\n\n"
+   527→        f"🏆 **أكثر 5 نشاطاً:**\n"
+   528→    )
+   529→
+   530→    for i, u in enumerate(stats['top_users'], 1):
+   531→        username = f"@{u['username']}" if u['username'] else ""
+   532→        text += f"  {i}. {u['first_name']} {username} - {u['total_messages']} رسالة\n"
+   533→
+   534→    if stats['daily_messages']:
+   535→        text += "\n📅 **الرسائل باليوم:**\n"
+   536→        for d in stats['daily_messages']:
+   537→            text += f"  • {d['date']}: {d['count']} رسالة\n"
+   538→
+   539→    if stats['recent_join_attempts']:
+   540→        text += "\n🔐 **آخر محاولات الانضمام:**\n"
+   541→        for a in stats['recent_join_attempts'][:5]:
+   542→            user = db.get_user(a['user_id'])
+   543→            name = user['first_name'] if user else str(a['user_id'])
+   544→            pwd = a.get('password_tried', '')
+   545→            text += f"  • {name}: {'✅ نجح' if a['action'] == 'password_correct' else '❌ فشل'}"
+   546→            if pwd and a['action'] != 'password_correct':
+   547→                text += f" (جرّب: `{pwd}`)"
+   548→            text += "\n"
+   549→
+   550→    await query.message.reply_text(text, parse_mode="Markdown")
+   551→
+   552→
+   553→async def _export_data(query, context):
+   554→    """تصدير البيانات"""
+   555→    users_csv = db.export_users_csv()
+   556→    if users_csv:
+   557→        users_file = io.BytesIO(users_csv.encode('utf-8-sig'))
+   558→        users_file.name = f"users_{datetime.now().strftime('%Y%m%d')}.csv"
+   559→        await context.bot.send_document(
+   560→            chat_id=query.from_user.id,
+   561→            document=users_file,
+   562→            caption="📤 بيانات المستخدمين"
+   563→        )
+   564→
+   565→    messages_csv = db.export_messages_csv()
+   566→    if messages_csv:
+   567→        msgs_file = io.BytesIO(messages_csv.encode('utf-8-sig'))
+   568→        msgs_file.name = f"messages_{datetime.now().strftime('%Y%m%d')}.csv"
+   569→        await context.bot.send_document(
+   570→            chat_id=query.from_user.id,
+   571→            document=msgs_file,
+   572→            caption="📤 جميع الرسائل"
+   573→        )
+   574→
+   575→
+   576→# ============================
+   577→# أوامر المدير المباشرة
+   578→# ============================
+   579→
+   580→async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   581→    """/users - عرض كل المستخدمين"""
+   582→    if not is_admin(update.effective_user.id):
+   583→        await update.message.reply_text("❌ للمدير فقط.")
+   584→        return
+   585→
+   586→    users = db.get_all_users()
+   587→    if not users:
+   588→        await update.message.reply_text("❌ لا يوجد مستخدمين.")
+   589→        return
+   590→
+   591→    text = "👥 **جميع المستخدمين:**\n━━━━━━━━━━━━━━━━━\n\n"
+   592→
+   593→    for i, u in enumerate(users[:30], 1):
+   594→        username = f"@{u['username']}" if u['username'] else "بدون معرف"
+   595→        status = "✅" if u['is_approved'] else "⏳"
+   596→        blocked = " 🚫" if u['is_blocked'] else ""
+   597→        text += (
+   598→            f"{i}. {status} **{u['first_name']}** {username}{blocked}\n"
+   599→            f"   ID: `{u['user_id']}` | الرسائل: {u['total_messages']}\n\n"
+   600→        )
+   601→
+   602→    await update.message.reply_text(text, parse_mode="Markdown")
+   603→
+   604→
+   605→async def admin_userinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   606→    """/userinfo <id> - تفاصيل مستخدم"""
+   607→    if not is_admin(update.effective_user.id):
+   608→        return
+   609→
+   610→    if not context.args:
+   611→        await update.message.reply_text("استخدم: /userinfo <user_id>")
+   612→        return
+   613→
+   614→    try:
+   615→        user_id = int(context.args[0])
+   616→    except ValueError:
+   617→        await update.message.reply_text("❌ معرف غير صالح.")
+   618→        return
+   619→
+   620→    user = db.get_user(user_id)
+   621→    if not user:
+   622→        await update.message.reply_text("❌ المستخدم غير موجود.")
+   623→        return
+   624→
+   625→    msg_count = db.get_user_messages_count(user_id)
+   626→    username = f"@{user['username']}" if user['username'] else "بدون معرف"
+   627→    approved = "نعم ✅" if user['is_approved'] else "لا ⏳"
+   628→    blocked = "نعم 🚫" if user['is_blocked'] else "لا ✅"
+   629→
+   630→    text = (
+   631→        f"👤 **تفاصيل المستخدم**\n"
+   632→        f"━━━━━━━━━━━━━━━━━\n\n"
+   633→        f"📛 الاسم: {user['first_name']}\n"
+   634→        f"🆔 المعرف: `{user['user_id']}`\n"
+   635→        f"📎 اسم المستخدم: {username}\n"
+   636→        f"🌍 اللغة: {user['language_code'] or 'غير معروف'}\n"
+   637→        f"📅 أول ظهور: {user['first_seen']}\n"
+   638→        f"🕐 آخر نشاط: {user['last_active']}\n"
+   639→        f"💬 عدد الرسائل: {msg_count}\n"
+   640→        f"✅ موافق عليه: {approved}\n"
+   641→        f"🚫 محظور: {blocked}\n"
+   642→        f"🔑 محاولات الدخول: {user.get('join_attempts', 0)}\n"
+   643→    )
+   644→
+   645→    await update.message.reply_text(text, parse_mode="Markdown")
+   646→
+   647→
+   648→async def admin_chatlog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   649→    """/chatlog <id> - عرض محادثة مستخدم"""
+   650→    if not is_admin(update.effective_user.id):
+   651→        return
+   652→
+   653→    if not context.args:
+   654→        await update.message.reply_text("استخدم: /chatlog <user_id>")
+   655→        return
+   656→
+   657→    try:
+   658→        user_id = int(context.args[0])
+   659→    except ValueError:
+   660→        await update.message.reply_text("❌ معرف غير صالح.")
+   661→        return
+   662→
+   663→    messages = db.get_user_messages(user_id, limit=30)
+   664→    user = db.get_user(user_id)
+   665→
+   666→    if not messages:
+   667→        await update.message.reply_text("❌ لا توجد رسائل.")
+   668→        return
+   669→
+   670→    name = user['first_name'] if user else str(user_id)
+   671→    text = f"💬 **محادثة {name}:**\n━━━━━━━━━━━━━━━━━\n\n"
+   672→
+   673→    messages.reverse()
+   674→    for msg in messages[:30]:
+   675→        role_icon = "👤" if msg['role'] == "user" else "🤖"
+   676→        role_name = "المستخدم" if msg['role'] == "user" else "البوت"
+   677→        content = msg['content'][:200]
+   678→        if len(msg['content']) > 200:
+   679→            content += "..."
+   680→        time = msg['timestamp'][:16]
+   681→        text += f"{role_icon} **{role_name}** ({time}):\n{content}\n\n"
+   682→
+   683→    if len(text) > 4096:
+   684→        parts = [text[i:i+4096] for i in range(0, len(text), 4096)]
+   685→        for part in parts:
+   686→            await update.message.reply_text(part, parse_mode="Markdown")
+   687→            await asyncio.sleep(0.5)
+   688→    else:
+   689→        await update.message.reply_text(text, parse_mode="Markdown")
+   690→
+   691→
+   692→async def admin_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   693→    """/search <كلمة> - البحث في الرسائل"""
+   694→    if not is_admin(update.effective_user.id):
+   695→        return
+   696→
+   697→    if not context.args:
+   698→        await update.message.reply_text("استخدم: /search <كلمة مفتاحية>")
+   699→        return
+   700→
+   701→    keyword = " ".join(context.args)
+   702→    results = db.search_messages(keyword, limit=15)
+   703→
+   704→    if not results:
+   705→        await update.message.reply_text(f"❌ لا توجد نتائج لـ '{keyword}'")
+   706→        return
+   707→
+   708→    text = f"🔍 **نتائج البحث عن '{keyword}':**\n━━━━━━━━━━━━━━━━━\n\n"
+   709→
+   710→    for msg in results:
+   711→        role_icon = "👤" if msg['role'] == "user" else "🤖"
+   712→        name = msg.get('first_name', str(msg['user_id']))
+   713→        content = msg['content'][:150]
+   714→        if len(msg['content']) > 150:
+   715→            content += "..."
+   716→        time = msg['timestamp'][:16]
+   717→        text += f"{role_icon} **{name}** ({time}):\n{content}\n\n"
+   718→
+   719→    await update.message.reply_text(text, parse_mode="Markdown")
+   720→
+   721→
+   722→async def admin_block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   723→    """/block <id> - حظر مستخدم"""
+   724→    if not is_admin(update.effective_user.id):
+   725→        return
+   726→
+   727→    if not context.args:
+   728→        await update.message.reply_text("استخدم: /block <user_id>")
+   729→        return
+   730→
+   731→    try:
+   732→        user_id = int(context.args[0])
+   733→    except ValueError:
+   734→        await update.message.reply_text("❌ معرف غير صالح.")
+   735→        return
+   736→
+   737→    db.block_user(user_id)
+   738→    user = db.get_user(user_id)
+   739→    name = user['first_name'] if user else str(user_id)
+   740→    await update.message.reply_text(f"🚫 تم حظر {name} (ID: {user_id})")
+   741→
+   742→
+   743→async def admin_unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   744→    """/unblock <id> - إلغاء حظر"""
+   745→    if not is_admin(update.effective_user.id):
+   746→        return
+   747→
+   748→    if not context.args:
+   749→        await update.message.reply_text("استخدم: /unblock <user_id>")
+   750→        return
+   751→
+   752→    try:
+   753→        user_id = int(context.args[0])
+   754→    except ValueError:
+   755→        await update.message.reply_text("❌ معرف غير صالح.")
+   756→        return
+   757→
+   758→    db.unblock_user(user_id)
+   759→    user = db.get_user(user_id)
+   760→    name = user['first_name'] if user else str(user_id)
+   761→    await update.message.reply_text(f"✅ تم إلغاء حظر {name} (ID: {user_id})")
+   762→
+   763→
+   764→async def admin_kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   765→    """/kick <id> - حذف مستخدم نهائياً"""
+   766→    if not is_admin(update.effective_user.id):
+   767→        return
+   768→
+   769→    if not context.args:
+   770→        await update.message.reply_text("استخدم: /kick <user_id>")
+   771→        return
+   772→
+   773→    try:
+   774→        user_id = int(context.args[0])
+   775→    except ValueError:
+   776→        await update.message.reply_text("❌ معرف غير صالح.")
+   777→        return
+   778→
+   779→    if user_id in ADMIN_IDS:
+   780→        await update.message.reply_text("❌ لا يمكنك حذف نفسك!")
+   781→        return
+   782→
+   783→    user = db.get_user(user_id)
+   784→    name = user['first_name'] if user else str(user_id)
+   785→    db.remove_user(user_id)
+   786→    ai.clear_history(user_id)
+   787→    await update.message.reply_text(f"🗑️ تم حذف {name} (ID: {user_id}) نهائياً")
+   788→
+   789→
+   790→async def admin_setpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   791→    """/setpass <كلمة> - تغيير كلمة سر الانضمام"""
+   792→    if not is_admin(update.effective_user.id):
+   793→        return
+   794→
+   795→    if not context.args:
+   796→        await update.message.reply_text("استخدم: /setpass <كلمة_السر_الجديدة>")
+   797→        return
+   798→
+   799→    import config
+   800→    new_password = " ".join(context.args)
+   801→    config.JOIN_PASSWORD = new_password
+   802→    # تحديث في الذاكرة
+   803→    global JOIN_PASSWORD
+   804→    JOIN_PASSWORD = new_password
+   805→
+   806→    await update.message.reply_text(f"🔑 تم تغيير كلمة السر إلى: `{new_password}`", parse_mode="Markdown")
+   807→
+   808→
+   809→async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   810→    """/approve <id> - الموافقة على مستخدم يدوياً"""
+   811→    if not is_admin(update.effective_user.id):
+   812→        return
+   813→
+   814→    if not context.args:
+   815→        await update.message.reply_text("استخدم: /approve <user_id>")
+   816→        return
+   817→
+   818→    try:
+   819→        user_id = int(context.args[0])
+   820→    except ValueError:
+   821→        await update.message.reply_text("❌ معرف غير صالح.")
+   822→        return
+   823→
+   824→    db.approve_user(user_id)
+   825→    user = db.get_user(user_id)
+   826→    name = user['first_name'] if user else str(user_id)
+   827→    await update.message.reply_text(f"✅ تم الموافقة على {name} (ID: {user_id})")
+   828→
+   829→
+   830→async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   831→    """/stats - عرض الإحصائيات"""
+   832→    if not is_admin(update.effective_user.id):
+   833→        return
+   834→
+   835→    stats = db.get_stats()
+   836→
+   837→    text = (
+   838→        f"📈 **إحصائيات البوت**\n"
+   839→        f"━━━━━━━━━━━━━━━━━\n\n"
+   840→        f"👥 **المستخدمين:**\n"
+   841→        f"  • الإجمالي: {stats['total_users']}\n"
+   842→        f"  • موافق عليهم: {stats['approved_users']}\n"
+   843→        f"  • في الانتظار: {stats['pending_users']}\n"
+   844→        f"  • نشطين (7 أيام): {stats['active_users_7d']}\n\n"
+   845→        f"💬 **الرسائل:**\n"
+   846→        f"  • الإجمالي: {stats['total_messages']}\n"
+   847→        f"  • اليوم: {stats['messages_today']}\n\n"
+   848→        f"🤖 **النموذج:** {ai.get_provider_info()}\n"
+   849→        f"🔑 **كلمة السر:** `{JOIN_PASSWORD}`\n\n"
+   850→        f"🏆 **أكثر 5 نشاطاً:**\n"
+   851→    )
+   852→
+   853→    for i, u in enumerate(stats['top_users'], 1):
+   854→        username = f"@{u['username']}" if u['username'] else ""
+   855→        text += f"  {i}. {u['first_name']} {username} - {u['total_messages']} رسالة\n"
+   856→
+   857→    await update.message.reply_text(text, parse_mode="Markdown")
+   858→
+   859→
+   860→async def admin_broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   861→    """/broadcast <رسالة> - إرسال لجميع المستخدمين"""
+   862→    if not is_admin(update.effective_user.id):
+   863→        return
+   864→
+   865→    if not context.args:
+   866→        await update.message.reply_text("استخدم: /broadcast <الرسالة>")
+   867→        return
+   868→
+   869→    message = " ".join(context.args)
+   870→    users = db.get_approved_users()
+   871→
+   872→    sent = 0
+   873→    failed = 0
+   874→
+   875→    status_msg = await update.message.reply_text(
+   876→        f"📢 جاري الإرسال لـ {len(users)} مستخدم..."
+   877→    )
+   878→
+   879→    for u in users:
+   880→        if u['is_blocked'] or u['user_id'] in ADMIN_IDS:
+   881→            continue
+   882→        try:
+   883→            await context.bot.send_message(
+   884→                chat_id=u['user_id'],
+   885→                text=f"📢 **رسالة من المدير:**\n\n{message}",
+   886→                parse_mode="Markdown"
+   887→            )
+   888→            sent += 1
+   889→            await asyncio.sleep(0.05)
+   890→        except Exception:
+   891→            failed += 1
+   892→
+   893→    await status_msg.edit_text(
+   894→        f"📢 **تم الإرسال!**\n✅ نجح: {sent}\n❌ فشل: {failed}"
+   895→    )
+   896→
+   897→
+   898→async def admin_export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   899→    """/export - تصدير البيانات"""
+   900→    if not is_admin(update.effective_user.id):
+   901→        return
+   902→
+   903→    users_csv = db.export_users_csv()
+   904→    if users_csv:
+   905→        users_file = io.BytesIO(users_csv.encode('utf-8-sig'))
+   906→        users_file.name = f"users_{datetime.now().strftime('%Y%m%d')}.csv"
+   907→        await update.message.reply_document(document=users_file, caption="📤 المستخدمين")
+   908→
+   909→    messages_csv = db.export_messages_csv()
+   910→    if messages_csv:
+   911→        msgs_file = io.BytesIO(messages_csv.encode('utf-8-sig'))
+   912→        msgs_file.name = f"messages_{datetime.now().strftime('%Y%m%d')}.csv"
+   913→        await update.message.reply_document(document=msgs_file, caption="📤 الرسائل")
+   914→
+   915→
+   916→async def admin_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   917→    """/model - عرض/تغيير النموذج"""
+   918→    if not is_admin(update.effective_user.id):
+   919→        return
+   920→
+   921→    if not context.args:
+   922→        current = ai.get_provider_info()
+   923→        await update.message.reply_text(
+   924→            f"📋 **النموذج الحالي:**\n{current}\n\n"
+   925→            "للتغيير:\n/model groq\n/model google\n/model openrouter",
+   926→            parse_mode="Markdown"
+   927→        )
+   928→        return
+   929→
+   930→    new_provider = context.args[0].lower()
+   931→    if ai.set_provider(new_provider):
+   932→        await update.message.reply_text(f"✅ تم تغيير النموذج:\n{ai.get_provider_info()}")
+   933→    else:
+   934→        await update.message.reply_text("❌ مزود غير مدعوم.\nالمتاح: groq, google, openrouter")
+   935→
+   936→
+   937→async def admin_password_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   938→    """/password - عرض كلمة السر الحالية"""
+   939→    if not is_admin(update.effective_user.id):
+   940→        return
+   941→
+   942→    await update.message.reply_text(
+   943→        f"🔑 **كلمة سر الانضمام الحالية:** `{JOIN_PASSWORD}`\n\n"
+   944→        f"للتغيير: /setpass <كلمة_السر_الجديدة>",
+   945→        parse_mode="Markdown"
+   946→    )
+   947→
+   948→
+   949→# ============================
+   950→# معالجة الأخطاء
+   951→# ============================
+   952→
+   953→async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+   954→    """معالجة الأخطاء العامة"""
+   955→    logger.error(f"خطأ: {context.error}", exc_info=context.error)
+   956→    if update and hasattr(update, 'effective_message') and update.effective_message:
+   957→        await update.effective_message.reply_text(
+   958→            "⚠️ حدث خطأ غير متوقع. حاول مرة أخرى لاحقاً."
+   959→        )
+   960→
+   961→
+   962→# ============================
+   963→# التشغيل
+   964→# ============================
+   965→
+   966→def main():
+   967→    """تشغيل البوت"""
+   968→    if TELEGRAM_BOT_TOKEN == "ضع_مفتاح_البوت_هنا":
+   969→        print("❌ خطأ: لم يتم تعيين مفتاح بوت تيليجرام!")
+   970→        return
+   971→
+   972→    print("=" * 50)
+   973→    print("🤖 بوت تيليجرام الذكاء الاصطناعي - خاص")
+   974→    print(f"📡 المزود: {AI_PROVIDER}")
+   975→    print(f"📋 النموذج: {ai.get_provider_info()}")
+   976→    print(f"💾 قاعدة البيانات: {db.db_path}")
+   977→    print(f"👑 المدير: {ADMIN_IDS}")
+   978→    print(f"🔑 كلمة السر: {JOIN_PASSWORD}")
+   979→    print("=" * 50)
+   980→    print("جاري التشغيل... اضغط Ctrl+C للإيقاف")
+   981→
+   982→    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+   983→
+   984→    # أوامر المستخدمين
+   985→    app.add_handler(CommandHandler("start", start_command))
+   986→    app.add_handler(CommandHandler("help", help_command))
+   987→    app.add_handler(CommandHandler("clear", clear_command))
+   988→
+   989→    # أوامر المدير
+   990→    app.add_handler(CommandHandler("dashboard", admin_dashboard))
+   991→    app.add_handler(CommandHandler("users", admin_users_command))
+   992→    app.add_handler(CommandHandler("userinfo", admin_userinfo_command))
+   993→    app.add_handler(CommandHandler("chatlog", admin_chatlog_command))
+   994→    app.add_handler(CommandHandler("search", admin_search_command))
+   995→    app.add_handler(CommandHandler("stats", admin_stats_command))
+   996→    app.add_handler(CommandHandler("block", admin_block_command))
+   997→    app.add_handler(CommandHandler("unblock", admin_unblock_command))
+   998→    app.add_handler(CommandHandler("kick", admin_kick_command))
+   999→    app.add_handler(CommandHandler("approve", admin_approve_command))
+  1000→    app.add_handler(CommandHandler("setpass", admin_setpass_command))
+  1001→    app.add_handler(CommandHandler("password", admin_password_command))
+  1002→    app.add_handler(CommandHandler("broadcast", admin_broadcast_command))
+  1003→    app.add_handler(CommandHandler("export", admin_export_command))
+  1004→    app.add_handler(CommandHandler("model", admin_model_command))
+  1005→
+  1006→    # أزرار لوحة التحكم
+  1007→    app.add_handler(CallbackQueryHandler(admin_callback))
+  1008→
+  1009→    # الرسائل العادية (تمر بنظام كلمة السر)
+  1010→    app.add_handler(MessageHandler(
+  1011→        filters.TEXT & ~filters.COMMAND,
+  1012→        handle_password
+  1013→    ))
+  1014→
+  1015→    # معالج الأخطاء
+  1016→    app.add_error_handler(error_handler)
+  1017→
+  1018→    app.run_polling(allowed_updates=Update.ALL_TYPES)
+  1019→
+  1020→
+  1021→if __name__ == "__main__":
+  1022→    main()
+  1023→
