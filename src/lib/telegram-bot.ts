@@ -1,15 +1,16 @@
 /**
- * Telegram Bot Library - MoodChat (مود شات) - نظام هجين سريع
+ * Telegram Bot Library - MoodChat (مود شات) - نظام متكامل يعمل على Vercel
  * 
  * النظام:
- * 1. Webhook يستلم الرسالة ويحاول الرد مباشرة بالـ AI
- * 2. إذا فشل (مثل internal-api.z.ai غير متاح من Vercel)
- *    يحفظ الرسالة كـ "pending" للعامل المحلي
- * 3. العامل المحلي يستقصي كل 3 ثوانٍ ويرد عبر Z-AI
+ * 1. Webhook يستلم الرسالة ويعالجها بالكامل
+ * 2. المزود الرئيسي: z-ai-web-dev-sdk (chat.z.ai/api - نقطة نهاية عامة)
+ * 3. المزود الاحتياطي 1: Pollinations.ai (مجاني، بدون مفتاح API)
+ * 4. المزود الاحتياطي 2: internal-api.z.ai (للبيئة المحلية فقط)
+ * 5. إذا فشل الكل - يرسل رسالة خطأ ودية
  * 
  * هذا يضمن:
- * - استجابة فورية عندما تكون API متاحة
- * - استجابة ضمن 5-8 ثوانٍ عبر العامل كبديل
+ * - البوت يعمل 24/7 على Vercel
+ * - دائماً يرد على الرسائل
  * - لا رسائل تضيع أبداً
  */
 
@@ -26,7 +27,7 @@ const MAX_HISTORY = 20;
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم وتبدأ بالسلام. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
 
-// Z-AI Config
+// Z-AI internal API Config (for local environment)
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
 const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
@@ -36,6 +37,10 @@ const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
 // كاش ذاكري لإعدادات AI
 let aiConfigCache: { provider: string; baseUrl: string; apiKey: string; model: string; chatId?: string; userId?: string; token?: string; } | null = null;
 let aiConfigCacheTime = 0;
+
+// تتبع Rate Limiting
+let lastZaiCallTime = 0;
+const MIN_ZAI_CALL_INTERVAL = 2000; // 2 ثانية بين كل طلب
 
 async function getAIConfig() {
   if (aiConfigCache && Date.now() - aiConfigCacheTime < 300000) return aiConfigCache;
@@ -79,15 +84,93 @@ async function sendChatAction(chatId: number) {
 }
 
 // ============================
-// AI Providers - محاولة سريعة واحدة
+// AI Providers - نظام متعدد الطبقات
 // ============================
 
-export async function callZaiAPI(
+/**
+ * المزود 1: z-ai-web-dev-sdk (chat.z.ai/api - نقطة نهاية عامة)
+ * يعمل من أي مكان بما في ذلك Vercel
+ */
+async function callZaiSdkAPI(
+  messages: Array<{ role: string; content: string }>
+): Promise<string> {
+  // تنظيم معدل الطلبات
+  const now = Date.now();
+  const timeSinceLastCall = now - lastZaiCallTime;
+  if (timeSinceLastCall < MIN_ZAI_CALL_INTERVAL) {
+    await sleep(MIN_ZAI_CALL_INTERVAL - timeSinceLastCall);
+  }
+  lastZaiCallTime = Date.now();
+
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 30000); // 30 ثانية - وقت كافي
+
+  try {
+    // استيراد ديناميكي للـ SDK
+    const ZAI = (await import('z-ai-web-dev-sdk')).default;
+    const zai = await ZAI.create();
+
+    const formattedMessages = messages.map(m => ({
+      role: m.role as 'system' | 'user' | 'assistant',
+      content: m.content,
+    }));
+
+    const response = await zai.chat.completions.create({
+      messages: formattedMessages,
+      temperature: 0.7,
+      max_tokens: 800,
+      thinking: { type: 'disabled' },
+    });
+
+    const reply = response.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty Z-AI SDK response');
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * المزود 2: Pollinations.ai (مجاني، بدون مفتاح API)
+ */
+async function callPollinationsAPI(
+  messages: Array<{ role: string; content: string }>
+): Promise<string> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 25000);
+
+  try {
+    // Pollinations يأخذ رسائل OpenAI format
+    const response = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        model: 'openai',
+        messages,
+        temperature: 0.7,
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Pollinations ${response.status}`);
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty Pollinations response');
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * المزود 3: Internal Z-AI API (للبيئة المحلية فقط - لا يعمل من Vercel)
+ */
+async function callZaiInternalAPI(
   messages: Array<{ role: string; content: string }>,
   chatId?: string, userId?: string, token?: string
 ): Promise<string> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 5000); // 5 ثوان فقط - سريع أو فشل
+  const t = setTimeout(() => ctrl.abort(), 10000);
 
   try {
     const headers: Record<string, string> = {
@@ -102,12 +185,98 @@ export async function callZaiAPI(
       body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 800, thinking: { type: 'disabled' } }),
     });
 
-    if (!response.ok) throw new Error(`Z-AI ${response.status}`);
+    if (response.status === 429) throw new Error('Rate limited');
+    if (!response.ok) throw new Error(`Z-AI Internal ${response.status}`);
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content;
     if (reply?.trim()) return reply.trim();
     throw new Error('Empty response');
-  } finally { clearTimeout(t); }
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * دالة موحدة لاستدعاء AI مع نظام احتياطي متعدد الطبقات
+ * تحاول كل مزود بالترتيب حتى تنجح
+ */
+async function getAIResponse(
+  messages: Array<{ role: string; content: string }>,
+  config: { provider: string; chatId?: string; userId?: string; token?: string; baseUrl?: string; apiKey?: string; model?: string }
+): Promise<{ reply: string; provider: string }> {
+  const errors: string[] = [];
+
+  // الطبقة 1: z-ai-web-dev-sdk (المزود الرئيسي - يعمل من Vercel)
+  try {
+    console.log('[AI] Trying Z-AI SDK (chat.z.ai/api)...');
+    const reply = await callZaiSdkAPI(messages);
+    console.log('[AI] Z-AI SDK succeeded');
+    return { reply, provider: 'z-ai-sdk' };
+  } catch (err: any) {
+    errors.push(`Z-AI SDK: ${err?.message || 'failed'}`);
+    console.log(`[AI] Z-AI SDK failed: ${err?.message}`);
+  }
+
+  // الطبقة 2: Pollinations.ai
+  try {
+    console.log('[AI] Trying Pollinations.ai...');
+    const reply = await callPollinationsAPI(messages);
+    console.log('[AI] Pollinations succeeded');
+    return { reply, provider: 'pollinations' };
+  } catch (err: any) {
+    errors.push(`Pollinations: ${err?.message || 'failed'}`);
+    console.log(`[AI] Pollinations failed: ${err?.message}`);
+  }
+
+  // الطبقة 3: Internal Z-AI API (قد لا يعمل من Vercel)
+  try {
+    console.log('[AI] Trying Z-AI Internal API...');
+    const reply = await callZaiInternalAPI(messages, config.chatId, config.userId, config.token);
+    console.log('[AI] Z-AI Internal succeeded');
+    return { reply, provider: 'z-ai-internal' };
+  } catch (err: any) {
+    errors.push(`Z-AI Internal: ${err?.message || 'failed'}`);
+    console.log(`[AI] Z-AI Internal failed: ${err?.message}`);
+  }
+
+  // الطبقة 4: Custom API (إذا تم تكوينه)
+  if (config.provider === 'api' && config.baseUrl && config.apiKey) {
+    try {
+      console.log('[AI] Trying Custom API...');
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 15000);
+      const response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          model: config.model || 'gpt-4',
+          messages,
+          temperature: 0.7,
+          max_tokens: 800,
+        }),
+      });
+      clearTimeout(t);
+      if (!response.ok) throw new Error(`Custom API ${response.status}`);
+      const data = await response.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply?.trim()) {
+        console.log('[AI] Custom API succeeded');
+        return { reply: reply.trim(), provider: 'custom-api' };
+      }
+      throw new Error('Empty Custom API response');
+    } catch (err: any) {
+      errors.push(`Custom API: ${err?.message || 'failed'}`);
+      console.log(`[AI] Custom API failed: ${err?.message}`);
+    }
+  }
+
+  // فشل كل المزودين
+  console.error('[AI] All providers failed:', errors);
+  throw new Error(`All AI providers failed: ${errors.join(' | ')}`);
 }
 
 // ============================
@@ -198,6 +367,7 @@ export async function handleTelegramUpdate(update: {
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
       if (text === '/users') { await handleUsersCommand(chatId); return { ok: true }; }
       if (text.startsWith('/chatlog')) { await handleChatLogCommand(chatId, text); return { ok: true }; }
+      if (text === '/aistatus') { await handleAIStatusCommand(chatId); return { ok: true }; }
       if (text.startsWith('/block ')) {
         const tid = parseInt(text.split(' ')[1]);
         if (tid && tid !== userId) { await db.telegramUser.update({ where: { userId: tid }, data: { isBlocked: true, waitingForPassword: false } }); await sendMessage(chatId, `تم حظر \`${tid}\``); }
@@ -216,7 +386,7 @@ export async function handleTelegramUpdate(update: {
       if (text.startsWith('/broadcast ')) {
         const users = await db.telegramUser.findMany({ where: { isApproved: true, isBlocked: false } });
         let sent = 0;
-        for (const u of users) { try { await sendMessage(u.userId, `📢 ${text.replace('/broadcast ', '')}`); sent++; } catch {} }
+        for (const u of users) { try { await sendMessage(u.userId, `${text.replace('/broadcast ', '')}`); sent++; } catch {} }
         await sendMessage(chatId, `تم الإرسال إلى ${sent} من ${users.length}.`);
         return { ok: true };
       }
@@ -229,56 +399,100 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ============================
-    // محادثة عادية - نظام هجين سريع
+    // محادثة عادية - معالجة كاملة
     // ============================
 
-    // حفظ رسالة المستخدم كـ pending (للعامل كبديل)
-    const userMsg = await db.message.create({
-      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
+    // إظهار حالة الكتابة
+    await sendChatAction(chatId);
+
+    // حفظ رسالة المستخدم
+    await db.message.create({
+      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
     });
 
-    // محاولة سريعة للرد المباشر (5 ثوان كحد أقصى)
+    // جلب سجل المحادثة والإعدادات
+    const [dbMessages, config] = await Promise.all([
+      db.message.findMany({ where: { userId, status: 'done' }, orderBy: { timestamp: 'asc' }, take: MAX_HISTORY, select: { role: true, content: true } }),
+      getAIConfig(),
+    ]);
+
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+    ];
+
+    // محاولة الحصول على رد AI
     try {
-      await sendChatAction(chatId);
+      const { reply, provider } = await getAIResponse(messages, config);
 
-      const [dbMessages, config] = await Promise.all([
-        db.message.findMany({ where: { userId, status: 'done' }, orderBy: { timestamp: 'asc' }, take: MAX_HISTORY, select: { role: true, content: true } }),
-        getAIConfig(),
-      ]);
+      // حفظ رد AI
+      await db.message.create({
+        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
+      });
 
-      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        { role: 'user', content: text },
-      ];
-
-      let aiReply: string | null = null;
-
-      // محاولة Z-AI سريعة (5 ثوان)
-      if (config.provider === 'zsdk') {
-        try { aiReply = await callZaiAPI(messages, config.chatId, config.userId, config.token); } catch {}
-      }
-
-      if (aiReply) {
-        // نجح الرد المباشر!
-        await db.message.update({ where: { id: userMsg.id }, data: { status: 'done' } });
-        await db.message.create({ data: { userId, role: 'assistant', content: aiReply, modelUsed: 'moodchat-z-ai', status: 'done', chatId } });
-        const clean = sanitizeMarkdown(aiReply);
-        await sendMessage(chatId, clean);
-        return { ok: true };
-      }
-    } catch {
-      // فشل الرد المباشر - الرسالة تبقى pending
+      const clean = sanitizeMarkdown(reply);
+      await sendMessage(chatId, clean);
+    } catch (aiError) {
+      // فشل كل المزودين - إرسال رسالة خطأ ودية
+      console.error('[Bot] All AI providers failed:', aiError);
+      await db.message.create({
+        data: {
+          userId, role: 'assistant',
+          content: '[فشل في الحصول على رد AI]',
+          modelUsed: 'moodchat-failed', status: 'failed', chatId,
+        },
+      });
+      await sendMessage(chatId, "عذراً، لم أتمكن من الرد حالياً بسبب ضغط على الخوادم. يرجى المحاولة مرة أخرى بعد قليل.");
     }
 
-    // الرسالة معلقة - العامل المحلي سيعالجها
-    console.log('[Webhook] Message saved as pending for worker');
     return { ok: true };
 
   } catch (error) {
     console.error('[Webhook] Error:', error);
     return { ok: false, error: String(error) };
   }
+}
+
+// ============================
+// أوامر المدير - حالة AI
+// ============================
+
+async function handleAIStatusCommand(chatId: number) {
+  const config = await getAIConfig();
+  let status = "**حالة مزودي AI:**\n\n";
+
+  // اختبار Z-AI SDK
+  try {
+    const start = Date.now();
+    await callZaiSdkAPI([{ role: 'user', content: 'مرحبا' }]);
+    const ms = Date.now() - start;
+    status += `Z-AI SDK: يعمل (${ms}ms)\n`;
+  } catch (err: any) {
+    status += `Z-AI SDK: غير متاح (${err?.message || 'خطأ'})\n`;
+  }
+
+  // اختبار Pollinations
+  try {
+    const start = Date.now();
+    await callPollinationsAPI([{ role: 'user', content: 'مرحبا' }]);
+    const ms = Date.now() - start;
+    status += `Pollinations: يعمل (${ms}ms)\n`;
+  } catch (err: any) {
+    status += `Pollinations: غير متاح (${err?.message || 'خطأ'})\n`;
+  }
+
+  // اختبار Z-AI Internal
+  try {
+    const start = Date.now();
+    await callZaiInternalAPI([{ role: 'user', content: 'مرحبا' }], config.chatId, config.userId, config.token);
+    const ms = Date.now() - start;
+    status += `Z-AI Internal: يعمل (${ms}ms)\n`;
+  } catch (err: any) {
+    status += `Z-AI Internal: غير متاح\n`;
+  }
+
+  status += `\nالمزود النشط: ${config.provider === 'zsdk' ? 'Z-AI (GLM-4 Plus)' : config.model}`;
+  await sendMessage(chatId, status);
 }
 
 // ============================
@@ -289,7 +503,14 @@ function sanitizeMarkdown(text: string): string {
   let c = text.replace(/^#{1,3}\s+(.+)$/gm, '*$1*');
   if (((c.match(/\*\*/g) || []).length) % 2 !== 0) c = c.replace(/\*\*([^*]*)$/, '*$1*');
   if (((c.match(/`/g) || []).length) % 2 !== 0) c += '`';
+  // إزالة الرموز غير المدعومة في Telegram Markdown
+  c = c.replace(/~~/g, ''); // لا يدعم strikethrough
+  c = c.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // تحويل الروابط إلى نص عادي
   return c;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function handleDashboardCommand(chatId: number) {
@@ -334,3 +555,6 @@ export async function deleteWebhook() { return telegramAPI('deleteWebhook', {});
 export async function getJoinPassword(): Promise<string> {
   try { const c = await db.botConfig.findUnique({ where: { key: 'join_password' } }); return c?.value || JOIN_PASSWORD; } catch { return JOIN_PASSWORD; }
 }
+
+// تصدير دالة callZaiAPI للاستخدام الخارجي
+export { callZaiInternalAPI as callZaiAPI };
