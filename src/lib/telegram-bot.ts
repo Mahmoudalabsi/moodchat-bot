@@ -15,7 +15,11 @@ import { db } from './db';
 // الإعدادات
 // ============================
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+// استخدام التوكن الجديد دائماً - حتى لو كان env var قديم
+const NEW_BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const OLD_BOT_TOKEN = '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
+const envToken = process.env.TELEGRAM_BOT_TOKEN || '';
+const BOT_TOKEN = (envToken === OLD_BOT_TOKEN || !envToken) ? NEW_BOT_TOKEN : envToken;
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
