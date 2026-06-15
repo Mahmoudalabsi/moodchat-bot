@@ -624,10 +624,13 @@ export async function handleTelegramUpdate(update: {
     // 2) معالجة الصور - أولوية قصوى للمستخدم المفعل
     // ==========================================
     if (hasPhoto && !user.isBlocked && (user.isApproved || isAdm)) {
+      console.log(`[Bot] 📸 IMAGE received from user ${userId} - processing...`);
       const userLang = await getUserLang(userId);
       const photoArray = message.photo!;
       const bestPhoto = photoArray[photoArray.length - 1];
       const caption = message.caption?.trim() || '';
+
+      console.log(`[Bot] Image: fileId=${bestPhoto.file_id}, size=${bestPhoto.file_size}, caption="${caption.substring(0, 50)}"`);
 
       await sendChatAction(chatId);
 
@@ -919,10 +922,10 @@ export async function handleTelegramUpdate(update: {
     return { ok: true };
 
   } catch (error) {
-    console.error('[Webhook] Error:', error);
+    console.error('[Webhook] CRITICAL Error:', error?. instanceof Error ? `${error.message}\n${error.stack}` : String(error));
     try {
       if (update.message?.chat?.id) {
-        await sendMessage(update.message.chat.id, "عذراً، حدث خطأ. حاول مرة أخرى.");
+        await sendMessage(update.message.chat.id, "عذراً، حدث خطأ أثناء المعالجة. حاول مرة أخرى.");
       }
     } catch {}
     return { ok: false, error: String(error) };
