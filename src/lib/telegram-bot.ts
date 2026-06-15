@@ -1,8 +1,9 @@
 /**
  * Telegram Bot Library - Webhook Mode for Vercel
- * يعمل كـ webhook على Vercel Serverless
- * يستخدم Z-AI API مباشرة (مجاني 100%)
- * كلمة المرور + ذاكرة المحادثة في قاعدة البيانات
+ * كلمة المرور: MOOD2026
+ * تحية إسلامية عند التحقق
+ * ذاكرة محادثة كاملة (RAG) لكل مستخدم
+ * نظام AI: Z-AI SDK (افتراضي) أو API Token
  */
 
 import { db } from './db';
@@ -13,20 +14,17 @@ import { db } from './db';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
-const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'ai2024';
-const MAX_HISTORY = 30;
+const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
+const MAX_HISTORY = 50;
 
-const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
+const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم وتبدأ بالسلام. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
 
-// Z-AI API Config
+// Z-AI API Config (الافتراضي - الأفضل)
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
 const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
 const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
-
-// Optional: Gemini API key (free at https://aistudio.google.com/apikey)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
 // ============================
 // Telegram API Helpers
@@ -56,11 +54,59 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
 }
 
 // ============================
-// AI Chat - Multi-provider with fallback
+// AI Chat - Dynamic provider selection
 // ============================
 
+async function getAIConfig(): Promise<{
+  provider: 'zsdk' | 'api';
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  chatId?: string;
+  userId?: string;
+  token?: string;
+}> {
+  // اقرأ الإعدادات من قاعدة البيانات أولاً
+  try {
+    const providerConfig = await db.botConfig.findUnique({ where: { key: 'ai_provider' } });
+    const provider = providerConfig?.value || 'zsdk';
+
+    if (provider === 'api') {
+      const baseUrl = (await db.botConfig.findUnique({ where: { key: 'api_base_url' } }))?.value || '';
+      const apiKey = (await db.botConfig.findUnique({ where: { key: 'api_key' } }))?.value || '';
+      const model = (await db.botConfig.findUnique({ where: { key: 'api_model' } }))?.value || 'gpt-4';
+      return { provider: 'api', baseUrl, apiKey, model };
+    }
+
+    // Z-AI SDK (الافتراضي)
+    const chatId = (await db.botConfig.findUnique({ where: { key: 'zai_chat_id' } }))?.value || ZAI_CHAT_ID;
+    const userId = (await db.botConfig.findUnique({ where: { key: 'zai_user_id' } }))?.value || ZAI_USER_ID;
+    const token = (await db.botConfig.findUnique({ where: { key: 'zai_token' } }))?.value || ZAI_TOKEN;
+    return {
+      provider: 'zsdk',
+      baseUrl: ZAI_BASE_URL,
+      apiKey: ZAI_API_KEY,
+      model: 'glm-4-plus',
+      chatId,
+      userId,
+      token,
+    };
+  } catch {
+    // fallback
+    return {
+      provider: 'zsdk',
+      baseUrl: ZAI_BASE_URL,
+      apiKey: ZAI_API_KEY,
+      model: 'glm-4-plus',
+      chatId: ZAI_CHAT_ID,
+      userId: ZAI_USER_ID,
+      token: ZAI_TOKEN,
+    };
+  }
+}
+
 async function chatWithAI(userId: number, userMessage: string): Promise<string> {
-  // بناء سجل المحادثة من قاعدة البيانات
+  // بناء سجل المحادثة الكامل من قاعدة البيانات (RAG - ذاكرة كاملة)
   const dbMessages = await db.message.findMany({
     where: { userId },
     orderBy: { timestamp: 'asc' },
@@ -82,45 +128,31 @@ async function chatWithAI(userId: number, userMessage: string): Promise<string> 
   // إضافة الرسالة الحالية
   messages.push({ role: 'user', content: userMessage });
 
-  // محاولة مع مزود AI مختلف
-  const errors: string[] = [];
+  const config = await getAIConfig();
 
-  // 1. محاولة مع Gemini (الأفضل - مجاني وموثوق)
-  if (GEMINI_API_KEY) {
-    try {
-      return await callGeminiAPI(messages);
-    } catch (e) {
-      errors.push(`Gemini: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  if (config.provider === 'api' && config.baseUrl && config.apiKey) {
+    return await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
   }
 
-  // 2. محاولة مع Z-AI (يعمل من بيئة Z.ai المحلية فقط)
-  try {
-    return await callZaiAPI(messages);
-  } catch (e) {
-    errors.push(`Z-AI: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // 3. محاولة مع Pollinations.ai (مجاني، بدون مفتاح - قد يكون بطيء)
-  try {
-    return await callPollinationsAPI(messages);
-  } catch (e) {
-    errors.push(`Pollinations: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  throw new Error(`All AI providers failed: ${errors.join(' | ')}`);
+  // Z-AI SDK (الافتراضي)
+  return await callZaiAPI(messages, config.chatId, config.userId, config.token);
 }
 
-async function callZaiAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+async function callZaiAPI(
+  messages: Array<{ role: string; content: string }>,
+  chatId?: string,
+  userId?: string,
+  token?: string
+): Promise<string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
     'X-Z-AI-From': 'Z',
   };
 
-  if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
-  if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
-  if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
+  if (chatId) headers['X-Chat-Id'] = chatId;
+  if (userId) headers['X-User-Id'] = userId;
+  if (token) headers['X-Token'] = token;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -152,75 +184,40 @@ async function callZaiAPI(messages: Array<{ role: string; content: string }>): P
   }
 }
 
-async function callPollinationsAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+async function callCustomAPI(
+  messages: Array<{ role: string; content: string }>,
+  baseUrl: string,
+  apiKey: string,
+  model: string
+): Promise<string> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
   try {
-    const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
       signal: controller.signal,
       body: JSON.stringify({
         messages,
-        model: 'openai',
+        model,
         temperature: 0.7,
+        max_tokens: 2048,
       }),
     });
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(`Pollinations ${response.status}: ${errorBody.substring(0, 200)}`);
+      throw new Error(`API ${response.status}: ${errorBody.substring(0, 200)}`);
     }
 
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content;
     if (reply && reply.trim()) return reply.trim();
-    throw new Error('Empty Pollinations response');
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function callGeminiAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-
-  try {
-    // تحويل لصيغة Gemini API
-    const contents = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      }));
-
-    const systemInstruction = messages.find(m => m.role === 'system');
-
-    const body: Record<string, unknown> = { contents };
-    if (systemInstruction) {
-      body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
-    }
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify(body),
-      }
-    );
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Gemini ${response.status}: ${errorBody.substring(0, 200)}`);
-    }
-
-    const data = await response.json();
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (reply && reply.trim()) return reply.trim();
-    throw new Error('Empty Gemini response');
+    throw new Error('Empty API response');
   } finally {
     clearTimeout(timeout);
   }
@@ -252,7 +249,6 @@ async function getOrCreateUser(telegramUser: {
         languageCode: telegramUser.language_code || null,
         isBot: telegramUser.is_bot || false,
         totalMessages: 1,
-        // المدير يدخل مباشرة بدون كلمة سر
         isApproved: isAdmin(telegramUser.id),
         approvedAt: isAdmin(telegramUser.id) ? new Date() : null,
       },
@@ -306,7 +302,6 @@ export async function handleTelegramUpdate(update: {
   };
 }) {
   try {
-    // Handle callback queries
     if (update.callback_query) {
       await telegramAPI('answerCallbackQuery', {
         callback_query_id: update.callback_query.id,
@@ -321,16 +316,12 @@ export async function handleTelegramUpdate(update: {
     const chatId = message.chat.id;
     const text = message.text.trim();
 
-    console.log(`📩 [${message.from.first_name || '?'}] ${text.substring(0, 80)}`);
-
-    // Register/update user
     const user = await getOrCreateUser(message.from);
 
     // ============================
-    // نظام كلمة المرور - مخزن في قاعدة البيانات
+    // نظام كلمة المرور
     // ============================
 
-    // إذا المستخدم ينتظر كلمة المرور
     if (user.waitingForPassword && !isAdmin(userId)) {
       const currentPassword = await getJoinPassword();
       if (text === currentPassword) {
@@ -346,10 +337,14 @@ export async function handleTelegramUpdate(update: {
           data: { userId, action: 'success' },
         });
         await sendMessage(chatId,
-          "✅ **تم التحقق بنجاح!**\n\n"
-          + "مرحباً بك في البوت! 🎉\n"
-          + "الآن يمكنك محادثتي بحرية.\n\n"
-          + "استخدم /help لمعرفة الأوامر المتاحة."
+          "السلام عليكم ورحمة الله وبركاته 🌙\n\n"
+          + "أهلاً وسهلاً بك في بوت **مود شات**! 🤖\n\n"
+          + "✨ **المميزات:**\n"
+          + "🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n"
+          + "🌍 متعدد اللغات - أتحدث أي لغة\n"
+          + "💬 محادثة طبيعية - أجيب بوضوح ودقة\n"
+          + "🔐 خصوصية تامة - محادثاتك محمية\n\n"
+          + "ابدأ محادثتك الآن! 👋"
         );
       } else {
         await db.telegramUser.update({
@@ -359,10 +354,7 @@ export async function handleTelegramUpdate(update: {
         await db.joinLog.create({
           data: { userId, action: 'fail', passwordTried: text.substring(0, 50) },
         });
-        await sendMessage(chatId,
-          "❌ **كلمة السر خاطئة!**\n\n"
-          + "حاول مرة أخرى أو تواصل مع مالك البوت للحصول على كلمة السر."
-        );
+        await sendMessage(chatId, "❌ كلمة المرور خاطئة!\n\nحاول مرة أخرى.");
       }
       return { ok: true };
     }
@@ -374,16 +366,17 @@ export async function handleTelegramUpdate(update: {
     if (text === '/start') {
       if (isAdmin(userId) || user.isApproved) {
         await sendMessage(chatId,
-          "مرحباً! 👋 أنا بوت **مود شات** للذكاء الاصطناعي\n"
-          + "يمكنك محادثتي بأي لغة وأنا سأرد عليك!\n"
-          + "سأتذكر كل ما تقوله في محادثتنا 💬\n\n"
-          + "الأوامر المتاحة:\n"
-          + "/start - بدء المحادثة\n"
-          + "/clear - مسح سجل المحادثة\n"
+          "السلام عليكم ورحمة الله وبركاته 🌙\n\n"
+          + "أهلاً بك في بوت **مود شات**! 🤖\n\n"
+          + "✨ **المميزات:**\n"
+          + "🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n"
+          + "🌍 متعدد اللغات - أتحدث أي لغة\n"
+          + "💬 محادثة طبيعية - أجيب بوضوح ودقة\n"
+          + "🔐 خصوصية تامة - محادثاتك محمية\n\n"
+          + "/clear - مسح الذاكرة والبدء من جديد\n"
           + "/help - عرض المساعدة"
         );
       } else {
-        // المستخدم جديد - يطلب كلمة سر
         await db.telegramUser.update({
           where: { userId },
           data: { waitingForPassword: true },
@@ -392,9 +385,8 @@ export async function handleTelegramUpdate(update: {
           data: { userId, action: 'attempt' },
         });
         await sendMessage(chatId,
-          "🔐 **هذا البوت خاص ومحمي بكلمة سر!**\n\n"
-          + "للاستخدام، أرسل كلمة السر أدناه:\n"
-          + "(إذا لم تكن تعرف كلمة السر، تواصل مع مالك البوت)"
+          "🔐 **هذا البوت خاص ومحمي بكلمة مرور!**\n\n"
+          + "للاستخدام، أرسل كلمة المرور أدناه:"
         );
       }
       return { ok: true };
@@ -405,7 +397,6 @@ export async function handleTelegramUpdate(update: {
     // ============================
 
     if (!user.isApproved || user.isBlocked) {
-      // إذا غير موافق عليه، يطلب كلمة سر
       if (!user.isApproved && !user.waitingForPassword) {
         await db.telegramUser.update({
           where: { userId },
@@ -415,7 +406,7 @@ export async function handleTelegramUpdate(update: {
       if (user.isBlocked) {
         await sendMessage(chatId, "🚫 تم حظرك من استخدام هذا البوت.");
       } else {
-        await sendMessage(chatId, "🔐 أرسل كلمة السر للاستخدام.");
+        await sendMessage(chatId, "🔐 أرسل كلمة المرور للاستخدام.");
       }
       return { ok: true };
     }
@@ -425,43 +416,29 @@ export async function handleTelegramUpdate(update: {
     // ============================
 
     if (text === '/help') {
-      let helpText = "🤖 **مساعدة مود شات**\n\n"
+      await sendMessage(chatId,
+        "🤖 **مود شات - المساعدة**\n\n"
+        + "✨ **المميزات:**\n"
+        + "🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n"
+        + "🌍 متعدد اللغات - أتحدث أي لغة\n"
+        + "💬 محادثة طبيعية - أجيب بوضوح ودقة\n"
+        + "🔐 خصوصية تامة - محادثاتك محمية\n\n"
         + "📌 **الأوامر:**\n"
-        + "/start - بدء محادثة جديدة\n"
-        + "/clear - مسح سجل المحادثة والذاكرة\n"
-        + "/help - عرض هذه الرسالة\n\n"
-        + "💡 **مميزات:**\n"
-        + "- أتحدث أي لغة\n"
-        + "- أتذكر كل ما تقوله في المحادثة\n"
-        + "- استخدم /clear لمسح ذاكرتي والبدء من جديد";
-
-      if (isAdmin(userId)) {
-        helpText += "\n\n👑 **أوامر المدير:**\n"
-          + "/stats - إحصائيات البوت\n"
-          + "/users - قائمة المستخدمين\n"
-          + "/chatlog [ID] - قراءة محادثة مستخدم\n"
-          + "/block [ID] - حظر مستخدم\n"
-          + "/unblock [ID] - إلغاء حظر\n"
-          + "/kick [ID] - حذف مستخدم نهائياً\n"
-          + "/broadcast [رسالة] - إرسال للجميع\n"
-          + "/setpass [كلمة] - تغيير كلمة السر";
-      }
-
-      await sendMessage(chatId, helpText);
+        + "/start - بدء المحادثة\n"
+        + "/clear - مسح الذاكرة والبدء من جديد\n"
+        + "/help - عرض المساعدة"
+      );
       return { ok: true };
     }
 
     if (text === '/clear') {
       await db.message.deleteMany({ where: { userId } });
-      await sendMessage(chatId,
-        "🗑️ **تم مسح سجل محادثتك وذاكرتي.**\n\n"
-        + "يمكنك البدء بمحادثة جديدة الآن!"
-      );
+      await sendMessage(chatId, "🗑️ تم مسح سجل محادثتك وذاكرتي.\n\nيمكنك البدء بمحادثة جديدة الآن!");
       return { ok: true };
     }
 
     // ============================
-    // أوامر المدير
+    // أوامر المدير (تعمل بصمت)
     // ============================
 
     if (isAdmin(userId)) {
@@ -505,7 +482,7 @@ export async function handleTelegramUpdate(update: {
           await db.message.deleteMany({ where: { userId: targetId } });
           await db.joinLog.deleteMany({ where: { userId: targetId } });
           await db.telegramUser.delete({ where: { userId: targetId } });
-          await sendMessage(chatId, `🗑️ تم حذف المستخدم \`${targetId}\` وجميع بياناته`);
+          await sendMessage(chatId, `🗑️ تم حذف المستخدم \`${targetId}\``);
         }
         return { ok: true };
       }
@@ -517,37 +494,33 @@ export async function handleTelegramUpdate(update: {
       if (text.startsWith('/setpass ')) {
         const newPass = text.replace('/setpass ', '').trim();
         if (newPass.length >= 3) {
-          // Update the JOIN_PASSWORD in BotConfig
           await db.botConfig.upsert({
             where: { key: 'join_password' },
             update: { value: newPass },
             create: { key: 'join_password', value: newPass },
           });
-          await sendMessage(chatId, `🔑 تم تغيير كلمة السر إلى: \`${newPass}\``);
+          await sendMessage(chatId, `🔑 تم تغيير كلمة المرور`);
         } else {
-          await sendMessage(chatId, "❌ كلمة السر يجب أن تكون 3 أحرف على الأقل");
+          await sendMessage(chatId, "❌ كلمة المرور يجب أن تكون 3 أحرف على الأقل");
         }
         return { ok: true };
       }
     }
 
     // ============================
-    // محادثة عادية مع الذكاء الاصطناعي
+    // محادثة عادية مع الذكاء الاصطناعي (مع ذاكرة كاملة)
     // ============================
 
     await sendChatAction(chatId);
 
-    // حفظ رسالة المستخدم في قاعدة البيانات
     await db.message.create({
-      data: { userId, role: 'user', content: text, modelUsed: 'zai-glm4' },
+      data: { userId, role: 'user', content: text, modelUsed: 'moodchat' },
     });
 
-    // الحصول على رد من الذكاء الاصطناعي (مع ذاكرة كاملة)
     const aiReply = await chatWithAI(userId, text);
 
-    // حفظ رد المساعد
     await db.message.create({
-      data: { userId, role: 'assistant', content: aiReply, modelUsed: 'zai-glm4' },
+      data: { userId, role: 'assistant', content: aiReply, modelUsed: 'moodchat' },
     });
 
     await sendMessage(chatId, aiReply);
@@ -567,7 +540,6 @@ async function handleDashboardCommand(chatId: number) {
   const totalUsers = await db.telegramUser.count();
   const approvedUsers = await db.telegramUser.count({ where: { isApproved: true } });
   const blockedUsers = await db.telegramUser.count({ where: { isBlocked: true } });
-  const pendingUsers = await db.telegramUser.count({ where: { isApproved: false, isBlocked: false } });
   const totalMessages = await db.message.count();
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -578,19 +550,19 @@ async function handleDashboardCommand(chatId: number) {
     where: { firstSeen: { gte: today } },
   });
 
-  const stats = [
-    `📊 **لوحة تحكم مود شات**\n`,
-    `👥 المستخدمين: ${totalUsers}`,
-    `✅ الموافق عليهم: ${approvedUsers}`,
-    `⏳ في الانتظار: ${pendingUsers}`,
-    `🚫 المحظورين: ${blockedUsers}`,
-    `📨 إجمالي الرسائل: ${totalMessages}`,
-    `📩 رسائل اليوم: ${messagesToday}`,
-    `🆕 مستخدمين جدد اليوم: ${newUsersToday}`,
-    `🤖 مزود AI: Z-AI (GLM-4 Plus) مجاني`,
-  ].join('\n');
+  const config = await getAIConfig();
+  const aiInfo = config.provider === 'zsdk' ? 'Z-AI SDK' : config.model;
 
-  await sendMessage(chatId, stats);
+  await sendMessage(chatId,
+    `📊 **إحصائيات مود شات**\n\n`
+    + `👥 المستخدمين: ${totalUsers}\n`
+    + `✅ المفعلين: ${approvedUsers}\n`
+    + `🚫 المحظورين: ${blockedUsers}\n`
+    + `📨 الرسائل: ${totalMessages}\n`
+    + `📩 رسائل اليوم: ${messagesToday}\n`
+    + `🆕 مستخدمين جدد: ${newUsersToday}\n`
+    + `🤖 AI: ${aiInfo}`
+  );
 }
 
 async function handleUsersCommand(chatId: number) {
@@ -600,7 +572,7 @@ async function handleUsersCommand(chatId: number) {
   });
 
   if (users.length === 0) {
-    await sendMessage(chatId, "لا يوجد مستخدمين مسجلين.");
+    await sendMessage(chatId, "لا يوجد مستخدمين.");
     return;
   }
 
@@ -610,7 +582,7 @@ async function handleUsersCommand(chatId: number) {
     return `${status} ${name} (\`${u.userId}\`) - ${u.totalMessages} رسالة`;
   }).join('\n');
 
-  await sendMessage(chatId, `👥 **قائمة المستخدمين:**\n\n${userList}`);
+  await sendMessage(chatId, `👥 **المستخدمين:**\n\n${userList}`);
 }
 
 async function handleChatLogCommand(chatId: number, text: string) {
@@ -628,19 +600,17 @@ async function handleChatLogCommand(chatId: number, text: string) {
   });
 
   if (messages.length === 0) {
-    await sendMessage(chatId, "لا توجد رسائل لهذا المستخدم.");
+    await sendMessage(chatId, "لا توجد رسائل.");
     return;
   }
 
   const log = messages.reverse().map(m => {
     const role = m.role === 'user' ? '👤' : '🤖';
-    const time = new Date(m.timestamp).toLocaleString('ar-EG');
-    return `${role} [${time}]: ${m.content.substring(0, 150)}`;
+    return `${role}: ${m.content.substring(0, 150)}`;
   }).join('\n');
 
-  // Telegram has a 4096 char limit per message
   const chunks = [];
-  let current = `📋 **سجل محادثة \`${targetId}\`:**\n\n`;
+  let current = `📋 محادثة \`${targetId}\`:\n\n`;
   for (const line of log.split('\n')) {
     if (current.length + line.length + 1 > 3800) {
       chunks.push(current);
@@ -663,12 +633,12 @@ async function handleBroadcast(chatId: number, message: string) {
   let sent = 0;
   for (const user of users) {
     try {
-      await sendMessage(user.userId, `📢 **إعلان من المدير:**\n\n${message}`);
+      await sendMessage(user.userId, `📢 ${message}`);
       sent++;
     } catch {}
   }
 
-  await sendMessage(chatId, `📢 تم إرسال الرسالة إلى ${sent} مستخدم من أصل ${users.length}.`);
+  await sendMessage(chatId, `📢 تم الإرسال إلى ${sent} من ${users.length}.`);
 }
 
 // ============================
@@ -687,7 +657,6 @@ export async function deleteWebhook() {
   return telegramAPI('deleteWebhook', {});
 }
 
-// Get effective join password (from DB or default)
 export async function getJoinPassword(): Promise<string> {
   try {
     const config = await db.botConfig.findUnique({ where: { key: 'join_password' } });
