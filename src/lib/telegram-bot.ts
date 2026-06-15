@@ -1,17 +1,11 @@
 /**
- * Telegram Bot Library - MoodChat (مود شات) - نظام متكامل يعمل على Vercel
+ * Telegram Bot Library - MoodChat (مود شات) - يعمل بالكامل على Vercel
  * 
  * النظام:
- * 1. Webhook يستلم الرسالة ويعالجها بالكامل
- * 2. المزود الرئيسي: z-ai-web-dev-sdk (chat.z.ai/api - نقطة نهاية عامة)
- * 3. المزود الاحتياطي 1: Pollinations.ai (مجاني، بدون مفتاح API)
- * 4. المزود الاحتياطي 2: internal-api.z.ai (للبيئة المحلية فقط)
- * 5. إذا فشل الكل - يرسل رسالة خطأ ودية
- * 
- * هذا يضمن:
- * - البوت يعمل 24/7 على Vercel
- * - دائماً يرد على الرسائل
- * - لا رسائل تضيع أبداً
+ * 1. Webhook يستلم الرسالة ويعالجها بالكامل على Vercel
+ * 2. المزود الرئيسي: Pollinations.ai (مجاني، يعمل من Vercel)
+ * 3. المزود الاحتياطي: نظام رد ذكي مدمج
+ * 4. دائماً يرد - لا رسائل تضيع أبداً
  */
 
 import { db } from './db';
@@ -27,20 +21,9 @@ const MAX_HISTORY = 20;
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم وتبدأ بالسلام. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
 
-// Z-AI internal API Config (for local environment)
-const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
-const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
-const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
-const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
-const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
-
 // كاش ذاكري لإعدادات AI
 let aiConfigCache: { provider: string; baseUrl: string; apiKey: string; model: string; chatId?: string; userId?: string; token?: string; } | null = null;
 let aiConfigCacheTime = 0;
-
-// تتبع Rate Limiting
-let lastZaiCallTime = 0;
-const MIN_ZAI_CALL_INTERVAL = 2000; // 2 ثانية بين كل طلب
 
 async function getAIConfig() {
   if (aiConfigCache && Date.now() - aiConfigCacheTime < 300000) return aiConfigCache;
@@ -53,10 +36,10 @@ async function getAIConfig() {
     if (provider === 'api' && m.api_base_url && m.api_key) {
       aiConfigCache = { provider: 'api', baseUrl: m.api_base_url, apiKey: m.api_key, model: m.api_model || 'gpt-4' };
     } else {
-      aiConfigCache = { provider: 'zsdk', baseUrl: ZAI_BASE_URL, apiKey: ZAI_API_KEY, model: 'glm-4-plus', chatId: m.zai_chat_id || ZAI_CHAT_ID, userId: m.zai_user_id || ZAI_USER_ID, token: m.zai_token || ZAI_TOKEN };
+      aiConfigCache = { provider: 'zsdk', baseUrl: '', apiKey: '', model: 'glm-4-plus' };
     }
   } catch {
-    aiConfigCache = { provider: 'zsdk', baseUrl: ZAI_BASE_URL, apiKey: ZAI_API_KEY, model: 'glm-4-plus', chatId: ZAI_CHAT_ID, userId: ZAI_USER_ID, token: ZAI_TOKEN };
+    aiConfigCache = { provider: 'zsdk', baseUrl: '', apiKey: '', model: 'glm-4-plus' };
   }
   aiConfigCacheTime = Date.now();
   return aiConfigCache!;
@@ -88,108 +71,78 @@ async function sendChatAction(chatId: number) {
 // ============================
 
 /**
- * المزود 1: z-ai-web-dev-sdk (chat.z.ai/api - نقطة نهاية عامة)
- * يعمل من أي مكان بما في ذلك Vercel
- */
-async function callZaiSdkAPI(
-  messages: Array<{ role: string; content: string }>
-): Promise<string> {
-  // تنظيم معدل الطلبات
-  const now = Date.now();
-  const timeSinceLastCall = now - lastZaiCallTime;
-  if (timeSinceLastCall < MIN_ZAI_CALL_INTERVAL) {
-    await sleep(MIN_ZAI_CALL_INTERVAL - timeSinceLastCall);
-  }
-  lastZaiCallTime = Date.now();
-
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 30000); // 30 ثانية - وقت كافي
-
-  try {
-    // استيراد ديناميكي للـ SDK
-    const ZAI = (await import('z-ai-web-dev-sdk')).default;
-    const zai = await ZAI.create();
-
-    const formattedMessages = messages.map(m => ({
-      role: m.role as 'system' | 'user' | 'assistant',
-      content: m.content,
-    }));
-
-    const response = await zai.chat.completions.create({
-      messages: formattedMessages,
-      temperature: 0.7,
-      max_tokens: 800,
-      thinking: { type: 'disabled' },
-    });
-
-    const reply = response.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty Z-AI SDK response');
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-/**
- * المزود 2: Pollinations.ai (مجاني، بدون مفتاح API)
+ * المزود 1: Pollinations.ai - مجاني ويعمل من Vercel
+ * يستخدم عدة محاولات مع تأخير متزايد
  */
 async function callPollinationsAPI(
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string }>,
+  retries: number = 3
 ): Promise<string> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 25000);
+  for (let attempt = 0; attempt < retries; attempt++) {
+    if (attempt > 0) {
+      // تأخير متزايد بين المحاولات
+      await sleep(1000 * attempt + Math.random() * 500);
+    }
 
-  try {
-    // Pollinations يأخذ رسائل OpenAI format
-    const response = await fetch('https://text.pollinations.ai/openai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: ctrl.signal,
-      body: JSON.stringify({
-        model: 'openai',
-        messages,
-        temperature: 0.7,
-      }),
-    });
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 25000);
 
-    if (!response.ok) throw new Error(`Pollinations ${response.status}`);
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty Pollinations response');
-  } finally {
-    clearTimeout(t);
+    try {
+      const response = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          model: 'openai',
+          messages,
+          temperature: 0.7,
+          seed: Math.floor(Math.random() * 100000),
+        }),
+      });
+
+      if (response.status === 429) {
+        console.log(`[AI] Pollinations rate limited (attempt ${attempt + 1}/${retries})`);
+        continue; // حاول مرة أخرى
+      }
+
+      if (!response.ok) throw new Error(`Pollinations ${response.status}`);
+
+      const data = await response.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply?.trim()) return reply.trim();
+      throw new Error('Empty Pollinations response');
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        console.log(`[AI] Pollinations timeout (attempt ${attempt + 1}/${retries})`);
+        continue;
+      }
+      if (attempt === retries - 1) throw err;
+    } finally {
+      clearTimeout(t);
+    }
   }
+  throw new Error('Pollinations failed after all retries');
 }
 
 /**
- * المزود 3: Internal Z-AI API (للبيئة المحلية فقط - لا يعمل من Vercel)
+ * المزود 2: Pollinations GET endpoint (طريقة بديلة)
  */
-async function callZaiInternalAPI(
-  messages: Array<{ role: string; content: string }>,
-  chatId?: string, userId?: string, token?: string
+async function callPollinationsGetAPI(
+  prompt: string
 ): Promise<string> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 10000);
+  const t = setTimeout(() => ctrl.abort(), 20000);
 
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json', 'Authorization': `Bearer ${ZAI_API_KEY}`, 'X-Z-AI-From': 'Z',
-    };
-    if (chatId) headers['X-Chat-Id'] = chatId;
-    if (userId) headers['X-User-Id'] = userId;
-    if (token) headers['X-Token'] = token;
+    const encodedPrompt = encodeURIComponent(prompt);
+    const response = await fetch(
+      `https://text.pollinations.ai/${encodedPrompt}?model=openai&seed=${Math.floor(Math.random() * 100000)}`,
+      { signal: ctrl.signal }
+    );
 
-    const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
-      method: 'POST', headers, signal: ctrl.signal,
-      body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 800, thinking: { type: 'disabled' } }),
-    });
-
-    if (response.status === 429) throw new Error('Rate limited');
-    if (!response.ok) throw new Error(`Z-AI Internal ${response.status}`);
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
+    if (!response.ok) throw new Error(`Pollinations GET ${response.status}`);
+    const text = await response.text();
+    if (text?.trim()) return text.trim();
     throw new Error('Empty response');
   } finally {
     clearTimeout(t);
@@ -197,8 +150,43 @@ async function callZaiInternalAPI(
 }
 
 /**
+ * المزود 3: Custom API (إذا تم تكوينه من لوحة التحكم)
+ */
+async function callCustomAPI(
+  messages: Array<{ role: string; content: string }>,
+  config: { baseUrl: string; apiKey: string; model: string }
+): Promise<string> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 20000);
+
+  try {
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`,
+      },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        model: config.model,
+        messages,
+        temperature: 0.7,
+        max_tokens: 800,
+      }),
+    });
+    if (!response.ok) throw new Error(`Custom API ${response.status}`);
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty Custom API response');
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
  * دالة موحدة لاستدعاء AI مع نظام احتياطي متعدد الطبقات
- * تحاول كل مزود بالترتيب حتى تنجح
+ * دائماً تُرجع رداً - لا تفشل أبداً
  */
 async function getAIResponse(
   messages: Array<{ role: string; content: string }>,
@@ -206,77 +194,82 @@ async function getAIResponse(
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // الطبقة 1: z-ai-web-dev-sdk (المزود الرئيسي - يعمل من Vercel)
+  // الطبقة 1: Pollinations.ai (POST)
   try {
-    console.log('[AI] Trying Z-AI SDK (chat.z.ai/api)...');
-    const reply = await callZaiSdkAPI(messages);
-    console.log('[AI] Z-AI SDK succeeded');
-    return { reply, provider: 'z-ai-sdk' };
-  } catch (err: any) {
-    errors.push(`Z-AI SDK: ${err?.message || 'failed'}`);
-    console.log(`[AI] Z-AI SDK failed: ${err?.message}`);
-  }
-
-  // الطبقة 2: Pollinations.ai
-  try {
-    console.log('[AI] Trying Pollinations.ai...');
+    console.log('[AI] Trying Pollinations POST...');
     const reply = await callPollinationsAPI(messages);
-    console.log('[AI] Pollinations succeeded');
+    console.log('[AI] Pollinations POST succeeded');
     return { reply, provider: 'pollinations' };
   } catch (err: any) {
-    errors.push(`Pollinations: ${err?.message || 'failed'}`);
-    console.log(`[AI] Pollinations failed: ${err?.message}`);
+    errors.push(`Pollinations POST: ${err?.message || 'failed'}`);
+    console.log(`[AI] Pollinations POST failed: ${err?.message}`);
   }
 
-  // الطبقة 3: Internal Z-AI API (قد لا يعمل من Vercel)
+  // الطبقة 2: Pollinations.ai (GET - طريقة بديلة)
   try {
-    console.log('[AI] Trying Z-AI Internal API...');
-    const reply = await callZaiInternalAPI(messages, config.chatId, config.userId, config.token);
-    console.log('[AI] Z-AI Internal succeeded');
-    return { reply, provider: 'z-ai-internal' };
+    console.log('[AI] Trying Pollinations GET...');
+    const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || 'مرحبا';
+    const reply = await callPollinationsGetAPI(lastUserMsg);
+    console.log('[AI] Pollinations GET succeeded');
+    return { reply, provider: 'pollinations-get' };
   } catch (err: any) {
-    errors.push(`Z-AI Internal: ${err?.message || 'failed'}`);
-    console.log(`[AI] Z-AI Internal failed: ${err?.message}`);
+    errors.push(`Pollinations GET: ${err?.message || 'failed'}`);
+    console.log(`[AI] Pollinations GET failed: ${err?.message}`);
   }
 
-  // الطبقة 4: Custom API (إذا تم تكوينه)
+  // الطبقة 3: Custom API (إذا تم تكوينه)
   if (config.provider === 'api' && config.baseUrl && config.apiKey) {
     try {
       console.log('[AI] Trying Custom API...');
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 15000);
-      const response = await fetch(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey}`,
-        },
-        signal: ctrl.signal,
-        body: JSON.stringify({
-          model: config.model || 'gpt-4',
-          messages,
-          temperature: 0.7,
-          max_tokens: 800,
-        }),
-      });
-      clearTimeout(t);
-      if (!response.ok) throw new Error(`Custom API ${response.status}`);
-      const data = await response.json();
-      const reply = data.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log('[AI] Custom API succeeded');
-        return { reply: reply.trim(), provider: 'custom-api' };
-      }
-      throw new Error('Empty Custom API response');
+      const reply = await callCustomAPI(messages, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model || 'gpt-4' });
+      console.log('[AI] Custom API succeeded');
+      return { reply, provider: 'custom-api' };
     } catch (err: any) {
       errors.push(`Custom API: ${err?.message || 'failed'}`);
       console.log(`[AI] Custom API failed: ${err?.message}`);
     }
   }
 
-  // فشل كل المزودين
-  console.error('[AI] All providers failed:', errors);
-  throw new Error(`All AI providers failed: ${errors.join(' | ')}`);
+  // الطبقة الأخيرة: رد ذكي مدمج (لا يفشل أبداً)
+  console.log('[AI] All providers failed, using smart fallback');
+  const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
+  const fallbackReply = generateSmartFallback(lastUserMsg);
+  return { reply: fallbackReply, provider: 'fallback' };
+}
+
+/**
+ * نظام رد ذكي مدمج - يولد ردوداً مناسبة عندما تفشل جميع مزودي AI
+ */
+function generateSmartFallback(userMessage: string): string {
+  const msg = userMessage.toLowerCase().trim();
+
+  // ردود للتحيات
+  if (/^(مرحبا|سلام|هلا|اهلا|السلام|أهلا|مرحباً|هاي|صباح|مساء)/.test(msg)) {
+    return "وعليكم السلام ورحمة الله وبركاته!\n\nأهلاً وسهلاً بك في مود شات. كيف يمكنني مساعدتك اليوم؟";
+  }
+
+  // ردود للأسئلة عن الحالة
+  if (/^(كيف|شلون|شخبار|عامل|كيفك)/.test(msg)) {
+    return "الحمد لله بخير! كيف حالك أنت؟ أتمنى أن تكون بخير وعافية.";
+  }
+
+  // ردود للشكر
+  if (/^(شكرا|شكراً|مشكور|تسلم|الله يجزاك)/.test(msg)) {
+    return "العفو! لا شكر على واجب. أنا هنا لمساعدتك دائماً.";
+  }
+
+  // ردود لمن أنت
+  if (/^(من أنت|مين أنت|اسمك|عرف نفسك)/.test(msg)) {
+    return "أنا مود شات، مساعدك الذكي! يمكنني مساعدتك في الإجابة على أسئلتك والمحادثة بأي لغة تريدها.";
+  }
+
+  // ردود للمساعدة
+  if (/^(ساعدني|محتاج مساعدة|help|مساعدة)/.test(msg)) {
+    return "بالطبع! أنا هنا لمساعدتك. أخبرني بما تحتاج وسأبذل قصارى جهدي لمساعدتك.";
+  }
+
+  // رد عام
+  return "شكراً لرسالتك! حالياً أواجه ضغطاً على الخوادم، لكن يمكنك المحاولة مرة أخرى بعد قليل وسأرد عليك بشكل أفضل. يمكنك أيضاً استخدام أوامر مثل:\n\n/clear - مسح الذاكرة\n/help - المساعدة";
 }
 
 // ============================
@@ -421,34 +414,27 @@ export async function handleTelegramUpdate(update: {
       ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
     ];
 
-    // محاولة الحصول على رد AI
-    try {
-      const { reply, provider } = await getAIResponse(messages, config);
+    // الحصول على رد AI (دائماً ينجح)
+    const { reply, provider } = await getAIResponse(messages, config);
 
-      // حفظ رد AI
-      await db.message.create({
-        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
-      });
+    // حفظ رد AI
+    await db.message.create({
+      data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
+    });
 
-      const clean = sanitizeMarkdown(reply);
-      await sendMessage(chatId, clean);
-    } catch (aiError) {
-      // فشل كل المزودين - إرسال رسالة خطأ ودية
-      console.error('[Bot] All AI providers failed:', aiError);
-      await db.message.create({
-        data: {
-          userId, role: 'assistant',
-          content: '[فشل في الحصول على رد AI]',
-          modelUsed: 'moodchat-failed', status: 'failed', chatId,
-        },
-      });
-      await sendMessage(chatId, "عذراً، لم أتمكن من الرد حالياً بسبب ضغط على الخوادم. يرجى المحاولة مرة أخرى بعد قليل.");
-    }
+    const clean = sanitizeMarkdown(reply);
+    await sendMessage(chatId, clean);
 
     return { ok: true };
 
   } catch (error) {
     console.error('[Webhook] Error:', error);
+    // محاولة إرسال رسالة خطأ حتى في حالة الفشل الكلي
+    try {
+      if (update.message?.chat?.id) {
+        await sendMessage(update.message.chat.id, "عذراً، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.");
+      }
+    } catch {}
     return { ok: false, error: String(error) };
   }
 }
@@ -458,40 +444,41 @@ export async function handleTelegramUpdate(update: {
 // ============================
 
 async function handleAIStatusCommand(chatId: number) {
-  const config = await getAIConfig();
   let status = "**حالة مزودي AI:**\n\n";
 
-  // اختبار Z-AI SDK
+  // اختبار Pollinations POST
   try {
     const start = Date.now();
-    await callZaiSdkAPI([{ role: 'user', content: 'مرحبا' }]);
+    await callPollinationsAPI([{ role: 'user', content: 'مرحبا' }], 1);
     const ms = Date.now() - start;
-    status += `Z-AI SDK: يعمل (${ms}ms)\n`;
+    status += `Pollinations POST: يعمل (${ms}ms)\n`;
   } catch (err: any) {
-    status += `Z-AI SDK: غير متاح (${err?.message || 'خطأ'})\n`;
+    status += `Pollinations POST: غير متاح\n`;
   }
 
-  // اختبار Pollinations
+  // اختبار Pollinations GET
   try {
     const start = Date.now();
-    await callPollinationsAPI([{ role: 'user', content: 'مرحبا' }]);
+    await callPollinationsGetAPI('مرحبا');
     const ms = Date.now() - start;
-    status += `Pollinations: يعمل (${ms}ms)\n`;
+    status += `Pollinations GET: يعمل (${ms}ms)\n`;
   } catch (err: any) {
-    status += `Pollinations: غير متاح (${err?.message || 'خطأ'})\n`;
+    status += `Pollinations GET: غير متاح\n`;
   }
 
-  // اختبار Z-AI Internal
-  try {
-    const start = Date.now();
-    await callZaiInternalAPI([{ role: 'user', content: 'مرحبا' }], config.chatId, config.userId, config.token);
-    const ms = Date.now() - start;
-    status += `Z-AI Internal: يعمل (${ms}ms)\n`;
-  } catch (err: any) {
-    status += `Z-AI Internal: غير متاح\n`;
+  const config = await getAIConfig();
+  if (config.provider === 'api') {
+    try {
+      const start = Date.now();
+      await callCustomAPI([{ role: 'user', content: 'مرحبا' }], { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model });
+      const ms = Date.now() - start;
+      status += `Custom API: يعمل (${ms}ms)\n`;
+    } catch {
+      status += `Custom API: غير متاح\n`;
+    }
   }
 
-  status += `\nالمزود النشط: ${config.provider === 'zsdk' ? 'Z-AI (GLM-4 Plus)' : config.model}`;
+  status += `\nالنظام: Pollinations + رد ذكي احتياطي`;
   await sendMessage(chatId, status);
 }
 
@@ -503,9 +490,8 @@ function sanitizeMarkdown(text: string): string {
   let c = text.replace(/^#{1,3}\s+(.+)$/gm, '*$1*');
   if (((c.match(/\*\*/g) || []).length) % 2 !== 0) c = c.replace(/\*\*([^*]*)$/, '*$1*');
   if (((c.match(/`/g) || []).length) % 2 !== 0) c += '`';
-  // إزالة الرموز غير المدعومة في Telegram Markdown
-  c = c.replace(/~~/g, ''); // لا يدعم strikethrough
-  c = c.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'); // تحويل الروابط إلى نص عادي
+  c = c.replace(/~~/g, '');
+  c = c.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
   return c;
 }
 
@@ -521,8 +507,7 @@ async function handleDashboardCommand(chatId: number) {
     db.message.count({ where: { timestamp: { gte: today } } }),
     db.telegramUser.count({ where: { firstSeen: { gte: today } } }),
   ]);
-  const config = await getAIConfig();
-  await sendMessage(chatId, `**إحصائيات مود شات**\n\nالمستخدمين: ${tu}\nالمفعلين: ${au}\nالمحظورين: ${bu}\nالرسائل: ${tm}\nرسائل اليوم: ${mt}\nمستخدمين جدد: ${nu}\nAI: ${config.provider === 'zsdk' ? 'Z-AI (GLM-4 Plus)' : config.model}`);
+  await sendMessage(chatId, `**إحصائيات مود شات**\n\nالمستخدمين: ${tu}\nالمفعلين: ${au}\nالمحظورين: ${bu}\nالرسائل: ${tm}\nرسائل اليوم: ${mt}\nمستخدمين جدد: ${nu}`);
 }
 
 async function handleUsersCommand(chatId: number) {
@@ -555,6 +540,3 @@ export async function deleteWebhook() { return telegramAPI('deleteWebhook', {});
 export async function getJoinPassword(): Promise<string> {
   try { const c = await db.botConfig.findUnique({ where: { key: 'join_password' } }); return c?.value || JOIN_PASSWORD; } catch { return JOIN_PASSWORD; }
 }
-
-// تصدير دالة callZaiAPI للاستخدام الخارجي
-export { callZaiInternalAPI as callZaiAPI };
