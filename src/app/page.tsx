@@ -8,7 +8,8 @@ import {
   Send, Key, Wifi, WifiOff, Settings, Moon,
   Sun, Save, LogOut, Lock,
   MessageCircle, TrendingUp, UserPlus, AlertTriangle,
-  ChevronDown, ArrowLeft, Languages, Image as ImageIcon
+  ChevronDown, ArrowLeft, Languages, Image as ImageIcon,
+  Camera, X, ZoomIn
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -135,6 +136,10 @@ export default function Dashboard() {
   const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; userId: number | null; userName: string }>({
     open: false, userId: null, userName: '',
   });
+
+  // Profile photos refresh state
+  const [refreshingPhotos, setRefreshingPhotos] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   // Config form state
   const [cfgProvider, setCfgProvider] = useState('zsdk');
@@ -359,6 +364,25 @@ export default function Dashboard() {
     fetchUsers();
     fetchStats();
     setDeleteDialog({ open: false, userId: null, userName: '' });
+  };
+
+  // Refresh profile photos
+  const refreshPhotos = async (forceAll: boolean = false) => {
+    setRefreshingPhotos(true);
+    try {
+      const r = await fetch('/api/profile-photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: forceAll }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        fetchUsers(); // Refresh users to show updated photos
+        return d;
+      }
+    } catch { /* ignore */ }
+    setRefreshingPhotos(false);
+    return null;
   };
 
   // Fetch dashboard data
@@ -809,6 +833,20 @@ export default function Dashboard() {
                   className={`bg-card border-border text-foreground rounded-lg ${t.dir === 'rtl' ? 'pr-10' : 'pl-10'}`}
                 />
               </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => refreshPhotos()}
+                disabled={refreshingPhotos}
+                className="rounded-lg text-xs border-border text-muted-foreground hover:text-foreground"
+                title={lang === 'ar' ? 'تحديث صور البروفايل' : 'Refresh profile photos'}
+              >
+                <Camera size={14} className={t.dir === 'rtl' ? 'ml-1' : 'mr-1'} />
+                {refreshingPhotos
+                  ? (lang === 'ar' ? 'جارٍ التحديث...' : 'Refreshing...')
+                  : (lang === 'ar' ? 'تحديث الصور' : 'Refresh Photos')
+                }
+              </Button>
             </div>
 
             {/* Users Table */}
@@ -841,9 +879,33 @@ export default function Dashboard() {
                       {users.map(u => (
                         <TableRow key={u.id} className="border-border/30 hover:bg-muted/30">
                           <TableCell>
-                            <div>
-                              <p className="font-medium">{u.firstName || u.username || t.anonymous}</p>
-                              {u.lastName && <p className="text-xs text-muted-foreground">{u.lastName}</p>}
+                            <div className="flex items-center gap-2.5">
+                              {u.photoUrl ? (
+                                <img
+                                  src={u.photoUrl}
+                                  alt={u.firstName || 'User'}
+                                  className="w-8 h-8 rounded-full object-cover border border-border/50 flex-shrink-0"
+                                  onError={(e) => {
+                                    const img = e.target as HTMLImageElement;
+                                    img.style.display = 'none';
+                                    const fallback = img.nextElementSibling as HTMLElement;
+                                    if (fallback) fallback.classList.remove('hidden');
+                                  }}
+                                />
+                              ) : null}
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${u.photoUrl ? 'hidden' : ''} ${
+                                u.isBlocked
+                                  ? 'bg-red-500/15 text-red-500'
+                                  : u.isApproved
+                                  ? 'bg-emerald-500/15 text-emerald-500'
+                                  : 'bg-yellow-500/15 text-yellow-500'
+                              }`}>
+                                {(u.firstName || u.username || (lang === 'ar' ? 'م' : 'U'))[0]?.toUpperCase()}
+                              </div>
+                              <div>
+                                <p className="font-medium text-sm">{u.firstName || u.username || t.anonymous}</p>
+                                {u.username && <p className="text-xs text-muted-foreground">@{u.username}</p>}
+                              </div>
                             </div>
                           </TableCell>
                           <TableCell className="font-mono text-xs text-muted-foreground">{u.userId}</TableCell>
@@ -1116,25 +1178,42 @@ export default function Dashboard() {
 
                               {/* صورة الرسالة */}
                               {m.imageUrl && (
-                                <div className="mb-2">
-                                  <a href={m.imageUrl} target="_blank" rel="noopener noreferrer">
-                                    <img
-                                      src={m.imageUrl}
-                                      alt="Image"
-                                      className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity"
-                                      onError={(e) => {
-                                        (e.target as HTMLImageElement).style.display = 'none';
-                                      }}
-                                    />
-                                  </a>
+                                <div className="mb-2 relative group">
+                                  <img
+                                    src={m.imageUrl}
+                                    alt="Image"
+                                    className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity"
+                                    onClick={() => setLightboxImage(m.imageUrl!)}
+                                    onError={(e) => {
+                                      const img = e.target as HTMLImageElement;
+                                      img.style.display = 'none';
+                                      const placeholder = img.nextElementSibling as HTMLElement;
+                                      if (placeholder) placeholder.classList.remove('hidden');
+                                    }}
+                                  />
+                                  {/* Placeholder when image fails to load */}
+                                  <div className="hidden w-full max-h-48 rounded-lg border border-border/50 bg-muted/50 flex items-center justify-center p-6">
+                                    <div className="text-center">
+                                      <ImageIcon size={32} className="mx-auto mb-2 text-muted-foreground/50" />
+                                      <p className="text-xs text-muted-foreground">
+                                        {lang === 'ar' ? 'الصورة غير متاحة' : 'Image unavailable'}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {/* Zoom overlay on hover */}
+                                  <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    <div className="bg-black/60 rounded-full p-1.5">
+                                      <ZoomIn size={12} className="text-white" />
+                                    </div>
+                                  </div>
                                 </div>
                               )}
 
                               {/* مؤشر صورة بدون رابط */}
                               {!m.imageUrl && m.content.includes('📷') && (
-                                <div className="mb-1.5 flex items-center gap-1 text-xs text-muted-foreground">
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/30 rounded-lg px-2.5 py-1.5">
                                   <ImageIcon size={12} />
-                                  <span>{lang === 'ar' ? 'صورة' : 'Image'}</span>
+                                  <span>{lang === 'ar' ? 'صورة مرفقة' : 'Attached image'}</span>
                                 </div>
                               )}
 
@@ -1575,6 +1654,28 @@ export default function Dashboard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Image Lightbox */}
+      {lightboxImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm"
+          onClick={() => setLightboxImage(null)}
+        >
+          <button
+            className="absolute top-4 right-4 bg-white/10 hover:bg-white/20 rounded-full p-2 transition-colors z-10"
+            onClick={() => setLightboxImage(null)}
+            aria-label="Close"
+          >
+            <X size={24} className="text-white" />
+          </button>
+          <img
+            src={lightboxImage}
+            alt="Full size image"
+            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
     </div>
   );
 }

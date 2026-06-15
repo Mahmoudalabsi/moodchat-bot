@@ -349,7 +349,7 @@ async function analyzeImageWithGemini(
   }
 }
 
-/** تحليل صورة مع fallback بين المزودين */
+/** تحليل صورة مع fallback بين المزودين - URL أولاً ثم base64 */
 async function analyzeImage(
   imageBase64: string | null,
   mimeType: string,
@@ -360,19 +360,10 @@ async function analyzeImage(
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // المحاولة 1: Z-AI SDK VLM (مع base64 أو URL)
-  try {
-    if (imageBase64) {
-      const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
-      return { reply, provider: 'vlm-zsdk' };
-    }
-  } catch (err: any) {
-    errors.push(`Z-AI VLM: ${err?.message?.substring(0, 40)}`);
-  }
-
-  // المحاولة 1.5: Z-AI SDK VLM مع URL مباشر
-  if (imageUrl && !imageBase64) {
+  // المحاولة 1 (الأولوية): Z-AI SDK VLM مع URL مباشر - لا يحتاج تحميل الصورة!
+  if (imageUrl) {
     try {
+      console.log('[VLM] Attempting URL-based VLM analysis...');
       const ZAIModule = await import('z-ai-web-dev-sdk');
       const ZAIClass = ZAIModule.default;
       const zai = await ZAIClass.create();
@@ -396,25 +387,46 @@ async function analyzeImage(
 
       const reply = completion?.choices?.[0]?.message?.content;
       if (reply?.trim()) {
-        console.log('[VLM] Image analysis via URL OK');
+        console.log('[VLM] ✅ Image analysis via URL OK (provider: vlm-zsdk-url)');
         return { reply: reply.trim(), provider: 'vlm-zsdk-url' };
       }
+      console.warn('[VLM] URL-based VLM returned empty response');
     } catch (err: any) {
-      errors.push(`Z-AI VLM URL: ${err?.message?.substring(0, 40)}`);
+      const errMsg = err?.message?.substring(0, 80) || String(err);
+      console.error(`[VLM] ❌ URL-based VLM failed: ${errMsg}`);
+      errors.push(`Z-AI VLM URL: ${errMsg}`);
     }
   }
 
-  // المحاولة 2: Gemini Vision
+  // المحاولة 2: Z-AI SDK VLM مع base64
   if (imageBase64) {
     try {
-      const reply = await analyzeImageWithGemini(imageBase64, mimeType, userPrompt, lang);
-      return { reply, provider: 'vlm-gemini' };
+      console.log('[VLM] Attempting base64-based VLM analysis...');
+      const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
+      console.log('[VLM] ✅ Image analysis via base64 OK (provider: vlm-zsdk)');
+      return { reply, provider: 'vlm-zsdk' };
     } catch (err: any) {
-      errors.push(`Gemini Vision: ${err?.message?.substring(0, 40)}`);
+      const errMsg = err?.message?.substring(0, 80) || String(err);
+      console.error(`[VLM] ❌ Base64 VLM failed: ${errMsg}`);
+      errors.push(`Z-AI VLM: ${errMsg}`);
     }
   }
 
-  console.log('[VLM] All vision providers failed:', errors.join(' | '));
+  // المحاولة 3: Gemini Vision (fallback)
+  if (imageBase64) {
+    try {
+      console.log('[VLM] Attempting Gemini Vision analysis...');
+      const reply = await analyzeImageWithGemini(imageBase64, mimeType, userPrompt, lang);
+      console.log('[VLM] ✅ Gemini Vision OK (provider: vlm-gemini)');
+      return { reply, provider: 'vlm-gemini' };
+    } catch (err: any) {
+      const errMsg = err?.message?.substring(0, 80) || String(err);
+      console.error(`[VLM] ❌ Gemini Vision failed: ${errMsg}`);
+      errors.push(`Gemini Vision: ${errMsg}`);
+    }
+  }
+
+  console.error(`[VLM] ❌ All vision providers failed: ${errors.join(' | ')}`);
   return {
     reply: lang === 'ar'
       ? '📸 للأسف لم أتمكن من تحليل الصورة حالياً. يرجى المحاولة مرة أخرى لاحقاً.'
@@ -720,7 +732,7 @@ export async function handleTelegramUpdate(update: {
 
         await sendChatAction(chatId);
 
-        // حفظ رابط الصورة (عبر Telegram file URL) - دائماً متاح
+        // الخطوة 1: الحصول على رابط الصورة عبر Telegram file URL (دائماً متاح)
         let imageUrl: string | null = null;
         try {
           const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${bestPhoto.file_id}`, {
@@ -729,22 +741,38 @@ export async function handleTelegramUpdate(update: {
           const fileData = await fileRes.json();
           if (fileData?.result?.file_path) {
             imageUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
-            console.log(`[Bot] Image URL: ${imageUrl.substring(0, 80)}...`);
+            console.log(`[Bot] ✅ Image URL obtained: ${imageUrl.substring(0, 80)}...`);
+          } else {
+            console.warn('[Bot] ⚠️ getFile returned no file_path:', JSON.stringify(fileData).substring(0, 200));
           }
         } catch (err: any) {
-          console.log(`[Bot] Could not get image URL: ${err?.message?.substring(0, 60)}`);
+          console.error(`[Bot] ❌ Could not get image URL: ${err?.message?.substring(0, 100)}`);
         }
 
-        // محاولة تحميل الصورة كـ base64 (قد تفشل على Vercel)
-        let imageData = await downloadTelegramFile(bestPhoto.file_id);
-        if (!imageData) {
-          console.log('[Bot] Base64 download failed, will use URL fallback');
-        } else {
-          console.log(`[Bot] Image downloaded: ${imageData.base64.length} chars, ${imageData.mimeType}`);
+        // الخطوة 2: تحميل base64 فقط للصور الصغيرة (أقل من 1MB) كـ fallback
+        // على Vercel serverless، الصور الكبيرة تسبب مشاكل memory
+        let imageData: { base64: string; mimeType: string } | null = null;
+        const imageSize = bestPhoto.file_size || 0;
+        const SMALL_IMAGE_LIMIT = 1 * 1024 * 1024; // 1MB
+
+        if (imageSize > 0 && imageSize <= SMALL_IMAGE_LIMIT && !imageUrl) {
+          // فقط نحمل base64 إذا لم نحصل على URL والصورة صغيرة
+          console.log('[Bot] Image is small and no URL, attempting base64 download...');
+          imageData = await downloadTelegramFile(bestPhoto.file_id);
+          if (imageData) {
+            console.log(`[Bot] ✅ Image downloaded as base64: ${imageData.base64.length} chars, ${imageData.mimeType}`);
+          } else {
+            console.warn('[Bot] ⚠️ Base64 download failed');
+          }
+        } else if (imageUrl) {
+          console.log('[Bot] Using URL-based approach (skipping base64 download for Vercel compatibility)');
+        } else if (imageSize > SMALL_IMAGE_LIMIT) {
+          console.log(`[Bot] Image too large for base64 (${(imageSize / 1024 / 1024).toFixed(1)}MB), relying on URL`);
         }
 
         // إذا فشل التحميل ولا يوجد URL - أرسل رسالة خطأ
         if (!imageData && !imageUrl) {
+          console.error('[Bot] ❌ No image data available - both URL and base64 failed');
           await sendMessage(chatId, userLang === 'ar'
             ? '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.'
             : '❌ Could not download the image. Please try again.');
@@ -767,9 +795,9 @@ export async function handleTelegramUpdate(update: {
 
         const conversationHistory = dbMessages.map(m => ({ role: m.role, content: m.content }));
 
-        console.log('[Bot] Starting VLM analysis...');
+        console.log(`[Bot] Starting VLM analysis... (hasBase64=${!!imageData}, hasUrl=${!!imageUrl})`);
 
-        // تحليل الصورة باستخدام VLM (مع URL fallback)
+        // تحليل الصورة باستخدام VLM - URL أولاً ثم base64
         const { reply, provider } = await analyzeImage(
           imageData?.base64 || null,
           imageData?.mimeType || 'image/jpeg',
@@ -779,7 +807,7 @@ export async function handleTelegramUpdate(update: {
           imageUrl
         );
 
-        console.log(`[Bot] VLM analysis complete: provider=${provider}, reply length=${reply.length}`);
+        console.log(`[Bot] ✅ VLM analysis complete: provider=${provider}, reply length=${reply.length}`);
 
         // حفظ رد البوت
         await db.message.create({
@@ -789,10 +817,13 @@ export async function handleTelegramUpdate(update: {
         await sendMessage(chatId, sanitizeMarkdown(reply));
         return { ok: true, mode: 'image-analysis', provider };
       } catch (imgErr: any) {
-        console.error('[Bot] Image processing error:', imgErr?.message || String(imgErr));
+        console.error('[Bot] ❌ Image processing error:', imgErr?.message || String(imgErr), imgErr?.stack?.substring(0, 200));
         // في حالة فشل معالجة الصورة، أرسل رسالة خطأ للمستخدم
         try {
-          await sendMessage(chatId, '📸 حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى.');
+          const userLang = await getUserLang(userId);
+          await sendMessage(chatId, userLang === 'ar'
+            ? '📸 حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى.'
+            : '📸 An error occurred while analyzing the image. Please try again.');
         } catch {}
         return { ok: true, mode: 'image-error', error: imgErr?.message };
       }
