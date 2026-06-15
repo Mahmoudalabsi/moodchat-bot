@@ -867,12 +867,12 @@ export default function Dashboard() {
                   <Table>
                     <TableHeader>
                       <TableRow className="border-border hover:bg-transparent">
-                        <TableHead className="text-muted-foreground">{t.name}</TableHead>
-                        <TableHead className="text-muted-foreground">{t.userId}</TableHead>
-                        <TableHead className="text-muted-foreground">{t.status}</TableHead>
-                        <TableHead className="text-muted-foreground">{t.msgs}</TableHead>
-                        <TableHead className="text-muted-foreground hidden sm:table-cell">{t.lastActive}</TableHead>
-                        <TableHead className={`text-muted-foreground ${t.dir === 'rtl' ? 'text-left' : 'text-right'}`}>{t.actions}</TableHead>
+                        <TableHead className="text-muted-foreground min-w-[160px]">{t.name}</TableHead>
+                        <TableHead className="text-muted-foreground min-w-[100px]">{t.userId}</TableHead>
+                        <TableHead className="text-muted-foreground min-w-[80px]">{t.status}</TableHead>
+                        <TableHead className="text-muted-foreground min-w-[60px]">{t.msgs}</TableHead>
+                        <TableHead className="text-muted-foreground min-w-[120px] hidden sm:table-cell">{t.lastActive}</TableHead>
+                        <TableHead className="text-muted-foreground min-w-[120px]">{t.actions}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1054,7 +1054,7 @@ export default function Dashboard() {
                             {u.username && <p className="text-xs text-muted-foreground">@{u.username}</p>}
                           </div>
                         </div>
-                        <ChevronDown size={14} className={`text-muted-foreground rotate-${t.dir === 'rtl' ? '90' : '-90'}`} />
+                        <ChevronDown size={14} className="text-muted-foreground" style={{ transform: t.dir === 'rtl' ? 'rotate(90deg)' : 'rotate(-90deg)' }} />
                       </button>
                     );
                   }) : (
@@ -1129,11 +1129,11 @@ export default function Dashboard() {
                         {userMessages.map(m => (
                           <div
                             key={m.id}
-                            className={`flex ${m.role === 'user' ? 'justify-start' : 'justify-end'} gap-2`}
+                            className={`flex ${m.role === 'user' ? (t.dir === 'rtl' ? 'justify-end' : 'justify-start') : (t.dir === 'rtl' ? 'justify-start' : 'justify-end')} gap-2`}
                           >
                             {/* صورة البروفايل للمستخدم */}
                             {m.role === 'user' && (
-                              <div className="flex-shrink-0 mt-1">
+                              <div className={`flex-shrink-0 mt-1 ${t.dir === 'rtl' ? 'order-2' : ''}`}>
                                 {m.user?.photoUrl ? (
                                   <img
                                     src={m.user.photoUrl}
@@ -1230,7 +1230,7 @@ export default function Dashboard() {
 
                             {/* أيقونة البوت */}
                             {m.role === 'assistant' && (
-                              <div className="flex-shrink-0 mt-1">
+                              <div className={`flex-shrink-0 mt-1 ${t.dir === 'rtl' ? 'order-1' : ''}`}>
                                 <div className="w-8 h-8 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center">
                                   <Bot size={14} className="text-emerald-500" />
                                 </div>
@@ -1658,22 +1658,25 @@ export default function Dashboard() {
       {/* Image Lightbox */}
       {lightboxImage && (
         <div
-          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
           onClick={() => setLightboxImage(null)}
         >
-          <button
-            className="absolute top-4 right-4 bg-white/10 hover:bg-white/20 rounded-full p-2 transition-colors z-10"
-            onClick={() => setLightboxImage(null)}
-            aria-label="Close"
-          >
-            <X size={24} className="text-white" />
-          </button>
-          <img
-            src={lightboxImage}
-            alt="Full size image"
-            className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          />
+          <div className="relative max-w-4xl max-h-[90vh]">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setLightboxImage(null)}
+              className="absolute -top-10 right-0 text-white hover:text-white/80"
+            >
+              <X size={20} />
+            </Button>
+            <img
+              src={lightboxImage}
+              alt="Full size"
+              className="max-w-full max-h-[90vh] rounded-lg object-contain"
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
         </div>
       )}
     </div>

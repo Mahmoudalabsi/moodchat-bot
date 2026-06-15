@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+// استخدام التوكن مباشرة - متغير البيئة قد يكون خاطئاً على Vercel
+const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 
 async function getUserProfilePhotoUrl(userId: number, debug?: boolean): Promise<{ url: string | null; debug?: any }> {
   try {
@@ -77,6 +78,7 @@ export async function GET(request: NextRequest) {
       const result = await getUserProfilePhotoUrl(parseInt(testUserId), true);
       return NextResponse.json({
         userId: parseInt(testUserId),
+        tokenPrefix: BOT_TOKEN.substring(0, 10) + '...',
         result,
       });
     }
