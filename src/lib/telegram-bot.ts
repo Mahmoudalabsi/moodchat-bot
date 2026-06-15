@@ -130,12 +130,29 @@ async function chatWithAI(userId: number, userMessage: string): Promise<string> 
 
   const config = await getAIConfig();
 
+  // 1. محاولة مع مزود API Token إذا كان محدد
   if (config.provider === 'api' && config.baseUrl && config.apiKey) {
-    return await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
+    try {
+      return await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
+    } catch (error) {
+      console.error('Custom API failed, trying fallback:', error);
+      try { return await callPollinationsAPI(messages); } catch { /* continue */ }
+    }
   }
 
-  // Z-AI SDK (الافتراضي)
-  return await callZaiAPI(messages, config.chatId, config.userId, config.token);
+  // 2. محاولة مع Z-AI SDK (الافتراضي)
+  try {
+    return await callZaiAPI(messages, config.chatId, config.userId, config.token);
+  } catch (error) {
+    console.error('Z-AI failed, trying Pollinations fallback:', error);
+    // 3. احتياطي: Pollinations.ai (مجاني، بدون مفتاح API)
+    try {
+      return await callPollinationsAPI(messages);
+    } catch (fallbackError) {
+      console.error('All AI providers failed:', fallbackError);
+      return "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً. حاول مرة أخرى لاحقاً.";
+    }
+  }
 }
 
 async function callZaiAPI(
@@ -218,6 +235,43 @@ async function callCustomAPI(
     const reply = data.choices?.[0]?.message?.content;
     if (reply && reply.trim()) return reply.trim();
     throw new Error('Empty API response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ============================
+// Pollinations.ai - مزود احتياطي مجاني بدون مفتاح API
+// ============================
+
+async function callPollinationsAPI(
+  messages: Array<{ role: string; content: string }>
+): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages,
+        model: 'openai',
+        temperature: 0.7,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Pollinations ${response.status}`);
+    }
+
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply && reply.trim()) return reply.trim();
+    throw new Error('Empty Pollinations response');
   } finally {
     clearTimeout(timeout);
   }
