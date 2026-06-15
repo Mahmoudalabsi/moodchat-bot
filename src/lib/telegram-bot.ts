@@ -122,7 +122,7 @@ export async function callZaiAPI(
   if (token) headers['X-Token'] = token;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), 5000);
 
   try {
     const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
@@ -158,7 +158,7 @@ async function callCustomAPI(
   model: string
 ): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -187,7 +187,7 @@ async function callPollinationsAPI(
 ): Promise<string> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 5000);
 
     try {
       if (attempt > 0) await new Promise(r => setTimeout(r, 2000 * attempt));
