@@ -27,3 +27,25 @@ Stage Summary:
 - Bot responds to messages using Z-AI SDK via local process-pending.js
 - Dashboard available at Vercel URL with dark Arabic RTL theme
 - Known issue: Local worker needs to be run manually (process-pending.js) or kept alive somehow
+---
+Task ID: stability-test
+Agent: main
+Task: اختبار مدى استقرار البوت في المحادثات
+
+Work Log:
+- اختبر Z-AI SDK: يعمل من بيئة Z.ai (1 ثانية استجابة)
+- اكتشف أن internal-api.z.ai غير متاح من Vercel (timeout 5-8 ثوان)
+- اكتشف أن Pollinations.ai محظور من IP الخاص بـ Vercel (429)
+- اكتشف أن z.ai/api/v1 متاح من Vercel لكن التوثيق مختلف
+- أنشأ نظام هجين: Webhook سريع + عامل محلي
+- حسّن الكود: كاش ذاكري، استعلامات متوازية، تقليل من 11 إلى 4 استعلامات
+- أنشأ عامل خلفية (worker.mjs) يستقصي DB كل 3 ثوانٍ
+- أضاف إعادة المحاولة مع تراجع أسي لـ Z-AI
+- أضاف حماية من المعالجة المزدوجة
+- أضاف إعادة تشغيل تلقائي للعامل
+
+Stage Summary:
+- النظام الهجين يعمل: Webhook (6s) → Worker (3s poll + 1s Z-AI) = إجمالي ~10 ثوانٍ
+- Z-AI SDK يعمل كمزود افتراضي عبر العامل المحلي
+- البوت يرد على الرسائل بدون توقف مع إعادة تشغيل تلقائي
+- الملفات المحدثة: telegram-bot.ts, db.ts, worker.mjs, start-worker.sh
