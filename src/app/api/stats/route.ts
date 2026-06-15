@@ -1,62 +1,87 @@
 /**
  * Stats API - GET /api/stats
+ * محسّن: استعلام واحد بدل 13 استعلام تسلسلي
  */
 
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 
+// كاش للاحصائيات - يتجدد كل 30 ثانية
+let statsCache: { data: unknown; timestamp: number } | null = null;
+const CACHE_TTL = 30000; // 30 ثانية
+
 export async function GET() {
   try {
-    const totalUsers = await db.telegramUser.count();
-    const approvedUsers = await db.telegramUser.count({ where: { isApproved: true } });
-    const blockedUsers = await db.telegramUser.count({ where: { isBlocked: true } });
-    const pendingUsers = await db.telegramUser.count({ where: { isApproved: false, isBlocked: false } });
-    const totalMessages = await db.message.count();
+    // تحقق من الكاش
+    if (statsCache && Date.now() - statsCache.timestamp < CACHE_TTL) {
+      return NextResponse.json(statsCache.data);
+    }
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const messagesToday = await db.message.count({ where: { timestamp: { gte: today } } });
-    const newUsersToday = await db.telegramUser.count({ where: { firstSeen: { gte: today } } });
 
-    // Active users (last 7 days)
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
-    const activeUsers7d = await db.telegramUser.count({
-      where: { lastActive: { gte: weekAgo } },
-    });
 
-    // Top users
-    const topUsers = await db.telegramUser.findMany({
-      where: { isApproved: true },
-      orderBy: { totalMessages: 'desc' },
-      take: 5,
-    });
+    // استعلامات متوازية بدل تسلسلية
+    const [
+      users,
+      totalMessages,
+      messagesToday,
+      newUsersToday,
+      activeUsers7d,
+      topUsers,
+      recentJoins,
+      dailyMsgsRaw,
+    ] = await Promise.all([
+      // كل المستخدمين دفعة واحدة (بدل 4 استعلامات count)
+      db.telegramUser.findMany({
+        select: {
+          isApproved: true,
+          isBlocked: true,
+        },
+      }),
+      db.message.count(),
+      db.message.count({ where: { timestamp: { gte: today } } }),
+      db.telegramUser.count({ where: { firstSeen: { gte: today } } }),
+      db.telegramUser.count({ where: { lastActive: { gte: weekAgo } } }),
+      db.telegramUser.findMany({
+        where: { isApproved: true },
+        orderBy: { totalMessages: 'desc' },
+        take: 5,
+      }),
+      db.joinLog.findMany({
+        orderBy: { timestamp: 'desc' },
+        take: 10,
+        include: { user: true },
+      }),
+      // الرسائل اليومية - استعلام واحد بدل 7
+      db.message.findMany({
+        where: { timestamp: { gte: weekAgo } },
+        select: { timestamp: true },
+      }),
+    ]);
 
-    // Recent join attempts
-    const recentJoins = await db.joinLog.findMany({
-      orderBy: { timestamp: 'desc' },
-      take: 10,
-      include: { user: true },
-    });
+    // حساب الإحصائيات من البيانات المحملة (بدل استعلامات إضافية)
+    const totalUsers = users.length;
+    const approvedUsers = users.filter(u => u.isApproved).length;
+    const blockedUsers = users.filter(u => u.isBlocked).length;
+    const pendingUsers = users.filter(u => !u.isApproved && !u.isBlocked).length;
 
-    // Daily messages (last 7 days)
-    const dailyMessages = [];
+    // تجميع الرسائل اليومية من البيانات المحملة
+    const dailyMessages: Array<{ date: string; count: number }> = [];
     for (let i = 6; i >= 0; i--) {
       const day = new Date();
       day.setDate(day.getDate() - i);
-      day.setHours(0, 0, 0, 0);
-      const nextDay = new Date(day);
-      nextDay.setDate(nextDay.getDate() + 1);
-      const count = await db.message.count({
-        where: { timestamp: { gte: day, lt: nextDay } },
-      });
-      dailyMessages.push({
-        date: day.toISOString().split('T')[0],
-        count,
-      });
+      const dayStr = day.toISOString().split('T')[0];
+      const count = dailyMsgsRaw.filter(m => {
+        const msgDate = new Date(m.timestamp).toISOString().split('T')[0];
+        return msgDate === dayStr;
+      }).length;
+      dailyMessages.push({ date: dayStr, count });
     }
 
-    return NextResponse.json({
+    const result = {
       totalUsers,
       approvedUsers,
       blockedUsers,
@@ -68,7 +93,12 @@ export async function GET() {
       topUsers,
       recentJoins,
       dailyMessages,
-    });
+    };
+
+    // حفظ في الكاش
+    statsCache = { data: result, timestamp: Date.now() };
+
+    return NextResponse.json(result);
   } catch (error) {
     console.error('Stats error:', error);
     return NextResponse.json({ error: String(error) }, { status: 500 });

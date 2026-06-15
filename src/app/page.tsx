@@ -183,26 +183,23 @@ export default function Dashboard() {
     setIsLoggedIn(false);
   };
 
-  // Verify auth on load - check localStorage first, then verify with server
+  // Verify auth on load - فوري من localStorage، ثم تحقق من السيرفر بالخلفية
   useEffect(() => {
-    const verifyAuth = async () => {
-      const storedAuth = localStorage.getItem('moodchat_auth');
-      if (storedAuth === 'true') {
-        try {
-          const r = await fetch('/api/auth');
-          if (r.ok) {
-            setIsLoggedIn(true);
-          } else {
-            localStorage.removeItem('moodchat_auth');
-          }
-        } catch {
-          // Keep logged in if network error - session cookie might still be valid
-          setIsLoggedIn(true);
-        }
-      }
+    const storedAuth = localStorage.getItem('moodchat_auth');
+    if (storedAuth === 'true') {
+      // سجّل دخول فوري بدون انتظار السيرفر
+      setIsLoggedIn(true);
       setCheckingAuth(false);
-    };
-    verifyAuth();
+      // تحقق في الخلفية
+      fetch('/api/auth').then(r => {
+        if (!r.ok) {
+          localStorage.removeItem('moodchat_auth');
+          setIsLoggedIn(false);
+        }
+      }).catch(() => { /* أبقى داخل - الكوكي ممكن يكون صالح */ });
+    } else {
+      setCheckingAuth(false);
+    }
   }, []);
 
   // Fetch stats
@@ -361,16 +358,43 @@ export default function Dashboard() {
     setDeleteDialog({ open: false, userId: null, userName: '' });
   };
 
-  // Data loading effects - use startTransition to avoid cascading render lint
+  // تحميل كل البيانات في طلب واحد (سريع!)
+  const fetchDashboard = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/dashboard');
+      if (r.ok) {
+        const d = await r.json();
+        if (d.stats) setStats(d.stats);
+        if (d.users) setUsers(d.users);
+        if (d.messages) setMessages(d.messages);
+        if (d.config) {
+          setConfig(d.config);
+          setCfgProvider(d.config.ai_provider || 'zsdk');
+          setCfgApiUrl(d.config.api_base_url || '');
+          setCfgApiKey(d.config.api_key_raw || '');
+          setCfgApiModel(d.config.api_model || 'gpt-4');
+          setCfgZaiChatId(d.config.zai_chat_id || '');
+          setCfgZaiUserId(d.config.zai_user_id || '');
+          setCfgZaiToken(d.config.zai_token_raw || '');
+          setCfgPassword(d.config.join_password || '');
+        }
+        if (d.webhook) {
+          setWebhookStatus(d.webhook.online ? 'online' : 'offline');
+        }
+      }
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+
+  // Data loading effects
   const [, startTransition] = useTransition();
 
   useEffect(() => {
     if (isLoggedIn) {
-      startTransition(() => {
-        Promise.all([fetchStats(), fetchUsers(), fetchMessages(), fetchConfig(), checkWebhook()]);
-      });
+      startTransition(() => { fetchDashboard(); });
     }
-  }, [isLoggedIn, fetchStats, fetchUsers, fetchMessages, fetchConfig, checkWebhook, startTransition]);
+  }, [isLoggedIn, fetchDashboard, startTransition]);
 
   useEffect(() => {
     if (isLoggedIn) {
@@ -391,9 +415,7 @@ export default function Dashboard() {
 
   // Refresh all data
   const refreshAll = () => {
-    setLoading(true);
-    Promise.all([fetchStats(), fetchUsers(), fetchMessages(), fetchConfig(), checkWebhook()])
-      .finally(() => setLoading(false));
+    fetchDashboard();
   };
 
   // Get unique users from messages
