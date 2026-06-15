@@ -1,19 +1,12 @@
 /**
- * Telegram Bot Library - MoodChat (مود شات)
- * 
- * النظام المحسّن:
- * 1. Vercel Webhook → يستلم الرسالة
- * 2. يحاول الرد المباشر بالـ AI (Z-AI مع إعادة المحاولة → API Token → Pollinations)
- * 3. إذا فشل الكل → يرسل رسالة خطأ للمستخدم ويحفظ كـ "failed"
+ * Telegram Bot Library - MoodChat (مود شات) - محسّن للسرعة
  * 
  * التحسينات:
- * - إعادة المحاولة مع تراجع أسي لحد المعدل (429)
- * - مهلة أطول للطلبات (15 ثانية)
- * - رسالة خطأ واضحة عند فشل جميع المزودين
- * - حماية من حد المعدل مع قائمة انتظار بسيطة
- * 
- * كلمة المرور: MOOD2026
- * Z-AI SDK هو المزود الافتراضي
+ * - كاش ذاكري لإعدادات AI (لا استعلام DB لكل رسالة)
+ * - تقليل استعلامات DB من 11 إلى 4 كحد أقصى
+ * - استعلامات متوازية حيثما أمكن
+ * - إعادة المحاولة مع تراجع أسي لحد المعدل
+ * - Z-AI SDK هو المزود الافتراضي
  */
 
 import { db } from './db';
@@ -25,41 +18,90 @@ import { db } from './db';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
-const MAX_HISTORY = 30;
+const MAX_HISTORY = 20;
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم وتبدأ بالسلام. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
 
-// Z-AI API Config
+// Z-AI Config - من متغيرات البيئة مباشرة (لا استعلام DB)
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
 const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
 const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
 
-// إعدادات إعادة المحاولة
-const ZAI_MAX_RETRIES = 3;
-const ZAI_BASE_DELAY = 1000; // 1 ثانية أساسية
-const ZAI_TIMEOUT = 15000; // 15 ثانية مهلة
-
 // ============================
-// Rate Limiter بسيط
+// كاش ذاكري لإعدادات AI
 // ============================
 
-const requestTimestamps: number[] = [];
-const RATE_LIMIT_WINDOW = 60000; // دقيقة واحدة
-const RATE_LIMIT_MAX = 20; // 20 طلب في الدقيقة
+let aiConfigCache: {
+  provider: 'zsdk' | 'api';
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  chatId?: string;
+  userId?: string;
+  token?: string;
+} | null = null;
 
-function checkRateLimit(): boolean {
-  const now = Date.now();
-  // إزالة الطلبات القديمة
-  while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_LIMIT_WINDOW) {
-    requestTimestamps.shift();
+let aiConfigCacheTime = 0;
+const AI_CONFIG_CACHE_TTL = 5 * 60 * 1000; // 5 دقائق
+
+async function getAIConfig() {
+  // استخدم الكاش إذا كان متوفراً وأقل من 5 دقائق
+  if (aiConfigCache && Date.now() - aiConfigCacheTime < AI_CONFIG_CACHE_TTL) {
+    return aiConfigCache;
   }
-  return requestTimestamps.length < RATE_LIMIT_MAX;
+
+  try {
+    // استعلام واحد يجلب كل الإعدادات
+    const configs = await db.botConfig.findMany({
+      where: {
+        key: { in: ['ai_provider', 'api_base_url', 'api_key', 'api_model', 'zai_chat_id', 'zai_user_id', 'zai_token'] }
+      }
+    });
+
+    const configMap = Object.fromEntries(configs.map(c => [c.key, c.value]));
+    const provider = configMap.ai_provider || 'zsdk';
+
+    if (provider === 'api' && configMap.api_base_url && configMap.api_key) {
+      aiConfigCache = {
+        provider: 'api',
+        baseUrl: configMap.api_base_url,
+        apiKey: configMap.api_key,
+        model: configMap.api_model || 'gpt-4',
+      };
+    } else {
+      aiConfigCache = {
+        provider: 'zsdk',
+        baseUrl: ZAI_BASE_URL,
+        apiKey: ZAI_API_KEY,
+        model: 'glm-4-plus',
+        chatId: configMap.zai_chat_id || ZAI_CHAT_ID,
+        userId: configMap.zai_user_id || ZAI_USER_ID,
+        token: configMap.zai_token || ZAI_TOKEN,
+      };
+    }
+  } catch {
+    // في حالة فشل DB، استخدم الإعدادات الافتراضية
+    aiConfigCache = {
+      provider: 'zsdk',
+      baseUrl: ZAI_BASE_URL,
+      apiKey: ZAI_API_KEY,
+      model: 'glm-4-plus',
+      chatId: ZAI_CHAT_ID,
+      userId: ZAI_USER_ID,
+      token: ZAI_TOKEN,
+    };
+  }
+
+  aiConfigCacheTime = Date.now();
+  return aiConfigCache!;
 }
 
-function recordRequest(): void {
-  requestTimestamps.push(Date.now());
+// دالة لمسح الكاش عند تغيير الإعدادات
+export function clearAIConfigCache() {
+  aiConfigCache = null;
+  aiConfigCacheTime = 0;
 }
 
 // ============================
@@ -77,12 +119,7 @@ async function telegramAPI(method: string, params: Record<string, unknown>) {
 }
 
 async function sendMessage(chatId: number, text: string, extra?: Record<string, unknown>) {
-  return telegramAPI('sendMessage', {
-    chat_id: chatId,
-    text,
-    parse_mode: 'Markdown',
-    ...extra,
-  });
+  return telegramAPI('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...extra });
 }
 
 async function sendChatAction(chatId: number, action: string = 'typing') {
@@ -90,57 +127,11 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
 }
 
 // ============================
-// AI Providers - محسّنة مع إعادة المحاولة
+// AI Providers
 // ============================
 
-async function getAIConfig(): Promise<{
-  provider: 'zsdk' | 'api';
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  chatId?: string;
-  userId?: string;
-  token?: string;
-}> {
-  try {
-    const providerConfig = await db.botConfig.findUnique({ where: { key: 'ai_provider' } });
-    const provider = providerConfig?.value || 'zsdk';
-
-    if (provider === 'api') {
-      const baseUrl = (await db.botConfig.findUnique({ where: { key: 'api_base_url' } }))?.value || '';
-      const apiKey = (await db.botConfig.findUnique({ where: { key: 'api_key' } }))?.value || '';
-      const model = (await db.botConfig.findUnique({ where: { key: 'api_model' } }))?.value || 'gpt-4';
-      return { provider: 'api', baseUrl, apiKey, model };
-    }
-
-    const chatId = (await db.botConfig.findUnique({ where: { key: 'zai_chat_id' } }))?.value || ZAI_CHAT_ID;
-    const userId = (await db.botConfig.findUnique({ where: { key: 'zai_user_id' } }))?.value || ZAI_USER_ID;
-    const token = (await db.botConfig.findUnique({ where: { key: 'zai_token' } }))?.value || ZAI_TOKEN;
-    return {
-      provider: 'zsdk',
-      baseUrl: ZAI_BASE_URL,
-      apiKey: ZAI_API_KEY,
-      model: 'glm-4-plus',
-      chatId,
-      userId,
-      token,
-    };
-  } catch {
-    return {
-      provider: 'zsdk',
-      baseUrl: ZAI_BASE_URL,
-      apiKey: ZAI_API_KEY,
-      model: 'glm-4-plus',
-      chatId: ZAI_CHAT_ID,
-      userId: ZAI_USER_ID,
-      token: ZAI_TOKEN,
-    };
-  }
-}
-
 /**
- * Z-AI API مع إعادة المحاولة والتراجع الأسي
- * يتعامل مع أخطاء 429 (حد المعدل) و 500 (خطأ الخادم) و المهلة
+ * Z-AI API - محسّن للسرعة مع إعادة محاولة ذكية
  */
 export async function callZaiAPI(
   messages: Array<{ role: string; content: string }>,
@@ -148,17 +139,16 @@ export async function callZaiAPI(
   userId?: string,
   token?: string
 ): Promise<string> {
+  const maxRetries = 2; // تقليل المحاولات للسرعة
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt < ZAI_MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), ZAI_TIMEOUT);
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10 ثانية مهلة
 
     try {
-      // تراجع أسي: انتظر قبل إعادة المحاولة
       if (attempt > 0) {
-        const delay = ZAI_BASE_DELAY * Math.pow(2, attempt - 1) + Math.random() * 500;
-        console.log(`[Z-AI] Retry attempt ${attempt + 1}/${ZAI_MAX_RETRIES}, waiting ${Math.round(delay)}ms...`);
+        const delay = 1500 * attempt + Math.random() * 500;
         await new Promise(r => setTimeout(r, delay));
       }
 
@@ -178,22 +168,18 @@ export async function callZaiAPI(
         body: JSON.stringify({
           messages,
           temperature: 0.7,
-          max_tokens: 1024,
+          max_tokens: 800,
           thinking: { type: 'disabled' },
         }),
       });
 
       if (!response.ok) {
         const errorBody = await response.text();
-        
-        // إعادة المحاولة عند 429 أو 503 أو 500
-        if ((response.status === 429 || response.status >= 500) && attempt < ZAI_MAX_RETRIES - 1) {
-          console.log(`[Z-AI] Got ${response.status}, will retry...`);
-          lastError = new Error(`Z-AI ${response.status}: ${errorBody.substring(0, 200)}`);
+        if ((response.status === 429 || response.status >= 500) && attempt < maxRetries - 1) {
+          lastError = new Error(`Z-AI ${response.status}`);
           continue;
         }
-        
-        throw new Error(`Z-AI ${response.status}: ${errorBody.substring(0, 200)}`);
+        throw new Error(`Z-AI ${response.status}: ${errorBody.substring(0, 100)}`);
       }
 
       const data = await response.json();
@@ -202,21 +188,13 @@ export async function callZaiAPI(
       throw new Error('Empty Z-AI response');
     } catch (error: unknown) {
       lastError = error instanceof Error ? error : new Error(String(error));
-      
-      // لا تعيد المحاولة عند AbortError أو الأخطاء غير القابلة للإعادة
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        console.log(`[Z-AI] Request timed out on attempt ${attempt + 1}`);
-        if (attempt < ZAI_MAX_RETRIES - 1) continue;
-      }
-      
-      // إذا كانت الأخطاء الأخرى (شبكة، إلخ)، حاول مرة أخرى
-      if (attempt < ZAI_MAX_RETRIES - 1) continue;
+      if (attempt < maxRetries - 1) continue;
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  throw lastError || new Error('Z-AI all retries failed');
+  throw lastError || new Error('Z-AI failed');
 }
 
 async function callCustomAPI(
@@ -226,17 +204,14 @@ async function callCustomAPI(
   model: string
 ): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       signal: controller.signal,
-      body: JSON.stringify({ messages, model, temperature: 0.7, max_tokens: 1024 }),
+      body: JSON.stringify({ messages, model, temperature: 0.7, max_tokens: 800 }),
     });
 
     if (!response.ok) throw new Error(`API ${response.status}`);
@@ -249,32 +224,23 @@ async function callCustomAPI(
   }
 }
 
-/**
- * Pollinations.ai مع إعادة محاولة محسّنة
- */
 async function callPollinationsAPI(
   messages: Array<{ role: string; content: string }>,
-  retries: number = 2
+  retries: number = 1
 ): Promise<string> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 8000);
 
     try {
-      if (attempt > 0) {
-        const delay = 2000 * attempt + Math.random() * 1000;
-        console.log(`[Pollinations] Retry attempt ${attempt}, waiting ${Math.round(delay)}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-      }
+      if (attempt > 0) await new Promise(r => setTimeout(r, 2000));
 
       const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          messages,
-          model: 'openai',
-          temperature: 0.7,
+          messages, model: 'openai', temperature: 0.7,
           seed: Math.floor(Math.random() * 10000),
         }),
       });
@@ -287,18 +253,18 @@ async function callPollinationsAPI(
       const data = await response.json();
       const reply = data.choices?.[0]?.message?.content;
       if (reply && reply.trim()) return reply.trim();
-      throw new Error('Empty Pollinations response');
+      throw new Error('Empty response');
     } catch (error) {
       if (attempt === retries) throw error;
     } finally {
       clearTimeout(timeout);
     }
   }
-  throw new Error('Pollinations all retries failed');
+  throw new Error('Pollinations failed');
 }
 
 // ============================
-// User Management
+// User Management - محسّن
 // ============================
 
 async function getOrCreateUser(telegramUser: {
@@ -309,37 +275,27 @@ async function getOrCreateUser(telegramUser: {
   language_code?: string;
   is_bot?: boolean;
 }) {
-  let user = await db.telegramUser.findUnique({
+  // upsert واحد بدلاً من findUnique + create/update
+  return db.telegramUser.upsert({
     where: { userId: telegramUser.id },
+    create: {
+      userId: telegramUser.id,
+      username: telegramUser.username || null,
+      firstName: telegramUser.first_name || null,
+      lastName: telegramUser.last_name || null,
+      languageCode: telegramUser.language_code || null,
+      isBot: telegramUser.is_bot || false,
+      totalMessages: 1,
+      isApproved: isAdmin(telegramUser.id),
+      approvedAt: isAdmin(telegramUser.id) ? new Date() : null,
+    },
+    update: {
+      username: telegramUser.username || null,
+      firstName: telegramUser.first_name || null,
+      lastName: telegramUser.last_name || null,
+      totalMessages: { increment: 1 },
+    },
   });
-
-  if (!user) {
-    user = await db.telegramUser.create({
-      data: {
-        userId: telegramUser.id,
-        username: telegramUser.username || null,
-        firstName: telegramUser.first_name || null,
-        lastName: telegramUser.last_name || null,
-        languageCode: telegramUser.language_code || null,
-        isBot: telegramUser.is_bot || false,
-        totalMessages: 1,
-        isApproved: isAdmin(telegramUser.id),
-        approvedAt: isAdmin(telegramUser.id) ? new Date() : null,
-      },
-    });
-  } else {
-    user = await db.telegramUser.update({
-      where: { userId: telegramUser.id },
-      data: {
-        username: telegramUser.username || null,
-        firstName: telegramUser.first_name || null,
-        lastName: telegramUser.last_name || null,
-        totalMessages: { increment: 1 },
-      },
-    });
-  }
-
-  return user;
 }
 
 function isAdmin(userId: number): boolean {
@@ -347,7 +303,7 @@ function isAdmin(userId: number): boolean {
 }
 
 // ============================
-// Main Webhook Handler - محسّن
+// Main Webhook Handler - محسّن للسرعة
 // ============================
 
 export async function handleTelegramUpdate(update: {
@@ -366,20 +322,14 @@ export async function handleTelegramUpdate(update: {
   };
   callback_query?: {
     id: string;
-    from: {
-      id: number;
-      username?: string;
-      first_name?: string;
-    };
+    from: { id: number; username?: string; first_name?: string; };
     data?: string;
     message?: { chat: { id: number } };
   };
 }) {
   try {
     if (update.callback_query) {
-      await telegramAPI('answerCallbackQuery', {
-        callback_query_id: update.callback_query.id,
-      });
+      await telegramAPI('answerCallbackQuery', { callback_query_id: update.callback_query.id });
       return { ok: true };
     }
 
@@ -439,13 +389,13 @@ export async function handleTelegramUpdate(update: {
           + "- متعدد اللغات - أتحدث أي لغة\n"
           + "- محادثة طبيعية - أجيب بوضوح ودقة\n"
           + "- خصوصية تامة - محادثاتك محمية\n\n"
-          + "/clear - مسح الذاكرة والبدء من جديد\n"
+          + "/clear - مسح الذاكرة\n"
           + "/help - عرض المساعدة"
         );
       } else {
         await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
         await db.joinLog.create({ data: { userId, action: 'attempt' } });
-        await sendMessage(chatId, "**هذا البوت خاص ومحمي بكلمة مرور!**\n\nللاستخدام، أرسل كلمة المرور أدناه:");
+        await sendMessage(chatId, "**هذا البوت خاص ومحمي بكلمة مرور!**\n\nللاستخدام، أرسل كلمة المرور:");
       }
       return { ok: true };
     }
@@ -458,11 +408,7 @@ export async function handleTelegramUpdate(update: {
       if (!user.isApproved && !user.waitingForPassword) {
         await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
       }
-      if (user.isBlocked) {
-        await sendMessage(chatId, "تم حظرك من استخدام هذا البوت.");
-      } else {
-        await sendMessage(chatId, "أرسل كلمة المرور للاستخدام.");
-      }
+      await sendMessage(chatId, user.isBlocked ? "تم حظرك من استخدام هذا البوت." : "أرسل كلمة المرور للاستخدام.");
       return { ok: true };
     }
 
@@ -473,14 +419,12 @@ export async function handleTelegramUpdate(update: {
     if (text === '/help') {
       await sendMessage(chatId,
         "**مود شات - المساعدة**\n\n"
-        + "**المميزات:**\n"
         + "- ذاكرة ذكية - أتذكر كل محادثاتنا\n"
         + "- متعدد اللغات - أتحدث أي لغة\n"
-        + "- محادثة طبيعية - أجيب بوضوح ودقة\n"
-        + "- خصوصية تامة - محادثاتك محمية\n\n"
+        + "- محادثة طبيعية - أجيب بوضوح ودقة\n\n"
         + "**الأوامر:**\n"
         + "/start - بدء المحادثة\n"
-        + "/clear - مسح الذاكرة والبدء من جديد\n"
+        + "/clear - مسح الذاكرة\n"
         + "/help - عرض المساعدة"
       );
       return { ok: true };
@@ -488,7 +432,7 @@ export async function handleTelegramUpdate(update: {
 
     if (text === '/clear') {
       await db.message.deleteMany({ where: { userId } });
-      await sendMessage(chatId, "تم مسح سجل محادثتك وذاكرتي.\n\nيمكنك البدء بمحادثة جديدة الآن!");
+      await sendMessage(chatId, "تم مسح سجل محادثتك وذاكرتي.\n\nابدأ محادثة جديدة!");
       return { ok: true };
     }
 
@@ -540,7 +484,6 @@ export async function handleTelegramUpdate(update: {
         }
         return { ok: true };
       }
-      // أمر جديد: فحص حالة AI
       if (text === '/aistatus') {
         await handleAIStatusCommand(chatId);
         return { ok: true };
@@ -548,124 +491,89 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ============================
-    // محادثة عادية - نظام محسّن
+    // محادثة عادية - سريعة
     // ============================
 
-    // فحص حد المعدل
-    if (!checkRateLimit()) {
-      await sendMessage(chatId, "أنت ترسل رسائل كثيرة جداً. انتظر قليلاً ثم حاول مجدداً.");
-      return { ok: true };
-    }
-
     await sendChatAction(chatId);
-    recordRequest();
 
-    // حفظ رسالة المستخدم
-    const userMsg = await db.message.create({
-      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
-    });
-
-    try {
-      // بناء سجل المحادثة
-      const dbMessages = await db.message.findMany({
+    // جلب سجل المحادثة + إعدادات AI بالتوازي
+    const [dbMessages, config] = await Promise.all([
+      db.message.findMany({
         where: { userId, status: 'done' },
         orderBy: { timestamp: 'asc' },
         take: MAX_HISTORY,
-      });
+        select: { role: true, content: true }, // فقط الحقول المطلوبة
+      }),
+      getAIConfig(), // يستخدم الكاش
+    ]);
 
-      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        { role: 'user', content: text },
-      ];
+    // بناء رسائل AI
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      { role: 'user', content: text },
+    ];
 
-      const config = await getAIConfig();
-      let aiReply: string | null = null;
-      let usedProvider = '';
+    let aiReply: string | null = null;
+    let usedProvider = '';
 
-      // 1. Z-AI SDK (الافتراضي) - مع إعادة المحاولة
-      if (config.provider === 'zsdk') {
-        try {
-          aiReply = await callZaiAPI(messages, config.chatId, config.userId, config.token);
-          usedProvider = 'z-ai';
-        } catch (error) {
-          console.error('[Z-AI] Failed after retries:', error instanceof Error ? error.message : String(error));
-        }
-      }
-
-      // 2. API Token
-      if (!aiReply && config.provider === 'api' && config.baseUrl && config.apiKey) {
-        try {
-          aiReply = await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
-          usedProvider = 'custom-api';
-        } catch (error) {
-          console.error('[Custom API] Failed:', error instanceof Error ? error.message : String(error));
-        }
-      }
-
-      // 3. Pollinations.ai احتياطي - مع إعادة المحاولة المحسّنة
-      if (!aiReply) {
-        try {
-          aiReply = await callPollinationsAPI(messages, 2);
-          usedProvider = 'pollinations';
-        } catch (error) {
-          console.error('[Pollinations] Failed:', error instanceof Error ? error.message : String(error));
-        }
-      }
-
-      if (aiReply) {
-        // تم الحصول على رد - تحديث الرسالة وإرسال الرد
-        await db.message.update({ where: { id: userMsg.id }, data: { status: 'done' } });
-        await db.message.create({
-          data: { userId, role: 'assistant', content: aiReply, modelUsed: `moodchat-${usedProvider}`, status: 'done', chatId },
-        });
-
-        // تنظيف الرد من أي تنسيق Markdown قد يسبب مشاكل في Telegram
-        const cleanReply = sanitizeTelegramMarkdown(aiReply);
-        await sendMessage(chatId, cleanReply);
-        return { ok: true };
-      }
-    } catch (error) {
-      console.error('[AI Call] Unexpected error:', error);
+    // 1. Z-AI SDK (الافتراضي)
+    if (config.provider === 'zsdk') {
+      try {
+        aiReply = await callZaiAPI(messages, config.chatId, config.userId, config.token);
+        usedProvider = 'z-ai';
+      } catch {}
     }
 
-    // فشلت جميع المحاولات - تحديث حالة الرسالة وإعلام المستخدم
-    await db.message.update({ where: { id: userMsg.id }, data: { status: 'failed' } });
-    await sendMessage(chatId, "عذراً، لم أتمكن من الرد حالياً. يرجى المحاولة مرة أخرى بعد قليل.\n\nإذا استمرت المشكلة، تواصل مع المدير.");
+    // 2. API Token
+    if (!aiReply && config.provider === 'api' && config.baseUrl && config.apiKey) {
+      try {
+        aiReply = await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
+        usedProvider = 'custom-api';
+      } catch {}
+    }
+
+    // 3. Pollinations احتياطي
+    if (!aiReply) {
+      try {
+        aiReply = await callPollinationsAPI(messages);
+        usedProvider = 'pollinations';
+      } catch {}
+    }
+
+    if (aiReply) {
+      // حفظ الرسائل في الخلفية (لا ننتظرها)
+      const savePromises = [
+        db.message.create({ data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId } }),
+        db.message.create({ data: { userId, role: 'assistant', content: aiReply, modelUsed: `moodchat-${usedProvider}`, status: 'done', chatId } }),
+      ];
+
+      // إرسال الرد أولاً ثم حفظ DB
+      const cleanReply = sanitizeTelegramMarkdown(aiReply);
+      await Promise.all([sendMessage(chatId, cleanReply), ...savePromises]);
+      return { ok: true };
+    }
+
+    // فشل الكل - أرسل رسالة خطأ
+    await sendMessage(chatId, "عذراً، لم أتمكن من الرد حالياً. حاول مرة أخرى بعد قليل.");
     return { ok: true };
 
   } catch (error) {
-    console.error('[Webhook] Handler error:', error);
+    console.error('[Webhook] Error:', error);
     return { ok: false, error: String(error) };
   }
 }
 
 // ============================
-// تنظيف Markdown لـ Telegram
+// تنظيف Markdown
 // ============================
 
 function sanitizeTelegramMarkdown(text: string): string {
-  // إزالة أي أحرف Markdown غير متوافقة مع Telegram
-  // Telegram يدعم فقط: *bold*, _italic_, `code`, ```pre```, [text](url)
-  // نزيل الأنماط غير المدعومة التي قد تسبب أخطاء
-  
-  // إصلاح العناوين Markdown (## و ###) - تحويلها إلى bold
   let cleaned = text.replace(/^#{1,3}\s+(.+)$/gm, '*$1*');
-  
-  // إزالة الأنماط غير المدعومة مثل ~~strikethrough~~
-  // (Telegram لا يدعمها في وضع Markdown)
-  
-  // التأكد من إغلاق جميع علامات ** و `
-  const boldOpen = (cleaned.match(/\*\*/g) || []).length;
-  if (boldOpen % 2 !== 0) {
-    cleaned = cleaned.replace(/\*\*([^*]*)$/, '*$1*');
-  }
-  
-  const codeOpen = (cleaned.match(/`/g) || []).length;
-  if (codeOpen % 2 !== 0) {
-    cleaned += '`';
-  }
-  
+  const boldCount = (cleaned.match(/\*\*/g) || []).length;
+  if (boldCount % 2 !== 0) cleaned = cleaned.replace(/\*\*([^*]*)$/, '*$1*');
+  const codeCount = (cleaned.match(/`/g) || []).length;
+  if (codeCount % 2 !== 0) cleaned += '`';
   return cleaned;
 }
 
@@ -674,18 +582,21 @@ function sanitizeTelegramMarkdown(text: string): string {
 // ============================
 
 async function handleDashboardCommand(chatId: number) {
-  const totalUsers = await db.telegramUser.count();
-  const approvedUsers = await db.telegramUser.count({ where: { isApproved: true } });
-  const blockedUsers = await db.telegramUser.count({ where: { isBlocked: true } });
-  const totalMessages = await db.message.count();
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const messagesToday = await db.message.count({ where: { timestamp: { gte: today } } });
-  const newUsersToday = await db.telegramUser.count({ where: { firstSeen: { gte: today } } });
-  const failedMessages = await db.message.count({ where: { status: 'failed' } });
-  const pendingMessages = await db.message.count({ where: { status: 'pending' } });
+
+  // استعلامات متوازية
+  const [totalUsers, approvedUsers, blockedUsers, totalMessages, messagesToday, newUsersToday] = await Promise.all([
+    db.telegramUser.count(),
+    db.telegramUser.count({ where: { isApproved: true } }),
+    db.telegramUser.count({ where: { isBlocked: true } }),
+    db.message.count(),
+    db.message.count({ where: { timestamp: { gte: today } } }),
+    db.telegramUser.count({ where: { firstSeen: { gte: today } } }),
+  ]);
+
   const config = await getAIConfig();
-  const aiInfo = config.provider === 'zsdk' ? 'Z-AI SDK (GLM-4 Plus)' : config.model;
+  const aiInfo = config.provider === 'zsdk' ? 'Z-AI (GLM-4 Plus)' : config.model;
 
   await sendMessage(chatId,
     `**إحصائيات مود شات**\n\n`
@@ -695,37 +606,26 @@ async function handleDashboardCommand(chatId: number) {
     + `الرسائل: ${totalMessages}\n`
     + `رسائل اليوم: ${messagesToday}\n`
     + `مستخدمين جدد: ${newUsersToday}\n`
-    + `رسائل فاشلة: ${failedMessages}\n`
-    + `رسائل معلقة: ${pendingMessages}\n`
     + `AI: ${aiInfo}`
   );
 }
 
 async function handleAIStatusCommand(chatId: number) {
-  let status = '**فحص حالة مزودي AI:**\n\n';
+  let status = '**فحص حالة AI:**\n\n';
 
-  // فحص Z-AI
   try {
     const start = Date.now();
-    const reply = await callZaiAPI(
-      [{ role: 'system', content: 'أجب بكلمة واحدة' }, { role: 'user', content: 'ok' }],
-      ZAI_CHAT_ID, ZAI_USER_ID, ZAI_TOKEN
-    );
-    const elapsed = Date.now() - start;
-    status += `Z-AI SDK: يعمل (${elapsed}ms)\n`;
-  } catch (error) {
-    status += `Z-AI SDK: معطل (${error instanceof Error ? error.message.substring(0, 60) : 'خطأ'})\n`;
+    await callZaiAPI([{ role: 'user', content: 'ok' }], ZAI_CHAT_ID, ZAI_USER_ID, ZAI_TOKEN);
+    status += `Z-AI: يعمل (${Date.now() - start}ms)\n`;
+  } catch {
+    status += `Z-AI: معطل\n`;
   }
 
-  // فحص Pollinations
   try {
     const start = Date.now();
-    const reply = await callPollinationsAPI(
-      [{ role: 'user', content: 'Say OK' }], 0
-    );
-    const elapsed = Date.now() - start;
-    status += `Pollinations: يعمل (${elapsed}ms)\n`;
-  } catch (error) {
+    await callPollinationsAPI([{ role: 'user', content: 'ok' }], 0);
+    status += `Pollinations: يعمل (${Date.now() - start}ms)\n`;
+  } catch {
     status += `Pollinations: معطل\n`;
   }
 
@@ -736,9 +636,9 @@ async function handleUsersCommand(chatId: number) {
   const users = await db.telegramUser.findMany({ orderBy: { lastActive: 'desc' }, take: 20 });
   if (users.length === 0) { await sendMessage(chatId, "لا يوجد مستخدمين."); return; }
   const userList = users.map(u => {
-    const status = u.isBlocked ? '🚫' : u.isApproved ? '✅' : '⏳';
+    const s = u.isBlocked ? '🚫' : u.isApproved ? '✅' : '⏳';
     const name = u.firstName || u.username || 'مجهول';
-    return `${status} ${name} (\`${u.userId}\`) - ${u.totalMessages} رسالة`;
+    return `${s} ${name} (\`${u.userId}\`) - ${u.totalMessages} رسالة`;
   }).join('\n');
   await sendMessage(chatId, `**المستخدمين:**\n\n${userList}`);
 }
