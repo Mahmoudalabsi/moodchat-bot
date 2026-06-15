@@ -20,14 +20,33 @@ const MAX_HISTORY = 30;
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
 
 // ============================
-// Z-AI SDK Instance
+// Z-AI SDK Instance - Config from env vars for Vercel
 // ============================
 
 let zaiInstance: ZAI | null = null;
 
 async function getZAI(): Promise<ZAI> {
   if (!zaiInstance) {
-    zaiInstance = await ZAI.create();
+    // On Vercel, create ZAI with env-based config (no .z-ai-config file)
+    const zaiBaseUrl = process.env.ZAI_BASE_URL;
+    const zaiApiKey = process.env.ZAI_API_KEY;
+    const zaiChatId = process.env.ZAI_CHAT_ID;
+    const zaiUserId = process.env.ZAI_USER_ID;
+    const zaiToken = process.env.ZAI_TOKEN;
+
+    if (zaiBaseUrl && zaiApiKey) {
+      // Use environment variables (Vercel production)
+      zaiInstance = new ZAI({
+        baseUrl: zaiBaseUrl,
+        apiKey: zaiApiKey,
+        chatId: zaiChatId || '',
+        userId: zaiUserId || '',
+        token: zaiToken || '',
+      } as Parameters<typeof ZAI>[0]);
+    } else {
+      // Fallback to .z-ai-config file (local development)
+      zaiInstance = await ZAI.create();
+    }
   }
   return zaiInstance;
 }
