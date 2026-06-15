@@ -2,8 +2,8 @@
  * Telegram Bot Library - Webhook Mode for Vercel
  * كلمة المرور: MOOD2026
  * تحية إسلامية عند التحقق
- * ذاكرة محادثة كاملة (RAG) لكل مستخدم
- * نظام AI: Z-AI SDK (افتراضي) أو API Token
+ * ذاكرة محادثة كاملة لكل مستخدم
+ * نظام AI: Z-AI SDK (افتراضي) → Pollinations.ai (احتياطي)
  */
 
 import { db } from './db';
@@ -54,7 +54,7 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
 }
 
 // ============================
-// AI Chat - Dynamic provider selection
+// AI Chat - Z-AI SDK افتراضي + احتياطي
 // ============================
 
 async function getAIConfig(): Promise<{
@@ -66,7 +66,6 @@ async function getAIConfig(): Promise<{
   userId?: string;
   token?: string;
 }> {
-  // اقرأ الإعدادات من قاعدة البيانات أولاً
   try {
     const providerConfig = await db.botConfig.findUnique({ where: { key: 'ai_provider' } });
     const provider = providerConfig?.value || 'zsdk';
@@ -92,7 +91,6 @@ async function getAIConfig(): Promise<{
       token,
     };
   } catch {
-    // fallback
     return {
       provider: 'zsdk',
       baseUrl: ZAI_BASE_URL,
@@ -106,14 +104,13 @@ async function getAIConfig(): Promise<{
 }
 
 async function chatWithAI(userId: number, userMessage: string): Promise<string> {
-  // بناء سجل المحادثة الكامل من قاعدة البيانات (RAG - ذاكرة كاملة)
+  // بناء سجل المحادثة من قاعدة البيانات (ذاكرة كاملة)
   const dbMessages = await db.message.findMany({
     where: { userId },
     orderBy: { timestamp: 'asc' },
     take: MAX_HISTORY,
   });
 
-  // تحويل لصيغة API
   const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
     { role: 'system', content: SYSTEM_PROMPT },
   ];
@@ -125,35 +122,39 @@ async function chatWithAI(userId: number, userMessage: string): Promise<string> 
     });
   }
 
-  // إضافة الرسالة الحالية
   messages.push({ role: 'user', content: userMessage });
 
   const config = await getAIConfig();
 
-  // 1. محاولة مع مزود API Token إذا كان محدد
+  // 1. مزود API Token (إذا كان محدد)
   if (config.provider === 'api' && config.baseUrl && config.apiKey) {
     try {
       return await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
     } catch (error) {
-      console.error('Custom API failed, trying fallback:', error);
+      console.error('Custom API failed:', error);
+      try { return await callZaiAPI(messages, config.chatId, config.userId, config.token); } catch { /* continue */ }
       try { return await callPollinationsAPI(messages); } catch { /* continue */ }
     }
   }
 
-  // 2. محاولة مع Z-AI SDK (الافتراضي)
+  // 2. Z-AI SDK (الافتراضي)
   try {
     return await callZaiAPI(messages, config.chatId, config.userId, config.token);
   } catch (error) {
     console.error('Z-AI failed, trying Pollinations fallback:', error);
-    // 3. احتياطي: Pollinations.ai (مجاني، بدون مفتاح API)
+    // 3. احتياطي: Pollinations.ai
     try {
       return await callPollinationsAPI(messages);
     } catch (fallbackError) {
       console.error('All AI providers failed:', fallbackError);
-      return "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً. حاول مرة أخرى لاحقاً.";
+      return "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً. حاول مرة أخرى لاحقاً 🙏";
     }
   }
 }
+
+// ============================
+// Z-AI SDK - المزود الافتراضي
+// ============================
 
 async function callZaiAPI(
   messages: Array<{ role: string; content: string }>,
@@ -172,7 +173,7 @@ async function callZaiAPI(
   if (token) headers['X-Token'] = token;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), 25000);
 
   try {
     const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
@@ -200,6 +201,10 @@ async function callZaiAPI(
     clearTimeout(timeout);
   }
 }
+
+// ============================
+// Custom API - مزود بـ API Token
+// ============================
 
 async function callCustomAPI(
   messages: Array<{ role: string; content: string }>,
@@ -241,7 +246,7 @@ async function callCustomAPI(
 }
 
 // ============================
-// Pollinations.ai - مزود احتياطي مجاني بدون مفتاح API
+// Pollinations.ai - مزود احتياطي مجاني
 // ============================
 
 async function callPollinationsAPI(
@@ -254,15 +259,12 @@ async function callPollinationsAPI(
 
     try {
       if (attempt > 0) {
-        // انتظار قبل إعادة المحاولة
         await new Promise(r => setTimeout(r, 2000 * attempt));
       }
 
       const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
           messages,
@@ -340,7 +342,7 @@ function isAdmin(userId: number): boolean {
 }
 
 // ============================
-// Main Webhook Handler
+// Main Webhook Handler - يعمل مباشرة على Vercel
 // ============================
 
 export async function handleTelegramUpdate(update: {
@@ -505,7 +507,7 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ============================
-    // أوامر المدير (تعمل بصمت)
+    // أوامر المدير
     // ============================
 
     if (isAdmin(userId)) {
@@ -575,17 +577,29 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ============================
-    // محادثة عادية مع الذكاء الاصطناعي
-    // النظام الهجين: يحفظ الرسالة كـ "pending" والـ AI Worker يعالجها
+    // محادثة عادية - الرد المباشر بالذكاء الاصطناعي
+    // يعمل على Vercel Serverless Functions
     // ============================
 
+    // إرسال مؤشر الكتابة
     await sendChatAction(chatId);
 
+    // حفظ رسالة المستخدم
     await db.message.create({
-      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
+      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
     });
 
-    // لا ننتظر رد AI هنا - الـ Worker المحلي سيعالج الرسالة ويرسل الرد
+    // استدعاء الذكاء الاصطناعي مباشرة
+    const aiReply = await chatWithAI(userId, text);
+
+    // حفظ رد الذكاء الاصطناعي
+    await db.message.create({
+      data: { userId, role: 'assistant', content: aiReply, modelUsed: 'z-ai', status: 'done', chatId },
+    });
+
+    // إرسال الرد للمستخدم
+    await sendMessage(chatId, aiReply);
+
     return { ok: true };
 
   } catch (error) {
@@ -613,7 +627,7 @@ async function handleDashboardCommand(chatId: number) {
   });
 
   const config = await getAIConfig();
-  const aiInfo = config.provider === 'zsdk' ? 'Z-AI SDK' : config.model;
+  const aiInfo = config.provider === 'zsdk' ? 'Z-AI SDK (GLM-4 Plus)' : config.model;
 
   await sendMessage(chatId,
     `📊 **إحصائيات مود شات**\n\n`

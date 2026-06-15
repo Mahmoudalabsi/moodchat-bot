@@ -56,3 +56,6 @@ node_modules/.prisma/
 *.db
 *.db-journal
 tool-results/
+
+# Z-AI config (secrets)
+.z-ai-config

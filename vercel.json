@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "src/app/api/telegram/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/**/*.ts": {
+      "maxDuration": 30
+    }
+  },
+  "buildCommand": "npx prisma generate && next build",
+  "installCommand": "bun install",
+  "framework": "nextjs"
+}
