@@ -678,7 +678,7 @@ export async function handleTelegramUpdate(update: {
     }
 
     // إذا ما فيه نص - لا شيء بعد الآن (الصورة عُولجت أو لا يوجد صورة)
-    if (!hasText) return { ok: true };
+    if (!hasText) return { ok: true, info: 'photo-processed-or-no-text' };
 
     // ==========================================
     // 3) الأدمن - صلاحيات كاملة بدون كلمة مرور
