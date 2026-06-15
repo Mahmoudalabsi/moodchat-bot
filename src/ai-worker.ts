@@ -1,356 +1,357 @@
 /**
- * MoodChat AI Worker - يعالج الرسائل المعلقة باستخدام Z-AI SDK
+ * AI Worker - MoodChat (مود شات)
+ * يعمل على بيئة Z.ai - يستخدم Z-AI SDK ك مزود أساسي
  * 
- * النظام الهجين:
- * 1. Vercel Webhook → يستلم الرسالة → يحفظها كـ "pending" في DB
- * 2. هذا الـ Worker → يقرأ "pending" → يستدعي Z-AI SDK → يرسل الرد → يحفظ كـ "done"
- * 
- * يعمل فقط على شبكة Z.ai حيث Z-AI API متاح
- * Z-AI SDK هو المزود الافتراضي مع Pollinations.ai كاحتياطي
+ * يعالج الرسائل المعلقة (pending) من قاعدة البيانات:
+ * 1. يقرأ الرسائل المعلقة كل ثانيتين
+ * 2. يستدعي Z-AI SDK للحصول على رد
+ * 3. يرسل الرد عبر Telegram API
+ * 4. يحدّث حالة الرسالة إلى "done"
+ * 5. يرسل نبضة حياة (heartbeat) كل 30 ثانية
  */
 
 import { PrismaClient } from '@prisma/client';
 
-const db = new PrismaClient();
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
+const MAX_HISTORY = 20;
+const POLL_INTERVAL = 2000; // ثانيتين
+const HEARTBEAT_INTERVAL = 30000; // 30 ثانية
+const BATCH_SIZE = 5; // عدد الرسائل التي يعالجها في المرة الواحدة
 
-// ============================
-// الإعدادات
-// ============================
+// Z-AI SDK Config
+const ZAI_CONFIG = {
+  baseUrl: 'https://internal-api.z.ai/v1',
+  apiKey: 'Z.ai',
+  chatId: 'chat-c2ae3234-5685-4053-8998-96e9a664f658',
+  userId: '014c4da7-4f7f-4efa-9157-9091a73a3570',
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
+};
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
-const MAX_HISTORY = 50;
-const POLL_INTERVAL = 2000;
-const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
-const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
-const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
-const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
-const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
+const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي ومحترم. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل. قواعد صارمة: 1- لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة على السؤال. 2- لا تكرر التحيات في كل رسالة. 3- أجب مباشرة وبشكل طبيعي دون مقدمات.";
 
-const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم وتبدأ بالسلام. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
-
-let isRunning = true;
+const db = new PrismaClient({
+  log: ['error'],
+  datasources: {
+    db: {
+      url: process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require',
+    },
+  },
+});
 
 // ============================
 // Telegram API
 // ============================
 
-async function sendMessage(chatId: number, text: string) {
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-  const res = await fetch(url, {
+async function telegramAPI(method: string, params: Record<string, unknown>) {
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
+    body: JSON.stringify(params),
   });
   return res.json();
 }
 
-async function sendChatAction(chatId: number) {
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`;
-  await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-  });
+async function sendMessage(chatId: number, text: string) {
+  return telegramAPI('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+}
+
+function sanitizeMarkdown(text: string): string {
+  let c = text.replace(/^#{1,3}\s+(.+)$/gm, '*$1*');
+  if (((c.match(/\*\*/g) || []).length) % 2 !== 0) c = c.replace(/\*\*([^*]*)$/, '*$1*');
+  if (((c.match(/`/g) || []).length) % 2 !== 0) c += '`';
+  c = c.replace(/~~/g, '');
+  c = c.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  return c;
 }
 
 // ============================
-// AI - Z-AI SDK (الافتراضي) + Pollinations.ai (احتياطي)
+// Z-AI SDK - المزود الأساسي
 // ============================
 
-async function getAIConfig() {
-  try {
-    const providerConfig = await db.botConfig.findUnique({ where: { key: 'ai_provider' } });
-    const provider = providerConfig?.value || 'zsdk';
-
-    if (provider === 'api') {
-      const baseUrl = (await db.botConfig.findUnique({ where: { key: 'api_base_url' } }))?.value || '';
-      const apiKey = (await db.botConfig.findUnique({ where: { key: 'api_key' } }))?.value || '';
-      const model = (await db.botConfig.findUnique({ where: { key: 'api_model' } }))?.value || 'gpt-4';
-      return { provider: 'api' as const, baseUrl, apiKey, model };
-    }
-
-    const chatId = (await db.botConfig.findUnique({ where: { key: 'zai_chat_id' } }))?.value || ZAI_CHAT_ID;
-    const userId = (await db.botConfig.findUnique({ where: { key: 'zai_user_id' } }))?.value || ZAI_USER_ID;
-    const token = (await db.botConfig.findUnique({ where: { key: 'zai_token' } }))?.value || ZAI_TOKEN;
-    return { provider: 'zsdk' as const, chatId, userId, token };
-  } catch {
-    return { provider: 'zsdk' as const, chatId: ZAI_CHAT_ID, userId: ZAI_USER_ID, token: ZAI_TOKEN };
-  }
-}
-
-async function chatWithAI(userId: number, userMessage: string): Promise<string> {
-  const dbMessages = await db.message.findMany({
-    where: { userId, status: 'done' },
-    orderBy: { timestamp: 'asc' },
-    take: MAX_HISTORY,
-  });
-
-  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-    { role: 'system', content: SYSTEM_PROMPT },
-  ];
-
-  for (const msg of dbMessages) {
-    messages.push({ role: msg.role as 'user' | 'assistant', content: msg.content });
-  }
-  messages.push({ role: 'user', content: userMessage });
-
-  const config = await getAIConfig();
-
-  // 1. API Token (إذا كان محدد)
-  if (config.provider === 'api' && config.baseUrl && config.apiKey) {
+async function callZaiSDK(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const ZAIModule = await import('z-ai-web-dev-sdk');
+  const ZAIClass = ZAIModule.default;
+  const zai = new ZAIClass(ZAI_CONFIG);
+  
+  // إعادة المحاولة 3 مرات مع تأخير متزايد
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await callCustomAPI(messages, config.baseUrl, config.apiKey, config.model);
-    } catch (e) {
-      console.error('❌ Custom API:', e);
-      // محاولة مع Z-AI
-      try { return await callZaiAPI(messages, config.chatId, config.userId, config.token); } catch { /* continue */ }
-      try { return await callPollinationsAPI(messages); } catch { /* continue */ }
-    }
-  }
-
-  // 2. Z-AI SDK (الافتراضي)
-  try {
-    return await callZaiAPI(messages, config.chatId, config.userId, config.token);
-  } catch (e) {
-    console.error('❌ Z-AI SDK فشل:', e);
-    // 3. Pollinations.ai احتياطي
-    try {
-      console.log('🔄 محاولة مع Pollinations.ai...');
-      return await callPollinationsAPI(messages);
-    } catch (e2) {
-      console.error('❌ Pollinations.ai فشل:', e2);
-    }
-  }
-
-  return "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً. حاول مرة أخرى لاحقاً 🙏";
-}
-
-// ============================
-// Z-AI SDK - المزود الافتراضي
-// ============================
-
-async function callZaiAPI(
-  messages: Array<{ role: string; content: string }>,
-  chatId?: string,
-  userId?: string,
-  token?: string
-): Promise<string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${ZAI_API_KEY}`,
-    'X-Z-AI-From': 'Z',
-  };
-  if (chatId) headers['X-Chat-Id'] = chatId;
-  if (userId) headers['X-User-Id'] = userId;
-  if (token) headers['X-Token'] = token;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
-
-  try {
-    const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 2048, thinking: { type: 'disabled' } }),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Z-AI ${response.status}: ${errorBody.substring(0, 100)}`);
-    }
-
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty response');
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// ============================
-// Custom API - مزود بـ API Token
-// ============================
-
-async function callCustomAPI(
-  messages: Array<{ role: string; content: string }>,
-  baseUrl: string,
-  apiKey: string,
-  model: string
-): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      signal: controller.signal,
-      body: JSON.stringify({ messages, model, temperature: 0.7, max_tokens: 2048 }),
-    });
-
-    if (!response.ok) throw new Error(`API ${response.status}`);
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty response');
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-// ============================
-// Pollinations.ai - مزود احتياطي مجاني
-// ============================
-
-async function callPollinationsAPI(
-  messages: Array<{ role: string; content: string }>,
-  retries: number = 2
-): Promise<string> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
-
-    try {
-      if (attempt > 0) {
-        await new Promise(r => setTimeout(r, 2000 * attempt));
+      const completion = await zai.chat.completions.create({
+        messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+        model: 'glm-4-plus',
+        temperature: 0.7,
+        max_tokens: 800,
+        thinking: { type: 'disabled' },
+      });
+      const reply = completion?.choices?.[0]?.message?.content;
+      if (reply?.trim()) {
+        return reply.trim();
       }
+      throw new Error('Empty response');
+    } catch (err: any) {
+      const is429 = err?.message?.includes('429') || err?.message?.includes('rate');
+      if (is429 && attempt < 2) {
+        const delay = 2000 * (attempt + 1) + Math.random() * 1000;
+        console.log(`[Worker] Z-AI rate limited, retrying in ${Math.round(delay)}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Z-AI SDK failed after retries');
+}
 
-      const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+// احتياطي: Pollinations
+async function callPollinations(messages: Array<{ role: string; content: string }>): Promise<string> {
+  for (const model of ['mistral', 'openai']) {
+    try {
+      const response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          messages,
-          model: 'openai',
-          temperature: 0.7,
-          seed: Math.floor(Math.random() * 10000),
-        }),
+        signal: AbortSignal.timeout(15000),
+        body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
       });
-
-      if (!response.ok) {
-        if (response.status === 429 && attempt < retries) continue;
-        throw new Error(`Pollinations ${response.status}`);
-      }
-
+      if (response.status === 429) continue;
+      if (!response.ok) continue;
       const data = await response.json();
       const reply = data.choices?.[0]?.message?.content;
       if (reply?.trim()) return reply.trim();
-      throw new Error('Empty Pollinations response');
-    } catch (error) {
-      if (attempt === retries) throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
+    } catch { continue; }
   }
-  throw new Error('Pollinations all retries failed');
+  throw new Error('Pollinations failed');
 }
 
 // ============================
-// Worker - معالجة الرسائل المعلقة
+// معالجة الرسائل المعلقة
 // ============================
+
+let totalProcessed = 0;
+let totalFailed = 0;
+let isProcessing = false;
 
 async function processPendingMessages() {
-  const pending = await db.message.findMany({
-    where: { status: 'pending', role: 'user' },
-    orderBy: { timestamp: 'asc' },
-    take: 5,
-  });
+  if (isProcessing) return;
+  isProcessing = true;
 
-  for (const msg of pending) {
-    try {
-      const chatId = msg.chatId || msg.userId;
-      console.log(`📩 معالجة: "${msg.content.substring(0, 50)}..." (user: ${msg.userId})`);
-
-      // إرسال حالة الكتابة
-      await sendChatAction(chatId);
-
-      // استدعاء الذكاء الاصطناعي
-      const aiReply = await chatWithAI(msg.userId, msg.content);
-
-      // حفظ رد AI
-      await db.message.create({
-        data: {
-          userId: msg.userId,
-          role: 'assistant',
-          content: aiReply,
-          modelUsed: 'moodchat-zai',
-          status: 'done',
-        },
-      });
-
-      // تحديث الرسالة الأصلية كـ "done"
-      await db.message.update({
-        where: { id: msg.id },
-        data: { status: 'done' },
-      });
-
-      // إرسال الرد عبر تيليجرام
-      await sendMessage(chatId, aiReply);
-      console.log(`🤖 رد: "${aiReply.substring(0, 60)}..."`);
-
-    } catch (error) {
-      console.error(`❌ خطأ في معالجة رسالة ${msg.id}:`, error);
-
-      // تحديث الرسالة كـ فاشلة لكن منتهية
-      await db.message.update({
-        where: { id: msg.id },
-        data: { status: 'done' },
-      }).catch(() => {});
-    }
-  }
-}
-
-// ============================
-// Main Loop
-// ============================
-
-async function startWorker() {
-  console.log('');
-  console.log('🌙 ═══════════════════════════════════════════════');
-  console.log('🤖 مود شات - AI Worker (Z-AI SDK)');
-  console.log('🧠 يعالج الرسائل المعلقة باستخدام Z-AI SDK');
-  console.log('🔗 Vercel Webhook → DB → هذا الـ Worker → Z-AI');
-  console.log('🌙 ═══════════════════════════════════════════════');
-  console.log('');
-
-  // اختبار Z-AI
-  console.log('🧪 اختبار الاتصال بـ Z-AI SDK...');
   try {
-    const reply = await callZaiAPI(
-      [{ role: 'system', content: 'أنت مساعد.' }, { role: 'user', content: 'قل مرحبا' }],
-      ZAI_CHAT_ID, ZAI_USER_ID, ZAI_TOKEN
-    );
-    console.log(`✅ Z-AI SDK يعمل! رد: "${reply.substring(0, 50)}..."`);
-  } catch (e) {
-    console.error('⚠️ Z-AI SDK لا يعمل:', e);
-  }
+    // البحث عن رسائل معلقة
+    const pendingMessages = await db.message.findMany({
+      where: { status: 'pending', role: 'user' },
+      orderBy: { timestamp: 'asc' },
+      take: BATCH_SIZE,
+    });
 
-  console.log('');
-  console.log('🚀 الـ Worker يعمل الآن! اضغط Ctrl+C للإيقاف');
-  console.log('');
+    if (pendingMessages.length === 0) return;
 
-  while (isRunning) {
-    try {
-      await processPendingMessages();
-    } catch (error) {
-      console.error('❌ خطأ في الـ Worker:', error);
+    console.log(`[Worker] Found ${pendingMessages.length} pending messages`);
+
+    for (const msg of pendingMessages) {
+      try {
+        // تحديث الحالة إلى "processing" لمنع المعالجة المزدوجة
+        await db.message.update({
+          where: { id: msg.id },
+          data: { status: 'processing' },
+        });
+
+        // جلب سجل المحادثة
+        const dbMessages = await db.message.findMany({
+          where: {
+            userId: msg.userId,
+            status: { in: ['done', 'processing'] },
+            timestamp: { lte: msg.timestamp },
+          },
+          orderBy: { timestamp: 'asc' },
+          take: MAX_HISTORY,
+          select: { role: true, content: true },
+        });
+
+        const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+        ];
+
+        // استدعاء Z-AI SDK (أساسي) مع fallback
+        let reply: string;
+        let provider: string;
+        try {
+          reply = await callZaiSDK(aiMessages);
+          provider = 'zai-sdk';
+        } catch (zaiErr: any) {
+          console.log(`[Worker] Z-AI failed: ${zaiErr?.message?.substring(0, 60)}, trying Pollinations...`);
+          try {
+            reply = await callPollinations(aiMessages);
+            provider = 'pollinations';
+          } catch (pollErr: any) {
+            console.error(`[Worker] All AI failed for user ${msg.userId}`);
+            // تحديث الرسالة الأصلية كفاشلة
+            await db.message.update({
+              where: { id: msg.id },
+              data: { status: 'done' },
+            });
+            totalFailed++;
+            continue;
+          }
+        }
+
+        // حفظ رد الـ AI
+        await db.message.create({
+          data: {
+            userId: msg.userId,
+            role: 'assistant',
+            content: reply,
+            modelUsed: `moodchat-${provider}`,
+            status: 'done',
+            chatId: msg.chatId,
+          },
+        });
+
+        // تحديث الرسالة الأصلية
+        await db.message.update({
+          where: { id: msg.id },
+          data: { status: 'done' },
+        });
+
+        // إرسال الرد عبر Telegram
+        const chatId = msg.chatId || msg.userId;
+        await sendMessage(chatId, sanitizeMarkdown(reply));
+
+        totalProcessed++;
+        console.log(`[Worker] Processed msg ${msg.id} for user ${msg.userId} via ${provider} (total: ${totalProcessed})`);
+
+      } catch (err: any) {
+        console.error(`[Worker] Error processing msg ${msg.id}:`, err?.message?.substring(0, 100));
+        // أعد الرسالة لحالة pending للمحاولة مرة أخرى
+        try {
+          await db.message.update({
+            where: { id: msg.id },
+            data: { status: 'pending' },
+          });
+        } catch {}
+        totalFailed++;
+      }
     }
-    await new Promise(r => setTimeout(r, POLL_INTERVAL));
+  } catch (err: any) {
+    console.error('[Worker] Error in processPendingMessages:', err?.message?.substring(0, 100));
+  } finally {
+    isProcessing = false;
   }
 }
 
-// إيقاف نظيف
-process.on('SIGINT', () => {
-  console.log('\n⏹️ جاري إيقاف الـ Worker...');
-  isRunning = false;
-  setTimeout(() => process.exit(0), 1000);
-});
+// ============================
+// نبضة الحياة (Heartbeat)
+// ============================
 
-process.on('SIGTERM', () => {
-  isRunning = false;
-  setTimeout(() => process.exit(0), 1000);
-});
+async function sendHeartbeat() {
+  try {
+    await db.botConfig.upsert({
+      where: { key: 'worker_heartbeat' },
+      update: { value: new Date().toISOString() },
+      create: { key: 'worker_heartbeat', value: new Date().toISOString() },
+    });
 
-startWorker().catch(console.error);
+    await db.botConfig.upsert({
+      where: { key: 'worker_stats' },
+      update: { value: JSON.stringify({ totalProcessed, totalFailed, lastActivity: new Date().toISOString() }) },
+      create: { key: 'worker_stats', value: JSON.stringify({ totalProcessed, totalFailed, lastActivity: new Date().toISOString() }) },
+    });
+  } catch (err: any) {
+    console.error('[Worker] Heartbeat error:', err?.message?.substring(0, 60));
+  }
+}
+
+// ============================
+// تنظيف الرسائل العالقة
+// ============================
+
+async function cleanStuckMessages() {
+  try {
+    // الرسائل في حالة "processing" لأكثر من 5 دقائق = عالقة
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const result = await db.message.updateMany({
+      where: {
+        status: 'processing',
+        timestamp: { lt: fiveMinutesAgo },
+      },
+      data: { status: 'pending' },
+    });
+    if (result.count > 0) {
+      console.log(`[Worker] Recovered ${result.count} stuck messages`);
+    }
+  } catch (err: any) {
+    console.error('[Worker] Clean error:', err?.message?.substring(0, 60));
+  }
+}
+
+// ============================
+// التشغيل الرئيسي
+// ============================
+
+async function main() {
+  console.log('========================================');
+  console.log('  مود شات - AI Worker');
+  console.log('  Z-AI SDK (GLM-4 Plus) - Primary');
+  console.log(`  Bot Token: ...${BOT_TOKEN.slice(-8)}`);
+  console.log(`  Poll Interval: ${POLL_INTERVAL}ms`);
+  console.log('========================================');
+
+  // اختبار Z-AI SDK
+  try {
+    console.log('[Worker] Testing Z-AI SDK...');
+    const testReply = await callZaiSDK([{ role: 'user', content: 'say ok' }]);
+    console.log(`[Worker] Z-AI SDK test: OK (${testReply.substring(0, 30)})`);
+  } catch (err: any) {
+    console.error(`[Worker] Z-AI SDK test FAILED: ${err?.message?.substring(0, 80)}`);
+    console.error('[Worker] Worker will still start, but Z-AI may not work');
+  }
+
+  // اختبار اتصال قاعدة البيانات
+  try {
+    await db.$queryRaw`SELECT 1`;
+    console.log('[Worker] Database connection: OK');
+  } catch (err: any) {
+    console.error(`[Worker] Database connection FAILED: ${err?.message?.substring(0, 80)}`);
+    process.exit(1);
+  }
+
+  // إرسال نبضة الحياة الأولى
+  await sendHeartbeat();
+
+  // حلقة المعالجة الرئيسية
+  console.log('[Worker] Starting main loop...');
+
+  // معالجة الرسائل كل ثانيتين
+  const processInterval = setInterval(processPendingMessages, POLL_INTERVAL);
+
+  // نبضة الحياة كل 30 ثانية
+  const heartbeatInterval = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+
+  // تنظيف الرسائل العالقة كل دقيقة
+  const cleanInterval = setInterval(cleanStuckMessages, 60000);
+
+  // معالجة أي رسائل معلقة فوراً
+  await processPendingMessages();
+
+  // التعامل مع إشارات الإيقاف
+  const shutdown = async (signal: string) => {
+    console.log(`\n[Worker] Received ${signal}, shutting down gracefully...`);
+    clearInterval(processInterval);
+    clearInterval(heartbeatInterval);
+    clearInterval(cleanInterval);
+    await db.$disconnect();
+    console.log('[Worker] Shutdown complete');
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // منع العملية من الخروج
+  process.stdin.resume();
+}
+
+main().catch(err => {
+  console.error('[Worker] Fatal error:', err);
+  process.exit(1);
+});

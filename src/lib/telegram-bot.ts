@@ -1,12 +1,11 @@
 /**
  * Telegram Bot Library - MoodChat (مود شات)
- * يعمل على Vercel (webhook)
- *
- * نظام AI بـ 3 مزودين:
- * 1. Z-AI SDK (GLM-4 Plus) - الأساسي
- * 2. Gemini 1.5 Flash (RapidAPI) - الثانوي
- * 3. Pollinations.ai - الاحتياطي
- * 4. رد ذكي مدمج - لا يفشل أبداً
+ * 
+ * نظام هجين ذكي:
+ * - Vercel Webhook: يستقبل الرسائل ويحفظها كـ "pending"
+ * - Z.ai Worker: يعالج الرسائل باستخدام Z-AI SDK (الأساسي)
+ * - إذا Worker غير متاح: Vercel يعالج مباشرة بـ Gemini/Pollinations
+ * - لا ضياع للرسائل أبداً!
  */
 
 import { db } from './db';
@@ -19,6 +18,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJq
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
+const WORKER_TIMEOUT = 30000; // 30 ثانية - إذا لم يعالج Worker خلالها، يعالج Vercel
 
 // Z-AI SDK Config
 const ZAI_CONFIG = {
@@ -29,9 +29,9 @@ const ZAI_CONFIG = {
   token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
 };
 
-// Google Gemini API Config (مجاني من aistudio.google.com)
+// Google Gemini API Config
 const GEMINI_CONFIG = {
-  apiKey: process.env.GEMINI_API_KEY || '',  // يُضاف من Vercel env أو لوحة التحكم
+  apiKey: process.env.GEMINI_API_KEY || '',
   model: 'gemini-2.0-flash',
 };
 
@@ -64,6 +64,21 @@ async function getAIConfig() {
 export function clearAIConfigCache() { aiConfigCache = null; aiConfigCacheTime = 0; }
 
 // ============================
+// فحص حالة الـ Worker
+// ============================
+
+async function isWorkerAlive(): Promise<boolean> {
+  try {
+    const heartbeat = await db.botConfig.findUnique({ where: { key: 'worker_heartbeat' } });
+    if (!heartbeat?.value) return false;
+    const lastBeat = new Date(heartbeat.value).getTime();
+    return (Date.now() - lastBeat) < 120000; // أقل من دقيقتين = Worker شغال
+  } catch {
+    return false;
+  }
+}
+
+// ============================
 // Telegram API
 // ============================
 
@@ -83,14 +98,9 @@ async function sendChatAction(chatId: number) {
 }
 
 // ============================
-// AI Providers - كل مزود يعمل بشكل مستقل
+// AI Providers (لاستخدام Vercel fallback فقط)
 // ============================
 
-/**
- * Provider 1: Z-AI SDK (z-ai-web-dev-sdk)
- * يعمل عبر internal-api.z.ai - يعمل من بيئة Z.ai فقط
- * من Vercel سيفشل (internal-api.z.ai غير متاح خارجياً) وينتقل للمزود التالي
- */
 async function callZaiSDK(messages: Array<{ role: string; content: string }>): Promise<string> {
   try {
     const ZAIModule = await import('z-ai-web-dev-sdk');
@@ -114,56 +124,7 @@ async function callZaiSDK(messages: Array<{ role: string; content: string }>): P
   }
 }
 
-/**
- * Provider 2: Z-AI Direct API
- * يرسل طلبات مباشرة لـ internal-api.z.ai بدون SDK
- */
-async function callZaiDirect(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const endpoints = [
-    'https://internal-api.z.ai/v1/chat/completions',
-    'https://z.ai/api/v1/chat/completions',
-  ];
-  for (const url of endpoints) {
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${ZAI_CONFIG.apiKey}`,
-        'X-Z-AI-From': 'Z',
-        'X-Chat-Id': ZAI_CONFIG.chatId,
-        'X-User-Id': ZAI_CONFIG.userId,
-        'X-Token': ZAI_CONFIG.token,
-      };
-      const response = await fetch(url, {
-        method: 'POST', headers,
-        signal: AbortSignal.timeout(10000),
-        body: JSON.stringify({
-          model: 'glm-4-plus',
-          messages,
-          temperature: 0.7,
-          max_tokens: 800,
-          thinking: { type: 'disabled' },
-        }),
-      });
-      if (response.status === 429 || response.status === 401 || response.status === 403) continue;
-      if (!response.ok) continue;
-      const data = await response.json();
-      const reply = data?.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log(`[AI] Z-AI Direct OK (${url})`);
-        return reply.trim();
-      }
-    } catch { continue; }
-  }
-  throw new Error('Z-AI Direct failed');
-}
-
-/**
- * Provider 3: Google Gemini API المباشر (مجاني)
- * يعمل من Vercel بلا مشاكل - يحتاج API Key من aistudio.google.com
- * المجاني: 15 طلب/دقيقة، 1 مليون طلب/شهر
- */
 async function callGeminiDirect(messages: Array<{ role: string; content: string }>): Promise<string> {
-  // محاولة الحصول على مفتاح Gemini من DB أو env
   let apiKey = GEMINI_CONFIG.apiKey;
   if (!apiKey) {
     try {
@@ -171,65 +132,32 @@ async function callGeminiDirect(messages: Array<{ role: string; content: string 
       apiKey = cfg?.value || '';
     } catch {}
   }
-  if (!apiKey) throw new Error('No Gemini API key configured');
+  if (!apiKey) throw new Error('No Gemini API key');
 
   try {
-    // تحويل الرسائل لصيغة Gemini
     const contents = messages
       .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
-      }));
-
-    // إضافة system instruction إذا وُجدت
+      .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
     const systemInstruction = messages.find(m => m.role === 'system');
-
-    const body: Record<string, unknown> = {
-      contents,
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 800,
-      },
-    };
-    if (systemInstruction) {
-      body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
-    }
+    const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 800 } };
+    if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
 
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CONFIG.model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(20000),
-        body: JSON.stringify(body),
-      }
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000), body: JSON.stringify(body) }
     );
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`Gemini ${response.status}: ${errText.substring(0, 100)}`);
-    }
-
+    if (!response.ok) throw new Error(`Gemini ${response.status}`);
     const data = await response.json();
     const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (reply?.trim()) {
-      console.log('[AI] Gemini Direct OK');
-      return reply.trim();
-    }
-    throw new Error('Empty Gemini response');
+    if (reply?.trim()) { console.log('[AI] Gemini OK'); return reply.trim(); }
+    throw new Error('Empty Gemini');
   } catch (err: any) {
-    throw new Error(`Gemini: ${err?.message?.substring(0, 80)}`);
+    throw new Error(`Gemini: ${err?.message?.substring(0, 60)}`);
   }
 }
 
-/**
- * Provider 4: Pollinations OpenAI endpoint
- */
 async function callPollinationsOpenAI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const models = ['mistral', 'openai', 'llama'];
-  for (const model of models) {
+  for (const model of ['mistral', 'openai', 'llama']) {
     try {
       const response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
@@ -237,26 +165,17 @@ async function callPollinationsOpenAI(messages: Array<{ role: string; content: s
         signal: AbortSignal.timeout(15000),
         body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
       });
-      if (response.status === 429) { await new Promise(r => setTimeout(r, 1000)); continue; }
+      if (response.status === 429) continue;
       if (!response.ok) continue;
       const data = await response.json();
       const reply = data.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log(`[AI] Pollinations ${model} OK`);
-        return reply.trim();
-      }
+      if (reply?.trim()) { console.log(`[AI] Pollinations ${model} OK`); return reply.trim(); }
     } catch { continue; }
   }
-  throw new Error('Pollinations OpenAI failed');
+  throw new Error('Pollinations failed');
 }
 
-/**
- * Provider 5: Custom API (مُكوّن من لوحة التحكم)
- */
-async function callCustomAPI(
-  messages: Array<{ role: string; content: string }>,
-  config: { baseUrl: string; apiKey: string; model: string }
-): Promise<string> {
+async function callCustomAPI(messages: Array<{ role: string; content: string }>, config: { baseUrl: string; apiKey: string; model: string }): Promise<string> {
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
@@ -267,65 +186,28 @@ async function callCustomAPI(
   const data = await response.json();
   const reply = data.choices?.[0]?.message?.content;
   if (reply?.trim()) return reply.trim();
-  throw new Error('Empty custom response');
+  throw new Error('Empty custom');
 }
 
-// ============================
-// Unified AI Response - نظام ذكي متعدد الطبقات
-// ============================
-
-async function getAIResponse(
+// Vercel Fallback: يعمل فقط عندما Worker غير متاح
+async function getAIResponseFallback(
   messages: Array<{ role: string; content: string }>,
   config: { provider: string; baseUrl?: string; apiKey?: string; model?: string }
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // بناء قائمة المزودين حسب الأولوية
-  // من Vercel: Z-AI سيفشل سريعاً، ثم Gemini ينجح
-  // من Z.ai: Z-AI ينجح مباشرة
-  const providers: Array<{ name: string; fn: () => Promise<string>; priority: number }> = [
-    { name: 'zai-sdk', fn: () => callZaiSDK(messages), priority: 1 },
-    { name: 'zai-direct', fn: () => callZaiDirect(messages), priority: 2 },
-    { name: 'gemini', fn: () => callGeminiDirect(messages), priority: 3 },
-    { name: 'pollinations', fn: () => callPollinationsOpenAI(messages), priority: 4 },
+  // جرب Z-AI SDK أولاً (قد يعمل من Z.ai إذا كان الـ webhook يعالج هناك)
+  const providers: Array<{ name: string; fn: () => Promise<string> }> = [
+    { name: 'zai-sdk', fn: () => callZaiSDK(messages) },
+    { name: 'gemini', fn: () => callGeminiDirect(messages) },
+    { name: 'pollinations', fn: () => callPollinationsOpenAI(messages) },
   ];
 
   if (config.provider === 'api' && config.baseUrl && config.apiKey) {
-    providers.push({
-      name: 'custom-api',
-      fn: () => callCustomAPI(messages, { baseUrl: config.baseUrl!, apiKey: config.apiKey!, model: config.model || 'gpt-4' }),
-      priority: 5,
-    });
+    providers.push({ name: 'custom-api', fn: () => callCustomAPI(messages, { baseUrl: config.baseUrl!, apiKey: config.apiKey!, model: config.model || 'gpt-4' }) });
   }
 
-  // المرحلة 1: شغل أول 3 مزودين بالتوازي (Z-AI SDK + Z-AI Direct + Gemini)
-  // أول نتيجة ناجحة تُستخدم
-  const firstBatch = providers.slice(0, 3);
-  try {
-    const results = await Promise.allSettled(
-      firstTwo.map(async (p) => {
-        const reply = await p.fn();
-        return { reply, provider: p.name };
-      })
-    );
-    // أرجع أول نتيجة ناجحة
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        return result.value;
-      }
-    }
-    const failReasons = results
-      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-      .map((r, i) => `${firstTwo[i].name}: ${r.reason?.message?.substring(0, 40)}`)
-      .join('|');
-    errors.push(`Parallel: ${failReasons}`);
-  } catch (err: any) {
-    errors.push(`Parallel: ${err?.message?.substring(0, 50)}`);
-  }
-
-  // المرحلة 2: جرب الباقي بالتسلسل
-  const rest = providers.slice(2);
-  for (const provider of rest) {
+  for (const provider of providers) {
     try {
       const reply = await provider.fn();
       return { reply, provider: provider.name };
@@ -334,8 +216,7 @@ async function getAIResponse(
     }
   }
 
-  // المرحلة الأخيرة: رد ذكي مدمج
-  console.log('[AI] All providers failed:', errors.join(' | '));
+  console.log('[AI Fallback] All failed:', errors.join(' | '));
   const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
   return { reply: generateSmartFallback(lastUserMsg), provider: 'fallback' };
 }
@@ -370,7 +251,7 @@ async function getOrCreateUser(u: { id: number; username?: string; first_name?: 
 function isAdmin(userId: number): boolean { return ADMIN_IDS.includes(userId); }
 
 // ============================
-// Main Webhook Handler
+// Main Webhook Handler - نظام هجين ذكي
 // ============================
 
 export async function handleTelegramUpdate(update: {
@@ -397,7 +278,7 @@ export async function handleTelegramUpdate(update: {
       if (text === pw) {
         await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
         await db.joinLog.create({ data: { userId, action: 'success' } });
-        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- محادثة طبيعية - أجيب بوضوح ودقة\n\nابدأ محادثتك الآن!");
+        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- يعمل بـ Z-AI (GLM-4 Plus)\n\nابدأ محادثتك الآن!");
       } else {
         await db.telegramUser.update({ where: { userId }, data: { joinAttempts: { increment: 1 } } });
         await db.joinLog.create({ data: { userId, action: 'fail', passwordTried: text.substring(0, 50) } });
@@ -409,7 +290,7 @@ export async function handleTelegramUpdate(update: {
     // أمر /start
     if (text === '/start') {
       if (isAdmin(userId) || user.isApproved) {
-        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- يعمل بـ Z-AI (GLM-4 Plus) + Gemini\n\n/clear - مسح الذاكرة\n/help - المساعدة");
+        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- يعمل بـ Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة");
       } else {
         await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
         await db.joinLog.create({ data: { userId, action: 'attempt' } });
@@ -427,7 +308,7 @@ export async function handleTelegramUpdate(update: {
     }
 
     if (text === '/help') {
-      await sendMessage(chatId, "**مود شات - المساعدة**\n\n- ذاكرة ذكية\n- متعدد اللغات\n- يعمل بـ Z-AI + Gemini\n\n/start - بدء المحادثة\n/clear - مسح الذاكرة\n/help - المساعدة");
+      await sendMessage(chatId, "**مود شات - المساعدة**\n\n- ذاكرة ذكية\n- متعدد اللغات\n- يعمل بـ Z-AI (GLM-4 Plus)\n\n/start - بدء المحادثة\n/clear - مسح الذاكرة\n/help - المساعدة");
       return { ok: true };
     }
     if (text === '/clear') {
@@ -442,6 +323,7 @@ export async function handleTelegramUpdate(update: {
       if (text === '/users') { await handleUsersCommand(chatId); return { ok: true }; }
       if (text.startsWith('/chatlog')) { await handleChatLogCommand(chatId, text); return { ok: true }; }
       if (text === '/aistatus') { await handleAIStatusCommand(chatId); return { ok: true }; }
+      if (text === '/workerstatus') { await handleWorkerStatusCommand(chatId); return { ok: true }; }
       if (text.startsWith('/block ')) {
         const tid = parseInt(text.split(' ')[1]);
         if (tid && tid !== userId) { await db.telegramUser.update({ where: { userId: tid }, data: { isBlocked: true, waitingForPassword: false } }); await sendMessage(chatId, `تم حظر \`${tid}\``); }
@@ -472,8 +354,23 @@ export async function handleTelegramUpdate(update: {
       }
     }
 
-    // محادثة عادية - AI
+    // ============================
+    // محادثة عادية - النظام الهجين الذكي
+    // ============================
     await sendChatAction(chatId);
+    const workerAlive = await isWorkerAlive();
+
+    if (workerAlive) {
+      // ✅ الوضع الهجين: احفظ كـ "pending" والـ Worker سيعالجها بـ Z-AI SDK
+      await db.message.create({
+        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
+      });
+      console.log(`[Webhook] Message saved as pending (worker alive). User: ${userId}`);
+      return { ok: true, mode: 'hybrid-pending' };
+    }
+
+    // ❌ Worker غير متاح: عالج مباشرة باستخدام AI fallback
+    console.log(`[Webhook] Worker offline, processing inline. User: ${userId}`);
 
     await db.message.create({
       data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
@@ -489,14 +386,14 @@ export async function handleTelegramUpdate(update: {
       ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
     ];
 
-    const { reply, provider } = await getAIResponse(aiMessages, config);
+    const { reply, provider } = await getAIResponseFallback(aiMessages, config);
 
     await db.message.create({
       data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
     });
 
     await sendMessage(chatId, sanitizeMarkdown(reply));
-    return { ok: true };
+    return { ok: true, mode: 'inline-fallback', provider };
 
   } catch (error) {
     console.error('[Webhook] Error:', error);
@@ -517,34 +414,32 @@ async function handleAIStatusCommand(chatId: number) {
   let status = "**حالة مزودي AI:**\n\n";
   const msgs = [{ role: 'user' as const, content: 'say ok' }];
 
-  // اختبار Z-AI SDK
+  try { const s = Date.now(); await callZaiSDK(msgs); status += `Z-AI SDK: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Z-AI SDK: غير متاح (يعمل من Z.ai فقط)\n`; }
+  try { const s = Date.now(); await callGeminiDirect(msgs); status += `Gemini: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Gemini: غير متاح\n`; }
+  try { const s = Date.now(); await callPollinationsOpenAI(msgs); status += `Pollinations: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Pollinations: غير متاح\n`; }
+
+  const workerAlive = await isWorkerAlive();
+  status += `\nWorker: ${workerAlive ? 'يعمل ✅ (Z-AI SDK)' : 'متوقف ❌ (fallback mode)'}\nالنظام: Z-AI SDK أساسي + Gemini/Pollinations احتياطي`;
+  await sendMessage(chatId, status);
+}
+
+async function handleWorkerStatusCommand(chatId: number) {
+  let status = "**حالة الـ Worker:**\n\n";
   try {
-    const s = Date.now();
-    await callZaiSDK(msgs);
-    status += `Z-AI SDK: يعمل (${Date.now() - s}ms)\n`;
+    const heartbeat = await db.botConfig.findUnique({ where: { key: 'worker_heartbeat' } });
+    if (heartbeat?.value) {
+      const lastBeat = new Date(heartbeat.value);
+      const age = Math.round((Date.now() - lastBeat.getTime()) / 1000);
+      status += `آخر نبضة: ${lastBeat.toISOString()}\nمنذ: ${age} ثانية\nالحالة: ${age < 120 ? 'يعمل ✅' : 'متوقف ❌'}`;
+    } else {
+      status += 'لا توجد نبضة - Worker لم يعمل بعد';
+    }
   } catch {
-    status += `Z-AI SDK: غير متاح\n`;
+    status += 'خطأ في قراءة الحالة';
   }
 
-  // اختبار Gemini
-  try {
-    const s = Date.now();
-    await callGeminiDirect(msgs);
-    status += `Gemini: يعمل (${Date.now() - s}ms)\n`;
-  } catch {
-    status += `Gemini: غير متاح (يحتاج API Key من aistudio.google.com)\n`;
-  }
-
-  // اختبار Pollinations
-  try {
-    const s = Date.now();
-    await callPollinationsOpenAI(msgs);
-    status += `Pollinations: يعمل (${Date.now() - s}ms)\n`;
-  } catch {
-    status += `Pollinations: غير متاح\n`;
-  }
-
-  status += `\nالنظام: Z-AI SDK + Gemini + Pollinations + رد ذكي`;
+  const pendingCount = await db.message.count({ where: { status: 'pending' } });
+  status += `\n\nرسائل معلقة: ${pendingCount}`;
   await sendMessage(chatId, status);
 }
 
@@ -559,13 +454,14 @@ function sanitizeMarkdown(text: string): string {
 
 async function handleDashboardCommand(chatId: number) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const [tu, au, bu, tm, mt, nu] = await Promise.all([
+  const [tu, au, bu, tm, mt, nu, pm] = await Promise.all([
     db.telegramUser.count(), db.telegramUser.count({ where: { isApproved: true } }),
     db.telegramUser.count({ where: { isBlocked: true } }), db.message.count(),
     db.message.count({ where: { timestamp: { gte: today } } }),
     db.telegramUser.count({ where: { firstSeen: { gte: today } } }),
+    db.message.count({ where: { status: 'pending' } }),
   ]);
-  await sendMessage(chatId, `**إحصائيات مود شات**\n\nالمستخدمين: ${tu}\nالمفعلين: ${au}\nالمحظورين: ${bu}\nالرسائل: ${tm}\nرسائل اليوم: ${mt}\nمستخدمين جدد: ${nu}`);
+  await sendMessage(chatId, `**إحصائيات مود شات**\n\nالمستخدمين: ${tu}\nالمفعلين: ${au}\nالمحظورين: ${bu}\nالرسائل: ${tm}\nرسائل اليوم: ${mt}\nمستخدمين جدد: ${nu}\nمعلقة: ${pm}`);
 }
 
 async function handleUsersCommand(chatId: number) {
