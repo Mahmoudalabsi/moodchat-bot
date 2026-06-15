@@ -1,36 +1,31 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, useTransition } from 'react';
 import {
   Users, MessageSquare, Shield, Activity, Bot,
   UserCheck, UserX, Clock, Search, RefreshCw,
   Eye, Ban, Trash2, CheckCircle, BarChart3,
   Send, Key, Wifi, WifiOff, Settings, Moon,
-  ChevronLeft, Save, Zap, LogOut, Lock
+  Sun, ChevronLeft, Save, Zap, LogOut, Lock,
+  MessageCircle, TrendingUp, UserPlus, AlertTriangle,
+  ChevronDown, X, ArrowLeft
 } from 'lucide-react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { Skeleton } from '@/components/ui/skeleton';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-
-// Colors
-const C = {
-  bg: '#0B1929', card: '#1E3A5F', cardHover: '#264A6E',
-  accent: '#D4A853', accentHover: '#E5BD6A',
-  text: '#F0E6D3', textSec: '#8BA3C1',
-  success: '#4ADE80', danger: '#F87171', warn: '#FBBF24',
-  border: '#2A4A6B',
-};
 
 // Types
 interface Stats {
@@ -60,14 +55,62 @@ interface BotConfig {
   zai_token: string; zai_token_raw: string; join_password: string;
 }
 
+// Theme hook
+function useTheme() {
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('moodchat_theme');
+      if (stored === 'light' || stored === 'dark') return stored;
+    }
+    return 'dark';
+  });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('moodchat_theme', theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  }, []);
+
+  return { theme, toggleTheme };
+}
+
+// Format date in Arabic
+function formatDate(dateStr: string) {
+  try {
+    return new Date(dateStr).toLocaleDateString('ar-EG', {
+      year: 'numeric', month: 'short', day: 'numeric',
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+function formatTime(dateStr: string) {
+  try {
+    return new Date(dateStr).toLocaleTimeString('ar-EG', {
+      hour: '2-digit', minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
+}
+
+function formatDateTime(dateStr: string) {
+  return `${formatDate(dateStr)} ${formatTime(dateStr)}`;
+}
+
 export default function Dashboard() {
-  // تسجيل الدخول
+  // Auth state
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
 
+  // Data state
   const [stats, setStats] = useState<Stats | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -76,10 +119,18 @@ export default function Dashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [userMessages, setUserMessages] = useState<Message[]>([]);
+  const [userMessagesTotal, setUserMessagesTotal] = useState(0);
+  const [userMessagesHasMore, setUserMessagesHasMore] = useState(false);
+  const [loadingMoreMessages, setLoadingMoreMessages] = useState(false);
   const [webhookStatus, setWebhookStatus] = useState<'online' | 'offline' | 'checking'>('checking');
   const [config, setConfig] = useState<BotConfig | null>(null);
   const [activeTab, setActiveTab] = useState('stats');
   const [savingConfig, setSavingConfig] = useState(false);
+
+  // Delete confirmation dialog
+  const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; userId: number | null; userName: string }>({
+    open: false, userId: null, userName: '',
+  });
 
   // Config form state
   const [cfgProvider, setCfgProvider] = useState('zsdk');
@@ -91,7 +142,13 @@ export default function Dashboard() {
   const [cfgZaiToken, setCfgZaiToken] = useState('');
   const [cfgPassword, setCfgPassword] = useState('');
 
-  // تسجيل الدخول
+  // Theme
+  const { theme, toggleTheme } = useTheme();
+
+  // Chat scroll ref
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Login handler
   const handleLogin = async () => {
     setLoginLoading(true);
     setLoginError('');
@@ -103,6 +160,7 @@ export default function Dashboard() {
       });
       const d = await r.json();
       if (d.ok) {
+        localStorage.setItem('moodchat_auth', 'true');
         setIsLoggedIn(true);
         setLoginPassword('');
       } else {
@@ -114,55 +172,99 @@ export default function Dashboard() {
     setLoginLoading(false);
   };
 
-  // تسجيل الخروج
+  // Logout handler
   const handleLogout = async () => {
     await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'logout' }),
     });
+    localStorage.removeItem('moodchat_auth');
     setIsLoggedIn(false);
   };
 
-  // التحقق من الجلسة عند التحميل
+  // Verify auth on load - check localStorage first, then verify with server
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch('/api/auth');
-        if (r.ok) { setIsLoggedIn(true); }
-      } catch {}
+    const verifyAuth = async () => {
+      const storedAuth = localStorage.getItem('moodchat_auth');
+      if (storedAuth === 'true') {
+        try {
+          const r = await fetch('/api/auth');
+          if (r.ok) {
+            setIsLoggedIn(true);
+          } else {
+            localStorage.removeItem('moodchat_auth');
+          }
+        } catch {
+          // Keep logged in if network error - session cookie might still be valid
+          setIsLoggedIn(true);
+        }
+      }
       setCheckingAuth(false);
-    })();
+    };
+    verifyAuth();
   }, []);
 
   // Fetch stats
   const fetchStats = useCallback(async () => {
-    try { const r = await fetch('/api/stats'); if (r.ok) setStats(await r.json()); } catch {}
+    try {
+      const r = await fetch('/api/stats');
+      if (r.ok) setStats(await r.json());
+    } catch { /* ignore */ }
   }, []);
 
   // Fetch users
   const fetchUsers = useCallback(async () => {
     try {
       const r = await fetch(`/api/users?filter=${userFilter}&search=${searchQuery}`);
-      if (r.ok) { const d = await r.json(); setUsers(d.users || []); }
-    } catch {}
+      if (r.ok) {
+        const d = await r.json();
+        setUsers(d.users || []);
+      }
+    } catch { /* ignore */ }
   }, [userFilter, searchQuery]);
 
-  // Fetch messages
+  // Fetch all messages
   const fetchMessages = useCallback(async () => {
     try {
-      const r = await fetch('/api/messages?limit=100');
-      if (r.ok) { const d = await r.json(); setMessages(d.messages || []); }
-    } catch {}
+      const r = await fetch('/api/messages?limit=9999');
+      if (r.ok) {
+        const d = await r.json();
+        setMessages(d.messages || []);
+      }
+    } catch { /* ignore */ }
   }, []);
 
-  // Fetch user messages
-  const fetchUserMessages = useCallback(async (uid: number) => {
-    try {
-      const r = await fetch(`/api/messages?userId=${uid}&limit=200`);
-      if (r.ok) { const d = await r.json(); setUserMessages(d.messages || []); }
-    } catch {}
+  // Fetch user messages with pagination
+  const fetchUserMessages = useCallback(async (uid: number, cursor?: string) => {
+    if (!cursor) {
+      try {
+        const r = await fetch(`/api/messages?userId=${uid}&limit=50`);
+        if (r.ok) {
+          const d = await r.json();
+          setUserMessages(d.messages || []);
+          setUserMessagesTotal(d.total || 0);
+          setUserMessagesHasMore(d.hasMore || false);
+        }
+      } catch { /* ignore */ }
+    }
   }, []);
+
+  // Load more messages
+  const loadMoreMessages = useCallback(async () => {
+    if (!selectedUserId || !userMessagesHasMore) return;
+    setLoadingMoreMessages(true);
+    try {
+      const cursor = userMessages.length > 0 ? userMessages[userMessages.length - 1].id : undefined;
+      const r = await fetch(`/api/messages?userId=${selectedUserId}&limit=50&cursor=${cursor || ''}`);
+      if (r.ok) {
+        const d = await r.json();
+        setUserMessages(prev => [...prev, ...(d.messages || [])]);
+        setUserMessagesHasMore(d.hasMore || false);
+      }
+    } catch { /* ignore */ }
+    setLoadingMoreMessages(false);
+  }, [selectedUserId, userMessagesHasMore, userMessages]);
 
   // Fetch config
   const fetchConfig = useCallback(async () => {
@@ -180,7 +282,7 @@ export default function Dashboard() {
         setCfgZaiToken(c.zai_token_raw || '');
         setCfgPassword(c.join_password || '');
       }
-    } catch {}
+    } catch { /* ignore */ }
   }, []);
 
   // Check webhook
@@ -190,8 +292,12 @@ export default function Dashboard() {
       if (r.ok) {
         const d = await r.json();
         setWebhookStatus(d.result?.url ? 'online' : 'offline');
-      } else { setWebhookStatus('offline'); }
-    } catch { setWebhookStatus('offline'); }
+      } else {
+        setWebhookStatus('offline');
+      }
+    } catch {
+      setWebhookStatus('offline');
+    }
   }, []);
 
   // Save config
@@ -213,433 +319,1037 @@ export default function Dashboard() {
         }),
       });
       await fetchConfig();
-    } catch {}
+    } catch { /* ignore */ }
     setSavingConfig(false);
   };
 
   // User actions
   const blockUser = async (userId: number) => {
-    await fetch('/api/users', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, action: 'block' }) });
+    await fetch('/api/users', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, action: 'block' }),
+    });
     fetchUsers();
+    fetchStats();
   };
+
   const unblockUser = async (userId: number) => {
-    await fetch('/api/users', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, action: 'unblock' }) });
+    await fetch('/api/users', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, action: 'unblock' }),
+    });
     fetchUsers();
+    fetchStats();
   };
+
   const approveUser = async (userId: number) => {
-    await fetch('/api/users', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, action: 'approve' }) });
+    await fetch('/api/users', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, action: 'approve' }),
+    });
     fetchUsers();
+    fetchStats();
   };
+
   const deleteUser = async (userId: number) => {
     await fetch(`/api/users?userId=${userId}`, { method: 'DELETE' });
-    fetchUsers(); fetchStats();
+    fetchUsers();
+    fetchStats();
+    setDeleteDialog({ open: false, userId: null, userName: '' });
   };
 
-  useEffect(() => { if (isLoggedIn) { fetchStats(); fetchUsers(); fetchMessages(); fetchConfig(); checkWebhook(); } }, [isLoggedIn]);
-  useEffect(() => { fetchUsers(); }, [userFilter, searchQuery]);
-  useEffect(() => {
-    if (selectedUserId) fetchUserMessages(selectedUserId);
-  }, [selectedUserId, fetchUserMessages]);
+  // Data loading effects - use startTransition to avoid cascading render lint
+  const [, startTransition] = useTransition();
 
+  useEffect(() => {
+    if (isLoggedIn) {
+      startTransition(() => {
+        Promise.all([fetchStats(), fetchUsers(), fetchMessages(), fetchConfig(), checkWebhook()]);
+      });
+    }
+  }, [isLoggedIn, fetchStats, fetchUsers, fetchMessages, fetchConfig, checkWebhook, startTransition]);
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      startTransition(() => { fetchUsers(); });
+    }
+  }, [userFilter, searchQuery, fetchUsers, isLoggedIn, startTransition]);
+
+  useEffect(() => {
+    if (selectedUserId) {
+      startTransition(() => { fetchUserMessages(selectedUserId); });
+    }
+  }, [selectedUserId, fetchUserMessages, startTransition]);
+
+  // Scroll to bottom of chat when messages change
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [userMessages]);
+
+  // Refresh all data
+  const refreshAll = () => {
+    setLoading(true);
+    Promise.all([fetchStats(), fetchUsers(), fetchMessages(), fetchConfig(), checkWebhook()])
+      .finally(() => setLoading(false));
+  };
+
+  // Get unique users from messages
+  const messageUsers = [...new Map(
+    messages.filter(m => m.user).map(m => [m.user!.userId, m.user!])
+  ).values()];
+
+  // Stat cards data
   const statCards = stats ? [
-    { label: 'المستخدمين', value: stats.totalUsers, icon: Users, color: C.accent },
-    { label: 'المفعلين', value: stats.approvedUsers, icon: UserCheck, color: C.success },
-    { label: 'المحظورين', value: stats.blockedUsers, icon: UserX, color: C.danger },
-    { label: 'الرسائل', value: stats.totalMessages, icon: MessageSquare, color: '#60A5FA' },
-    { label: 'رسائل اليوم', value: stats.messagesToday, icon: Activity, color: C.warn },
-    { label: 'جدد اليوم', value: stats.newUsersToday, icon: Zap, color: '#A78BFA' },
+    { label: 'اجمالي المستخدمين', value: stats.totalUsers, icon: Users, gradient: 'from-amber-500/20 to-amber-600/5', iconColor: 'text-amber-500' },
+    { label: 'المفعلين', value: stats.approvedUsers, icon: UserCheck, gradient: 'from-emerald-500/20 to-emerald-600/5', iconColor: 'text-emerald-500' },
+    { label: 'المحظورين', value: stats.blockedUsers, icon: UserX, gradient: 'from-red-500/20 to-red-600/5', iconColor: 'text-red-500' },
+    { label: 'اجمالي الرسائل', value: stats.totalMessages, icon: MessageSquare, gradient: 'from-blue-500/20 to-blue-600/5', iconColor: 'text-blue-500' },
+    { label: 'رسائل اليوم', value: stats.messagesToday, icon: Activity, gradient: 'from-yellow-500/20 to-yellow-600/5', iconColor: 'text-yellow-500' },
+    { label: 'جدد اليوم', value: stats.newUsersToday, icon: UserPlus, gradient: 'from-purple-500/20 to-purple-600/5', iconColor: 'text-purple-500' },
+    { label: 'نشطون 7 ايام', value: stats.activeUsers7d, icon: TrendingUp, gradient: 'from-teal-500/20 to-teal-600/5', iconColor: 'text-teal-500' },
+    { label: 'بانتظار الموافقة', value: stats.pendingUsers, icon: Clock, gradient: 'from-orange-500/20 to-orange-600/5', iconColor: 'text-orange-500' },
   ] : [];
 
-  // شاشة التحميل
+  // ============ LOADING SCREEN ============
   if (checkingAuth) {
-    return <div style={{ background: C.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', direction: 'rtl' }}>
-      <div style={{ textAlign: 'center' }}>
-        <Moon size={48} style={{ color: C.accent, filter: 'drop-shadow(0 0 20px rgba(212,168,83,0.5))', animation: 'pulse 2s ease-in-out infinite' }} />
-        <p style={{ color: C.textSec, marginTop: 16 }}>جاري التحميل...</p>
-      </div>
-    </div>;
-  }
-
-  // شاشة تسجيل الدخول
-  if (!isLoggedIn) {
-    return <div style={{ background: C.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', direction: 'rtl' }}>
-      <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } } @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }`}</style>
-      <div style={{ width: 400, maxWidth: '90vw' }}>
-        <div style={{ textAlign: 'center', marginBottom: 40 }}>
-          <div style={{ animation: 'float 3s ease-in-out infinite', display: 'inline-block' }}>
-            <Moon size={64} style={{ color: C.accent, filter: 'drop-shadow(0 0 25px rgba(212,168,83,0.6))' }} />
-          </div>
-          <h1 style={{ fontSize: 32, fontWeight: 800, color: C.accent, margin: '20px 0 8px', letterSpacing: '-0.5px' }}>مود شات</h1>
-          <p style={{ color: C.textSec, fontSize: 14 }}>لوحة تحكم البوت الذكي</p>
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="text-center">
+          <Moon className="crescent-moon text-primary mx-auto" size={48} />
+          <p className="text-muted-foreground mt-4">جاري التحميل...</p>
         </div>
-        <Card style={{ background: `linear-gradient(145deg, ${C.card} 0%, #0F2847 100%)`, border: `1px solid ${C.border}`, borderRadius: 20 }}>
-          <CardContent style={{ padding: '32px 28px' }}>
-            <div style={{ textAlign: 'center', marginBottom: 24 }}>
-              <Lock size={28} style={{ color: C.accent, marginBottom: 8 }} />
-              <h2 style={{ color: C.text, fontSize: 18, fontWeight: 700, margin: 0 }}>تسجيل الدخول</h2>
-              <p style={{ color: C.textSec, fontSize: 13, marginTop: 4 }}>هذه اللوحة خاصة بالمالك فقط</p>
-            </div>
-            <div style={{ marginBottom: 20 }}>
-              <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 6 }}>كلمة المرور</label>
-              <Input type="password" value={loginPassword} onChange={e => { setLoginPassword(e.target.value); setLoginError(''); }}
-                onKeyDown={e => e.key === 'Enter' && handleLogin()}
-                placeholder="أدخل كلمة المرور"
-                style={{ background: C.bg, border: `1px solid ${loginError ? C.danger : C.border}`, color: C.text, borderRadius: 12, padding: '12px 16px', fontSize: 15, textAlign: 'center', letterSpacing: loginPassword ? '4px' : 'normal' }} />
-            </div>
-            {loginError && <p style={{ color: C.danger, fontSize: 13, textAlign: 'center', marginBottom: 12 }}>{loginError}</p>}
-            <Button onClick={handleLogin} disabled={loginLoading || !loginPassword}
-              style={{ width: '100%', background: C.accent, color: C.bg, fontWeight: 700, borderRadius: 12, padding: '12px', fontSize: 15, border: 'none' }}>
-              {loginLoading ? 'جاري التحقق...' : 'دخول'}
-            </Button>
-          </CardContent>
-        </Card>
-        <p style={{ textAlign: 'center', color: `${C.textSec}60`, fontSize: 11, marginTop: 20 }}>🔒 محمي بنظام مصادقة خاص</p>
       </div>
-    </div>;
+    );
   }
 
-  // لوحة التحكم الرئيسية
+  // ============ LOGIN SCREEN ============
+  if (!isLoggedIn) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="w-full max-w-md px-4">
+          <div className="text-center mb-10">
+            <div className="animate-float inline-block">
+              <Moon className="crescent-moon text-primary" size={64} />
+            </div>
+            <h1 className="text-4xl font-extrabold text-primary mt-5 tracking-tight">مود شات</h1>
+            <p className="text-muted-foreground mt-2 text-sm">لوحة تحكم البوت الذكي</p>
+          </div>
+
+          <Card className="border-border/50 shadow-2xl">
+            <CardContent className="p-8">
+              <div className="space-y-5">
+                <div className="space-y-2">
+                  <Label htmlFor="password" className="text-muted-foreground text-sm">
+                    <Lock size={14} className="inline ml-1" />
+                    كلمة المرور
+                  </Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    value={loginPassword}
+                    onChange={e => setLoginPassword(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleLogin()}
+                    placeholder="ادخل كلمة المرور"
+                    className="bg-background/50 border-border text-foreground h-12 rounded-xl"
+                    autoFocus
+                  />
+                </div>
+
+                {loginError && (
+                  <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 rounded-lg p-3">
+                    <AlertTriangle size={16} />
+                    <span>{loginError}</span>
+                  </div>
+                )}
+
+                <Button
+                  onClick={handleLogin}
+                  disabled={loginLoading || !loginPassword}
+                  className="w-full bg-primary text-primary-foreground font-bold rounded-xl h-12 text-base hover:bg-primary/90"
+                >
+                  {loginLoading ? 'جاري التحقق...' : 'دخول'}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <p className="text-center text-muted-foreground/40 text-xs mt-6">
+            محمي بنظام مصادقة خاص
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ============ MAIN DASHBOARD ============
   return (
-    <div style={{ background: C.bg, minHeight: '100vh', direction: 'rtl', color: C.text }}>
+    <div className="min-h-screen bg-background flex flex-col">
       {/* Header */}
-      <header style={{ background: `linear-gradient(135deg, ${C.card} 0%, #0F2847 100%)`, borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <div style={{ position: 'relative' }}>
-              <Moon size={36} style={{ color: C.accent, filter: 'drop-shadow(0 0 12px rgba(212,168,83,0.5))' }} />
-              <div style={{ position: 'absolute', inset: 0, background: `radial-gradient(circle, rgba(212,168,83,0.2) 0%, transparent 70%)`, borderRadius: '50%', animation: 'pulse 3s ease-in-out infinite' }} />
+      <header className="bg-card border-b border-border sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <Moon className="text-primary crescent-moon" size={32} />
             </div>
             <div>
-              <h1 style={{ fontSize: 28, fontWeight: 800, color: C.accent, margin: 0, letterSpacing: '-0.5px' }}>مود شات</h1>
-              <p style={{ fontSize: 13, color: C.textSec, margin: 0 }}>لوحة تحكم البوت الذكي</p>
+              <h1 className="text-2xl font-extrabold text-primary tracking-tight">مود شات</h1>
+              <p className="text-xs text-muted-foreground hidden sm:block">لوحة تحكم البوت الذكي</p>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Badge variant="outline" style={{ borderColor: webhookStatus === 'online' ? C.success : C.danger, color: webhookStatus === 'online' ? C.success : C.danger, background: 'transparent', fontSize: 12 }}>
-              {webhookStatus === 'online' ? <Wifi size={14} /> : <WifiOff size={14} />}
-              <span style={{ marginRight: 6 }}>{webhookStatus === 'online' ? 'متصل' : webhookStatus === 'checking' ? 'يتحقق...' : 'غير متصل'}</span>
+
+          <div className="flex items-center gap-2">
+            {/* Webhook Status */}
+            <Badge
+              variant="outline"
+              className={`text-xs gap-1.5 ${
+                webhookStatus === 'online'
+                  ? 'border-emerald-500 text-emerald-500'
+                  : webhookStatus === 'checking'
+                  ? 'border-yellow-500 text-yellow-500'
+                  : 'border-red-500 text-red-500'
+              }`}
+            >
+              {webhookStatus === 'online' ? <Wifi size={12} /> : <WifiOff size={12} />}
+              <span className="hidden sm:inline">
+                {webhookStatus === 'online' ? 'متصل' : webhookStatus === 'checking' ? 'يتحقق...' : 'غير متصل'}
+              </span>
             </Badge>
-            <Button variant="ghost" size="sm" onClick={() => { fetchStats(); fetchUsers(); fetchMessages(); fetchConfig(); checkWebhook(); }} style={{ color: C.textSec }}>
+
+            {/* Theme Toggle */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleTheme}
+              className="text-muted-foreground hover:text-foreground"
+              title={theme === 'dark' ? 'الوضع الفاتح' : 'الوضع الداكن'}
+            >
+              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+            </Button>
+
+            {/* Refresh */}
+            <Button variant="ghost" size="sm" onClick={refreshAll} className="text-muted-foreground hover:text-foreground">
               <RefreshCw size={16} />
             </Button>
-            <Button variant="ghost" size="sm" onClick={handleLogout} style={{ color: C.danger, display: 'flex', alignItems: 'center', gap: 4 }}>
+
+            {/* Logout */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleLogout}
+              className="text-destructive hover:text-destructive/80 flex items-center gap-1"
+            >
               <LogOut size={16} />
-              <span style={{ fontSize: 12 }}>خروج</span>
+              <span className="text-xs hidden sm:inline">خروج</span>
             </Button>
           </div>
         </div>
       </header>
 
-      <style>{`
-        @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.1); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        .fade-in { animation: fadeIn 0.3s ease-out; }
-        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: ${C.bg}; } ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
-        .recharts-tooltip-wrapper { direction: ltr; }
-      `}</style>
-
       {/* Main Content */}
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '24px' }}>
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: 4, gap: 4, display: 'flex', width: 'fit-content' }}>
+      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} dir="rtl">
+          <TabsList className="bg-card border border-border rounded-xl p-1 gap-1 w-fit">
             {[
-              { v: 'stats', l: 'الإحصائيات', i: BarChart3 },
+              { v: 'stats', l: 'الاحصائيات', i: BarChart3 },
               { v: 'users', l: 'المستخدمين', i: Users },
               { v: 'messages', l: 'المحادثات', i: MessageSquare },
-              { v: 'settings', l: 'الإعدادات', i: Settings },
+              { v: 'settings', l: 'الاعدادات', i: Settings },
             ].map(t => (
-              <TabsTrigger key={t.v} value={t.v} style={{ color: activeTab === t.v ? C.accent : C.textSec, background: activeTab === t.v ? `${C.accent}15` : 'transparent', borderRadius: 8, padding: '8px 20px', fontSize: 14, fontWeight: activeTab === t.v ? 700 : 400, display: 'flex', alignItems: 'center', gap: 8, border: 'none', transition: 'all 0.2s' }}>
-                <t.i size={16} /> {t.l}
+              <TabsTrigger
+                key={t.v}
+                value={t.v}
+                className="rounded-lg px-4 py-2 text-sm data-[state=active]:bg-primary/15 data-[state=active]:text-primary data-[state=active]:font-bold text-muted-foreground flex items-center gap-2 transition-all"
+              >
+                <t.i size={16} />
+                <span className="hidden sm:inline">{t.l}</span>
               </TabsTrigger>
             ))}
           </TabsList>
 
-          {/* Stats Tab */}
-          <TabsContent value="stats" className="fade-in">
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16, marginTop: 20 }}>
-              {statCards.map((s, i) => (
-                <Card key={i} style={{ background: `linear-gradient(145deg, ${C.card} 0%, ${C.cardHover} 100%)`, border: `1px solid ${C.border}`, borderRadius: 16 }}>
-                  <CardContent style={{ padding: '20px 16px', textAlign: 'center' }}>
-                    <s.icon size={28} style={{ color: s.color, margin: '0 auto 8px' }} />
-                    <div style={{ fontSize: 32, fontWeight: 800, color: C.text, lineHeight: 1 }}>{s.value}</div>
-                    <div style={{ fontSize: 13, color: C.textSec, marginTop: 4 }}>{s.label}</div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-
-            {/* Daily Chart */}
-            {stats?.dailyMessages && (
-              <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, marginTop: 24 }}>
-                <CardHeader><CardTitle style={{ color: C.text, fontSize: 16 }}>الرسائل اليومية</CardTitle></CardHeader>
-                <CardContent>
-                  <ResponsiveContainer width="100%" height={250}>
-                    <BarChart data={stats.dailyMessages}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                      <XAxis dataKey="date" tick={{ fill: C.textSec, fontSize: 12 }} tickFormatter={(v: string) => v.slice(5)} />
-                      <YAxis tick={{ fill: C.textSec, fontSize: 12 }} />
-                      <Tooltip contentStyle={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 8, color: C.text }} />
-                      <Bar dataKey="count" fill={C.accent} radius={[6, 6, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Recent Joins */}
-            {stats?.recentJoins && stats.recentJoins.length > 0 && (
-              <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, marginTop: 24 }}>
-                <CardHeader><CardTitle style={{ color: C.text, fontSize: 16 }}>محاولات الدخول الأخيرة</CardTitle></CardHeader>
-                <CardContent>
-                  {stats.recentJoins.map((j, i) => (
-                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${C.border}30` }}>
-                      <span style={{ color: C.text }}>{j.user?.firstName || 'مجهول'}</span>
-                      <Badge style={{ background: j.action === 'success' ? C.success + '20' : j.action === 'fail' ? C.danger + '20' : C.warn + '20', color: j.action === 'success' ? C.success : j.action === 'fail' ? C.danger : C.warn, border: 'none', fontSize: 11 }}>
-                        {j.action === 'success' ? 'نجح' : j.action === 'fail' ? 'فشل' : 'محاولة'}
-                      </Badge>
-                    </div>
+          {/* ========== STATS TAB ========== */}
+          <TabsContent value="stats" className="animate-fade-in mt-6">
+            {loading ? (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                {Array.from({ length: 8 }).map((_, i) => (
+                  <Card key={i} className="border-border/50">
+                    <CardContent className="p-5">
+                      <Skeleton className="h-8 w-8 rounded-lg mb-3" />
+                      <Skeleton className="h-8 w-16 mb-2" />
+                      <Skeleton className="h-4 w-24" />
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              <>
+                {/* Stat Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                  {statCards.map((s, i) => (
+                    <Card key={i} className={`border-border/50 stat-card-gradient bg-gradient-to-br ${s.gradient}`}>
+                      <CardContent className="p-5 text-center">
+                        <s.icon size={28} className={`${s.iconColor} mx-auto mb-2`} />
+                        <div className="text-3xl font-extrabold text-foreground leading-none">
+                          {s.value.toLocaleString('ar-EG')}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1.5">{s.label}</div>
+                      </CardContent>
+                    </Card>
                   ))}
-                </CardContent>
-              </Card>
+                </div>
+
+                {/* Daily Chart */}
+                {stats?.dailyMessages && (
+                  <Card className="border-border/50 mt-6">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-base">الرسائل اليومية - اخر 7 ايام</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <ResponsiveContainer width="100%" height={260}>
+                        <BarChart data={stats.dailyMessages}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                          <XAxis
+                            dataKey="date"
+                            tick={{ fill: 'var(--muted-foreground)', fontSize: 12 }}
+                            tickFormatter={(v: string) => v.slice(5)}
+                          />
+                          <YAxis tick={{ fill: 'var(--muted-foreground)', fontSize: 12 }} />
+                          <Tooltip
+                            contentStyle={{
+                              background: 'var(--card)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 8,
+                              color: 'var(--foreground)',
+                            }}
+                          />
+                          <Bar dataKey="count" fill="var(--primary)" radius={[6, 6, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Top Users */}
+                {stats?.topUsers && stats.topUsers.length > 0 && (
+                  <Card className="border-border/50 mt-6">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <TrendingUp size={18} className="text-primary" />
+                        اكثر المستخدمين نشاطا
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-3">
+                        {stats.topUsers.map((u, i) => (
+                          <div
+                            key={u.userId}
+                            className="flex items-center justify-between p-3 rounded-xl bg-muted/50 hover:bg-muted transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+                                i === 0 ? 'bg-amber-500/20 text-amber-500' :
+                                i === 1 ? 'bg-gray-400/20 text-gray-400' :
+                                i === 2 ? 'bg-orange-500/20 text-orange-500' :
+                                'bg-muted text-muted-foreground'
+                              }`}>
+                                {i + 1}
+                              </div>
+                              <div>
+                                <p className="font-semibold text-sm">{u.firstName || u.username || 'مجهول'}</p>
+                                {u.username && <p className="text-xs text-muted-foreground">@{u.username}</p>}
+                              </div>
+                            </div>
+                            <div className="text-left">
+                              <Badge variant="secondary" className="text-xs">
+                                <MessageSquare size={10} className="ml-1" />
+                                {u.totalMessages} رسالة
+                              </Badge>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                {formatDate(u.lastActive)}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {/* Recent Joins */}
+                {stats?.recentJoins && stats.recentJoins.length > 0 && (
+                  <Card className="border-border/50 mt-6">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <Shield size={18} className="text-primary" />
+                        محاولات الدخول الاخيرة
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-2">
+                        {stats.recentJoins.map((j, i) => (
+                          <div
+                            key={i}
+                            className="flex items-center justify-between p-3 rounded-xl bg-muted/50"
+                          >
+                            <div>
+                              <p className="font-medium text-sm">{j.user?.firstName || 'مجهول'}</p>
+                              {j.user?.username && (
+                                <p className="text-xs text-muted-foreground">@{j.user.username}</p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Badge
+                                className={`text-xs border-0 ${
+                                  j.action === 'success'
+                                    ? 'bg-emerald-500/15 text-emerald-500'
+                                    : j.action === 'fail'
+                                    ? 'bg-red-500/15 text-red-500'
+                                    : 'bg-yellow-500/15 text-yellow-500'
+                                }`}
+                              >
+                                {j.action === 'success' ? 'نجح' : j.action === 'fail' ? 'فشل' : 'محاولة'}
+                              </Badge>
+                              <span className="text-xs text-muted-foreground">{formatDateTime(j.timestamp)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+              </>
             )}
           </TabsContent>
 
-          {/* Users Tab */}
-          <TabsContent value="users" className="fade-in">
-            <div style={{ display: 'flex', gap: 12, marginTop: 20, flexWrap: 'wrap', alignItems: 'center' }}>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {['all', 'approved', 'blocked', 'pending'].map(f => (
-                  <Button key={f} size="sm" onClick={() => setUserFilter(f)} style={{ background: userFilter === f ? C.accent : C.card, color: userFilter === f ? C.bg : C.textSec, border: `1px solid ${C.border}`, borderRadius: 8 }}>
-                    {f === 'all' ? 'الكل' : f === 'approved' ? 'مفعل' : f === 'blocked' ? 'محظور' : 'معلق'}
+          {/* ========== USERS TAB ========== */}
+          <TabsContent value="users" className="animate-fade-in mt-6">
+            {/* Filter Bar */}
+            <div className="flex gap-3 flex-wrap items-center mb-4">
+              <div className="flex gap-1.5">
+                {[
+                  { v: 'all', l: 'الكل' },
+                  { v: 'approved', l: 'مفعل' },
+                  { v: 'blocked', l: 'محظور' },
+                  { v: 'pending', l: 'معلق' },
+                ].map(f => (
+                  <Button
+                    key={f.v}
+                    size="sm"
+                    variant={userFilter === f.v ? 'default' : 'outline'}
+                    onClick={() => setUserFilter(f.v)}
+                    className={`rounded-lg text-xs ${
+                      userFilter === f.v
+                        ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                        : 'border-border text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {f.l}
                   </Button>
                 ))}
               </div>
-              <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
-                <Search size={16} style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', color: C.textSec }} />
-                <Input placeholder="بحث..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} style={{ background: C.card, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, paddingRight: 36 }} />
+              <div className="relative flex-1 min-w-[200px]">
+                <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="بحث عن مستخدم..."
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  className="bg-card border-border text-foreground rounded-lg pr-10"
+                />
               </div>
             </div>
 
-            <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, marginTop: 16, overflow: 'hidden' }}>
-              <Table>
-                <TableHeader>
-                  <TableRow style={{ borderBottom: `1px solid ${C.border}` }}>
-                    <TableHead style={{ color: C.textSec }}>الاسم</TableHead>
-                    <TableHead style={{ color: C.textSec }}>المعرف</TableHead>
-                    <TableHead style={{ color: C.textSec }}>الحالة</TableHead>
-                    <TableHead style={{ color: C.textSec }}>الرسائل</TableHead>
-                    <TableHead style={{ color: C.textSec }}>آخر نشاط</TableHead>
-                    <TableHead style={{ color: C.textSec }}>إجراءات</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {users.map(u => (
-                    <TableRow key={u.id} style={{ borderBottom: `1px solid ${C.border}30` }}>
-                      <TableCell style={{ color: C.text }}>{u.firstName || u.username || 'مجهول'}</TableCell>
-                      <TableCell style={{ color: C.textSec, fontFamily: 'monospace', fontSize: 12 }}>{u.userId}</TableCell>
-                      <TableCell>
-                        <Badge style={{ background: u.isBlocked ? C.danger + '20' : u.isApproved ? C.success + '20' : C.warn + '20', color: u.isBlocked ? C.danger : u.isApproved ? C.success : C.warn, border: 'none', fontSize: 11 }}>
-                          {u.isBlocked ? 'محظور' : u.isApproved ? 'مفعل' : 'معلق'}
-                        </Badge>
-                      </TableCell>
-                      <TableCell style={{ color: C.textSec }}>{u.totalMessages}</TableCell>
-                      <TableCell style={{ color: C.textSec, fontSize: 12 }}>{new Date(u.lastActive).toLocaleDateString('ar-EG')}</TableCell>
-                      <TableCell>
-                        <div style={{ display: 'flex', gap: 4 }}>
-                          <Button variant="ghost" size="sm" onClick={() => { setSelectedUserId(u.userId); setActiveTab('messages'); }} style={{ color: '#60A5FA', padding: 4 }}><Eye size={16} /></Button>
-                          {!u.isApproved && <Button variant="ghost" size="sm" onClick={() => approveUser(u.userId)} style={{ color: C.success, padding: 4 }}><CheckCircle size={16} /></Button>}
-                          {!u.isBlocked && <Button variant="ghost" size="sm" onClick={() => blockUser(u.userId)} style={{ color: C.danger, padding: 4 }}><Ban size={16} /></Button>}
-                          {u.isBlocked && <Button variant="ghost" size="sm" onClick={() => unblockUser(u.userId)} style={{ color: C.success, padding: 4 }}><CheckCircle size={16} /></Button>}
-                          <Button variant="ghost" size="sm" onClick={() => { if (confirm('حذف هذا المستخدم؟')) deleteUser(u.userId); }} style={{ color: C.danger, padding: 4 }}><Trash2 size={16} /></Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
+            {/* Users Table */}
+            <Card className="border-border/50 overflow-hidden">
+              {loading ? (
+                <CardContent className="p-6 space-y-4">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-4">
+                      <Skeleton className="h-10 w-10 rounded-full" />
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-4 w-20" />
+                      <Skeleton className="h-4 w-16" />
+                    </div>
                   ))}
-                  {users.length === 0 && (
-                    <TableRow><TableCell colSpan={6} style={{ color: C.textSec, textAlign: 'center', padding: 40 }}>لا يوجد مستخدمين</TableCell></TableRow>
-                  )}
-                </TableBody>
-              </Table>
+                </CardContent>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border hover:bg-transparent">
+                        <TableHead className="text-muted-foreground">الاسم</TableHead>
+                        <TableHead className="text-muted-foreground">المعرف</TableHead>
+                        <TableHead className="text-muted-foreground">الحالة</TableHead>
+                        <TableHead className="text-muted-foreground">الرسائل</TableHead>
+                        <TableHead className="text-muted-foreground hidden sm:table-cell">اخر نشاط</TableHead>
+                        <TableHead className="text-muted-foreground text-left">اجراءات</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {users.map(u => (
+                        <TableRow key={u.id} className="border-border/30 hover:bg-muted/30">
+                          <TableCell>
+                            <div>
+                              <p className="font-medium">{u.firstName || u.username || 'مجهول'}</p>
+                              {u.lastName && <p className="text-xs text-muted-foreground">{u.lastName}</p>}
+                            </div>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-muted-foreground">{u.userId}</TableCell>
+                          <TableCell>
+                            <Badge
+                              className={`text-xs border-0 ${
+                                u.isBlocked
+                                  ? 'bg-red-500/15 text-red-500'
+                                  : u.isApproved
+                                  ? 'bg-emerald-500/15 text-emerald-500'
+                                  : 'bg-yellow-500/15 text-yellow-500'
+                              }`}
+                            >
+                              {u.isBlocked ? 'محظور' : u.isApproved ? 'مفعل' : 'معلق'}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-muted-foreground text-sm">{u.totalMessages}</TableCell>
+                          <TableCell className="text-muted-foreground text-xs hidden sm:table-cell">
+                            {formatDateTime(u.lastActive)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => { setSelectedUserId(u.userId); setActiveTab('messages'); }}
+                                className="text-blue-500 hover:text-blue-400 hover:bg-blue-500/10 p-1.5 h-8 w-8"
+                                title="عرض المحادثة"
+                              >
+                                <Eye size={15} />
+                              </Button>
+                              {!u.isApproved && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => approveUser(u.userId)}
+                                  className="text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 p-1.5 h-8 w-8"
+                                  title="موافقة"
+                                >
+                                  <CheckCircle size={15} />
+                                </Button>
+                              )}
+                              {!u.isBlocked ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => blockUser(u.userId)}
+                                  className="text-red-500 hover:text-red-400 hover:bg-red-500/10 p-1.5 h-8 w-8"
+                                  title="حظر"
+                                >
+                                  <Ban size={15} />
+                                </Button>
+                              ) : (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => unblockUser(u.userId)}
+                                  className="text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 p-1.5 h-8 w-8"
+                                  title="الغاء الحظر"
+                                >
+                                  <CheckCircle size={15} />
+                                </Button>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setDeleteDialog({ open: true, userId: u.userId, userName: u.firstName || u.username || 'مجهول' })}
+                                className="text-red-500 hover:text-red-400 hover:bg-red-500/10 p-1.5 h-8 w-8"
+                                title="حذف"
+                              >
+                                <Trash2 size={15} />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {users.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
+                            <Users size={40} className="mx-auto mb-3 opacity-30" />
+                            <p>لا يوجد مستخدمين</p>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
             </Card>
           </TabsContent>
 
-          {/* Messages Tab */}
-          <TabsContent value="messages" className="fade-in">
-            <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 16, marginTop: 20 }}>
-              {/* Users list */}
-              <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, overflow: 'hidden' }}>
-                <CardHeader style={{ padding: '12px 16px' }}><CardTitle style={{ color: C.text, fontSize: 14 }}>المستخدمين</CardTitle></CardHeader>
-                <ScrollArea style={{ height: 500 }}>
-                  {[...new Map(messages.filter(m => m.user).map(m => [m.user!.userId, m.user!])).values()].map(u => (
-                    <button key={u!.userId} onClick={() => { setSelectedUserId(u!.userId); fetchUserMessages(u!.userId); }}
-                      style={{ width: '100%', padding: '10px 16px', background: selectedUserId === u!.userId ? `${C.accent}15` : 'transparent', border: 'none', borderBottom: `1px solid ${C.border}30`, cursor: 'pointer', textAlign: 'right', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ color: selectedUserId === u!.userId ? C.accent : C.text, fontSize: 13 }}>{u!.firstName || u!.username || 'مجهول'}</span>
-                      <ChevronLeft size={14} style={{ color: C.textSec }} />
-                    </button>
-                  ))}
+          {/* ========== MESSAGES TAB ========== */}
+          <TabsContent value="messages" className="animate-fade-in mt-6">
+            <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
+              {/* Users List */}
+              <Card className="border-border/50 overflow-hidden">
+                <CardHeader className="p-4 pb-2">
+                  <CardTitle className="text-sm font-bold flex items-center gap-2">
+                    <Users size={16} className="text-primary" />
+                    المستخدمين
+                    <Badge variant="secondary" className="text-xs mr-auto">{messageUsers.length}</Badge>
+                  </CardTitle>
+                </CardHeader>
+                <ScrollArea className="h-[500px] lg:h-[calc(100vh-280px)]">
+                  {messageUsers.length > 0 ? messageUsers.map(u => {
+                    if (!u) return null;
+                    return (
+                      <button
+                        key={u.userId}
+                        onClick={() => { setSelectedUserId(u.userId); fetchUserMessages(u.userId); }}
+                        className={`w-full px-4 py-3 border-b border-border/30 text-right flex items-center justify-between transition-colors ${
+                          selectedUserId === u.userId
+                            ? 'bg-primary/10 text-primary'
+                            : 'hover:bg-muted/50 text-foreground'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                            selectedUserId === u.userId
+                              ? 'bg-primary/20 text-primary'
+                              : 'bg-muted text-muted-foreground'
+                          }`}>
+                            {(u.firstName || u.username || 'م')[0]}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">{u.firstName || u.username || 'مجهول'}</p>
+                            {u.username && <p className="text-xs text-muted-foreground">@{u.username}</p>}
+                          </div>
+                        </div>
+                        <ChevronLeft size={14} className="text-muted-foreground" />
+                      </button>
+                    );
+                  }) : (
+                    <div className="p-6 text-center text-muted-foreground text-sm">
+                      <MessageSquare size={32} className="mx-auto mb-2 opacity-30" />
+                      <p>لا توجد رسائل بعد</p>
+                    </div>
+                  )}
                 </ScrollArea>
               </Card>
 
-              {/* Chat view */}
-              <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, overflow: 'hidden' }}>
-                <CardHeader style={{ padding: '12px 16px', borderBottom: `1px solid ${C.border}` }}>
-                  <CardTitle style={{ color: C.text, fontSize: 14 }}>
-                    {selectedUserId ? `محادثة المستخدم ${selectedUserId}` : 'اختر مستخدم لعرض المحادثة'}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent style={{ padding: 16 }}>
-                  <ScrollArea style={{ height: 450 }}>
-                    {selectedUserId ? userMessages.map(m => (
-                      <div key={m.id} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-start' : 'flex-end', marginBottom: 12 }}>
-                        <div style={{ maxWidth: '75%', padding: '10px 14px', borderRadius: 16, background: m.role === 'user' ? `${C.accent}20` : `${C.success}15`, border: `1px solid ${m.role === 'user' ? `${C.accent}30` : `${C.success}20`}` }}>
-                          <p style={{ color: C.text, fontSize: 13, margin: 0, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{m.content}</p>
-                          <span style={{ fontSize: 10, color: C.textSec, marginTop: 4, display: 'block' }}>{new Date(m.timestamp).toLocaleTimeString('ar-EG')}</span>
-                        </div>
+              {/* Chat View */}
+              <Card className="border-border/50 overflow-hidden flex flex-col">
+                {/* Chat Header */}
+                <div className="p-4 border-b border-border/50 flex items-center justify-between bg-card">
+                  <div className="flex items-center gap-2">
+                    {selectedUserId && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedUserId(null)}
+                        className="lg:hidden text-muted-foreground p-1 h-8 w-8"
+                      >
+                        <ArrowLeft size={16} />
+                      </Button>
+                    )}
+                    <MessageCircle size={18} className="text-primary" />
+                    <CardTitle className="text-sm font-bold">
+                      {selectedUserId
+                        ? `محادثة المستخدم #${selectedUserId}`
+                        : 'اختر مستخدم لعرض المحادثة'
+                      }
+                    </CardTitle>
+                  </div>
+                  {selectedUserId && userMessagesTotal > 0 && (
+                    <Badge variant="secondary" className="text-xs">
+                      {userMessagesTotal} رسالة
+                    </Badge>
+                  )}
+                </div>
+
+                {/* Chat Body */}
+                <div className="flex-1">
+                  <ScrollArea className="h-[500px] lg:h-[calc(100vh-340px)]">
+                    {selectedUserId ? (
+                      <div className="p-4 space-y-3">
+                        {/* Load more button */}
+                        {userMessagesHasMore && (
+                          <div className="text-center py-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={loadMoreMessages}
+                              disabled={loadingMoreMessages}
+                              className="text-xs border-border text-muted-foreground"
+                            >
+                              {loadingMoreMessages ? (
+                                <>
+                                  <RefreshCw size={12} className="ml-1 animate-spin" />
+                                  جاري التحميل...
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown size={12} className="ml-1" />
+                                  تحميل المزيد
+                                </>
+                              )}
+                            </Button>
+                          </div>
+                        )}
+
+                        {userMessages.map(m => (
+                          <div
+                            key={m.id}
+                            className={`flex ${m.role === 'user' ? 'justify-start' : 'justify-end'}`}
+                          >
+                            <div className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-3 ${
+                              m.role === 'user'
+                                ? 'bg-primary/10 border border-primary/20 chat-bubble-user'
+                                : 'bg-emerald-500/10 border border-emerald-500/20 chat-bubble-bot'
+                            }`}>
+                              {/* Role indicator */}
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                {m.role === 'user' ? (
+                                  <Send size={10} className="text-primary" />
+                                ) : (
+                                  <Bot size={10} className="text-emerald-500" />
+                                )}
+                                <span className={`text-xs font-semibold ${
+                                  m.role === 'user' ? 'text-primary' : 'text-emerald-500'
+                                }`}>
+                                  {m.role === 'user' ? 'المستخدم' : 'البوت'}
+                                </span>
+                                {m.modelUsed && (
+                                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                                    {m.modelUsed}
+                                  </Badge>
+                                )}
+                              </div>
+
+                              {/* Message content - no truncation */}
+                              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                                {m.content}
+                              </p>
+
+                              {/* Timestamp */}
+                              <span className="text-[10px] text-muted-foreground mt-2 block">
+                                {formatDateTime(m.timestamp)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                        <div ref={chatEndRef} />
                       </div>
-                    )) : (
-                      <div style={{ textAlign: 'center', padding: 60, color: C.textSec }}>
-                        <MessageSquare size={48} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
-                        <p>اختر مستخدم من القائمة لعرض محادثته</p>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-muted-foreground">
+                        <MessageSquare size={48} className="opacity-20 mb-3" />
+                        <p className="text-sm">اختر مستخدم من القائمة لعرض محادثته</p>
                       </div>
                     )}
                   </ScrollArea>
-                </CardContent>
+                </div>
               </Card>
             </div>
           </TabsContent>
 
-          {/* Settings Tab */}
-          <TabsContent value="settings" className="fade-in">
-            <div style={{ display: 'grid', gap: 20, marginTop: 20, maxWidth: 800 }}>
+          {/* ========== SETTINGS TAB ========== */}
+          <TabsContent value="settings" className="animate-fade-in mt-6">
+            <div className="max-w-3xl space-y-6">
 
               {/* AI Provider Selection */}
-              <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16 }}>
+              <Card className="border-border/50">
                 <CardHeader>
-                  <CardTitle style={{ color: C.text, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <Bot size={20} style={{ color: C.accent }} /> مزود الذكاء الاصطناعي
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Bot size={20} className="text-primary" />
+                    مزود الذكاء الاصطناعي
                   </CardTitle>
+                  <CardDescription>اختر مزود الذكاء الاصطناعي للبوت</CardDescription>
                 </CardHeader>
-                <CardContent style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <CardContent className="space-y-4">
                   {/* Z-AI SDK Option */}
-                  <button onClick={() => setCfgProvider('zsdk')}
-                    style={{ padding: 20, borderRadius: 12, border: `2px solid ${cfgProvider === 'zsdk' ? C.accent : C.border}`, background: cfgProvider === 'zsdk' ? `${C.accent}10` : 'transparent', cursor: 'pointer', textAlign: 'right', transition: 'all 0.2s' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <div style={{ width: 20, height: 20, borderRadius: '50%', border: `2px solid ${cfgProvider === 'zsdk' ? C.accent : C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          {cfgProvider === 'zsdk' && <div style={{ width: 10, height: 10, borderRadius: '50%', background: C.accent }} />}
+                  <button
+                    onClick={() => setCfgProvider('zsdk')}
+                    className={`w-full p-5 rounded-xl border-2 text-right transition-all ${
+                      cfgProvider === 'zsdk'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border hover:border-border/80 bg-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
+                          cfgProvider === 'zsdk' ? 'border-primary' : 'border-border'
+                        }`}>
+                          {cfgProvider === 'zsdk' && (
+                            <div className="w-2.5 h-2.5 rounded-full bg-primary" />
+                          )}
                         </div>
-                        <span style={{ color: C.text, fontWeight: 700, fontSize: 15 }}>Z-AI SDK</span>
+                        <span className="font-bold text-sm">Z-AI SDK</span>
                       </div>
-                      <Badge style={{ background: `${C.accent}20`, color: C.accent, border: 'none', fontWeight: 700 }}>مجاني ⚡</Badge>
+                      <Badge className="bg-amber-500/15 text-amber-600 border-0 text-xs font-bold">
+                        مجاني
+                      </Badge>
                     </div>
-                    <p style={{ color: C.textSec, fontSize: 13, marginTop: 8, margin: '8px 0 0 30px' }}>نظام Z-AI المدمج - سريع ومجاني بالكامل - الأفضل أداءً</p>
+                    <p className="text-xs text-muted-foreground mt-2 mr-8">
+                      نظام Z-AI المدمج - سريع ومجاني بالكامل - الافضل اداء
+                    </p>
                   </button>
 
-                  {/* Z-AI Config */}
+                  {/* Z-AI Config Fields */}
                   {cfgProvider === 'zsdk' && (
-                    <div style={{ marginRight: 30, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      <div>
-                        <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>Chat ID</label>
-                        <Input value={cfgZaiChatId} onChange={e => setCfgZaiChatId(e.target.value)} placeholder="chat-xxx..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8 }} />
+                    <div className="mr-8 space-y-3 p-4 bg-muted/30 rounded-xl">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">Chat ID</Label>
+                        <Input
+                          value={cfgZaiChatId}
+                          onChange={e => setCfgZaiChatId(e.target.value)}
+                          placeholder="chat-xxx..."
+                          className="bg-background border-border text-foreground rounded-lg"
+                          dir="ltr"
+                        />
                       </div>
-                      <div>
-                        <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>User ID</label>
-                        <Input value={cfgZaiUserId} onChange={e => setCfgZaiUserId(e.target.value)} placeholder="user-id..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8 }} />
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">User ID</Label>
+                        <Input
+                          value={cfgZaiUserId}
+                          onChange={e => setCfgZaiUserId(e.target.value)}
+                          placeholder="user-id..."
+                          className="bg-background border-border text-foreground rounded-lg"
+                          dir="ltr"
+                        />
                       </div>
-                      <div>
-                        <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>Token</label>
-                        <Input value={cfgZaiToken} onChange={e => setCfgZaiToken(e.target.value)} type="password" placeholder="eyJ..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8 }} />
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">Token</Label>
+                        <Input
+                          value={cfgZaiToken}
+                          onChange={e => setCfgZaiToken(e.target.value)}
+                          type="password"
+                          placeholder="eyJ..."
+                          className="bg-background border-border text-foreground rounded-lg"
+                          dir="ltr"
+                        />
                       </div>
                     </div>
                   )}
 
                   {/* API Token Option */}
-                  <button onClick={() => setCfgProvider('api')}
-                    style={{ padding: 20, borderRadius: 12, border: `2px solid ${cfgProvider === 'api' ? C.accent : C.border}`, background: cfgProvider === 'api' ? `${C.accent}10` : 'transparent', cursor: 'pointer', textAlign: 'right', transition: 'all 0.2s' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <div style={{ width: 20, height: 20, borderRadius: '50%', border: `2px solid ${cfgProvider === 'api' ? C.accent : C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          {cfgProvider === 'api' && <div style={{ width: 10, height: 10, borderRadius: '50%', background: C.accent }} />}
+                  <button
+                    onClick={() => setCfgProvider('api')}
+                    className={`w-full p-5 rounded-xl border-2 text-right transition-all ${
+                      cfgProvider === 'api'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border hover:border-border/80 bg-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
+                          cfgProvider === 'api' ? 'border-primary' : 'border-border'
+                        }`}>
+                          {cfgProvider === 'api' && (
+                            <div className="w-2.5 h-2.5 rounded-full bg-primary" />
+                          )}
                         </div>
-                        <span style={{ color: C.text, fontWeight: 700, fontSize: 15 }}>API Token</span>
+                        <span className="font-bold text-sm">API Token</span>
                       </div>
-                      <Badge style={{ background: '#60A5FA20', color: '#60A5FA', border: 'none', fontWeight: 700 }}>موصى به لـ Vercel</Badge>
+                      <Badge className="bg-blue-500/15 text-blue-500 border-0 text-xs font-bold">
+                        موصى به لـ Vercel
+                      </Badge>
                     </div>
-                    <p style={{ color: C.textSec, fontSize: 13, marginTop: 8, margin: '8px 0 0 30px' }}>استخدم أي مزود AI يدعم OpenAI API — يعمل من Vercel بشكل موثوق</p>
+                    <p className="text-xs text-muted-foreground mt-2 mr-8">
+                      استخدم اي مزود AI يدعم OpenAI API - يعمل من Vercel بشكل موثوق
+                    </p>
                   </button>
 
-                  {/* API Config */}
+                  {/* API Config Fields */}
                   {cfgProvider === 'api' && (
-                    <div style={{ marginRight: 30, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      {/* Quick Setup Buttons */}
-                      <div style={{ background: `${C.bg}80`, borderRadius: 10, padding: 14, border: `1px solid ${C.border}40` }}>
-                        <p style={{ color: C.accent, fontSize: 13, fontWeight: 700, margin: '0 0 10px' }}>⚡ إعداد سريع — مزودين مجانيين موصى بهم:</p>
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          <button onClick={() => { setCfgApiUrl('https://api.groq.com/openai/v1'); setCfgApiModel('llama-3.3-70b-versatile'); }}
-                            style={{ padding: '6px 14px', borderRadius: 8, background: `${C.accent}20`, border: `1px solid ${C.accent}40`, color: C.accent, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                            🚀 Groq (مجاني وسريع)
-                          </button>
-                          <button onClick={() => { setCfgApiUrl('https://openrouter.ai/api/v1'); setCfgApiModel('meta-llama/llama-3.3-70b-instruct:free'); }}
-                            style={{ padding: '6px 14px', borderRadius: 8, background: '#A78BFA20', border: '1px solid #A78BFA40', color: '#A78BFA', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                            🌐 OpenRouter (نماذج مجانية)
-                          </button>
+                    <div className="mr-8 space-y-3">
+                      {/* Quick Setup */}
+                      <div className="p-4 bg-muted/30 rounded-xl border border-border/30">
+                        <p className="text-xs font-bold text-primary mb-2">
+                          اعداد سريع - مزودين مجانيين موصى بهم:
+                        </p>
+                        <div className="flex gap-2 flex-wrap">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setCfgApiUrl('https://api.groq.com/openai/v1');
+                              setCfgApiModel('llama-3.3-70b-versatile');
+                            }}
+                            className="text-xs border-primary/30 text-primary hover:bg-primary/5"
+                          >
+                            Groq (مجاني وسريع)
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setCfgApiUrl('https://openrouter.ai/api/v1');
+                              setCfgApiModel('meta-llama/llama-3.3-70b-instruct:free');
+                            }}
+                            className="text-xs border-purple-500/30 text-purple-500 hover:bg-purple-500/5"
+                          >
+                            OpenRouter (نماذج مجانية)
+                          </Button>
                         </div>
-                        <p style={{ color: C.textSec, fontSize: 11, margin: '8px 0 0' }}>
-                          Groq: سجّل في console.groq.com واحصل على مفتاح مجاني | OpenRouter: سجّل في openrouter.ai
+                        <p className="text-[11px] text-muted-foreground mt-2">
+                          Groq: سجل في console.groq.com واحصل على مفتاح مجاني | OpenRouter: سجل في openrouter.ai
                         </p>
                       </div>
-                      <div>
-                        <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>رابط API (Base URL)</label>
-                        <Input value={cfgApiUrl} onChange={e => setCfgApiUrl(e.target.value)} placeholder="https://api.groq.com/openai/v1" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
+
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">رابط API (Base URL)</Label>
+                        <Input
+                          value={cfgApiUrl}
+                          onChange={e => setCfgApiUrl(e.target.value)}
+                          placeholder="https://api.groq.com/openai/v1"
+                          className="bg-background border-border text-foreground rounded-lg"
+                          dir="ltr"
+                        />
                       </div>
-                      <div>
-                        <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>مفتاح API</label>
-                        <Input value={cfgApiKey} onChange={e => setCfgApiKey(e.target.value)} type="password" placeholder="gsk_... أو sk-..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">مفتاح API</Label>
+                        <Input
+                          value={cfgApiKey}
+                          onChange={e => setCfgApiKey(e.target.value)}
+                          type="password"
+                          placeholder="gsk_... او sk-..."
+                          className="bg-background border-border text-foreground rounded-lg"
+                          dir="ltr"
+                        />
                       </div>
-                      <div>
-                        <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>اسم النموذج (Model)</label>
-                        <Input value={cfgApiModel} onChange={e => setCfgApiModel(e.target.value)} placeholder="llama-3.3-70b-versatile" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
+                      <div className="space-y-1.5">
+                        <Label className="text-xs text-muted-foreground">اسم النموذج (Model)</Label>
+                        <Input
+                          value={cfgApiModel}
+                          onChange={e => setCfgApiModel(e.target.value)}
+                          placeholder="llama-3.3-70b-versatile"
+                          className="bg-background border-border text-foreground rounded-lg"
+                          dir="ltr"
+                        />
                       </div>
                     </div>
                   )}
 
-                  {/* Pollinations Fallback Info */}
-                  <div style={{ background: `${C.bg}60`, borderRadius: 10, padding: 14, border: `1px solid ${C.border}30` }}>
-                    <p style={{ color: C.textSec, fontSize: 12, margin: 0, lineHeight: 1.7 }}>
-                      💡 <span style={{ color: C.text, fontWeight: 600 }}>ملاحظة:</span> البوت يستخدم Pollinations.ai كاحتياطي تلقائي مجاني (بدون مفتاح) عند فشل المزود الأساسي.
-                      لضمان أفضل أداء وموثوقية، يُنصح باستخدام API Token مع Groq أو OpenRouter.
+                  {/* Pollinations Info */}
+                  <div className="p-4 bg-muted/30 rounded-xl border border-border/20">
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      <span className="text-foreground font-semibold">ملاحظة:</span>{' '}
+                      البوت يستخدم Pollinations.ai كاحتياطي تلقائي مجاني (بدون مفتاح) عند فشل المزود الاساسي.
+                      لضمان افضل اداء وموثوقية، ينصح باستخدام API Token مع Groq او OpenRouter.
                     </p>
                   </div>
                 </CardContent>
               </Card>
 
               {/* Password Settings */}
-              <Card style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16 }}>
+              <Card className="border-border/50">
                 <CardHeader>
-                  <CardTitle style={{ color: C.text, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <Key size={20} style={{ color: C.accent }} /> كلمة مرور الدخول
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Key size={20} className="text-primary" />
+                    كلمة مرور الدخول
+                  </CardTitle>
+                  <CardDescription>كلمة المرور التي يستخدمها المستخدمون للانضمام للبوت</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">كلمة المرور</Label>
+                    <Input
+                      value={cfgPassword}
+                      onChange={e => setCfgPassword(e.target.value)}
+                      placeholder="كلمة المرور الجديدة"
+                      className="bg-background border-border text-foreground rounded-lg"
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Webhook Info */}
+              <Card className="border-border/50">
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    {webhookStatus === 'online' ? (
+                      <Wifi size={20} className="text-emerald-500" />
+                    ) : (
+                      <WifiOff size={20} className="text-red-500" />
+                    )}
+                    حالة الـ Webhook
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
-                    <div style={{ flex: 1 }}>
-                      <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>كلمة المرور</label>
-                      <Input value={cfgPassword} onChange={e => setCfgPassword(e.target.value)} placeholder="كلمة المرور الجديدة" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8 }} />
-                    </div>
+                  <div className="flex items-center gap-3">
+                    <Badge
+                      className={`border-0 ${
+                        webhookStatus === 'online'
+                          ? 'bg-emerald-500/15 text-emerald-500'
+                          : 'bg-red-500/15 text-red-500'
+                      }`}
+                    >
+                      {webhookStatus === 'online' ? 'متصل' : webhookStatus === 'checking' ? 'يتحقق...' : 'غير متصل'}
+                    </Badge>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={checkWebhook}
+                      className="text-xs"
+                    >
+                      <RefreshCw size={12} className="ml-1" />
+                      فحص
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
 
               {/* Save Button */}
-              <Button onClick={saveConfig} disabled={savingConfig}
-                style={{ background: C.accent, color: C.bg, fontWeight: 700, borderRadius: 12, padding: '12px 32px', fontSize: 15, alignSelf: 'flex-start', border: 'none' }}>
-                <Save size={18} style={{ marginLeft: 8 }} />
-                {savingConfig ? 'جاري الحفظ...' : 'حفظ الإعدادات'}
-              </Button>
+              <div className="flex items-center gap-3">
+                <Button
+                  onClick={saveConfig}
+                  disabled={savingConfig}
+                  className="bg-primary text-primary-foreground font-bold rounded-xl px-8 h-12 hover:bg-primary/90"
+                >
+                  <Save size={18} className="ml-2" />
+                  {savingConfig ? 'جاري الحفظ...' : 'حفظ الاعدادات'}
+                </Button>
+              </div>
             </div>
           </TabsContent>
         </Tabs>
-      </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-border/30 py-4 text-center text-xs text-muted-foreground mt-auto">
+        <p>مود شات - لوحة تحكم البوت الذكي</p>
+      </footer>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialog.open} onOpenChange={(open) => setDeleteDialog(prev => ({ ...prev, open }))}>
+        <DialogContent className="sm:max-w-md" dir="rtl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertTriangle size={20} />
+              تاكيد الحذف
+            </DialogTitle>
+            <DialogDescription>
+              هل انت متاكد من حذف المستخدم &quot;{deleteDialog.userName}&quot;؟ سيتم حذف جميع رسائله ايضا. هذا الاجراء لا يمكن التراجع عنه.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex gap-2 sm:gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialog({ open: false, userId: null, userName: '' })}
+              className="rounded-lg"
+            >
+              الغاء
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteDialog.userId && deleteUser(deleteDialog.userId)}
+              className="rounded-lg"
+            >
+              <Trash2 size={14} className="ml-1" />
+              حذف
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

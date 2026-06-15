@@ -56,40 +56,43 @@
 
 :root {
   --radius: 0.625rem;
-  --background: #0B1929;
-  --foreground: #F0E6D3;
-  --card: #1E3A5F;
-  --card-foreground: #F0E6D3;
-  --popover: #1E3A5F;
-  --popover-foreground: #F0E6D3;
-  --primary: #D4A853;
-  --primary-foreground: #0B1929;
-  --secondary: #264A6E;
-  --secondary-foreground: #F0E6D3;
-  --muted: #162D4A;
-  --muted-foreground: #8BA3C1;
-  --accent: #264A6E;
-  --accent-foreground: #F0E6D3;
-  --destructive: #F87171;
-  --border: #2A4A6B;
-  --input: #2A4A6B;
-  --ring: #D4A853;
-  --chart-1: #D4A853;
-  --chart-2: #4ADE80;
-  --chart-3: #8BA3C1;
+  /* Light mode - Clean white/cream with gold accents */
+  --background: #FAFAF7;
+  --foreground: #1A1A2E;
+  --card: #FFFFFF;
+  --card-foreground: #1A1A2E;
+  --popover: #FFFFFF;
+  --popover-foreground: #1A1A2E;
+  --primary: #C49A3C;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F0EDE4;
+  --secondary-foreground: #1A1A2E;
+  --muted: #F5F3EE;
+  --muted-foreground: #6B7280;
+  --accent: #F0EDE4;
+  --accent-foreground: #1A1A2E;
+  --destructive: #DC2626;
+  --border: #E5E2DA;
+  --input: #E5E2DA;
+  --ring: #C49A3C;
+  --chart-1: #C49A3C;
+  --chart-2: #22C55E;
+  --chart-3: #6B7280;
   --chart-4: #E5BD6A;
-  --chart-5: #F87171;
-  --sidebar: #0B1929;
-  --sidebar-foreground: #F0E6D3;
-  --sidebar-primary: #D4A853;
-  --sidebar-primary-foreground: #0B1929;
-  --sidebar-accent: #264A6E;
-  --sidebar-accent-foreground: #F0E6D3;
-  --sidebar-border: #2A4A6B;
-  --sidebar-ring: #D4A853;
+  --chart-5: #DC2626;
+  --sidebar: #FAFAF7;
+  --sidebar-foreground: #1A1A2E;
+  --sidebar-primary: #C49A3C;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #F0EDE4;
+  --sidebar-accent-foreground: #1A1A2E;
+  --sidebar-border: #E5E2DA;
+  --sidebar-ring: #C49A3C;
 }
 
 .dark {
+  --radius: 0.625rem;
+  /* Dark mode - Navy/Gold theme */
   --background: #0B1929;
   --foreground: #F0E6D3;
   --card: #1E3A5F;
@@ -132,23 +135,23 @@
   }
 }
 
-/* Custom scrollbar for the dashboard */
+/* Custom scrollbar - theme aware */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0B1929;
+  background: var(--background);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2A4A6B;
+  background: var(--border);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3A5A7B;
+  background: var(--muted-foreground);
 }
 
 /* Crescent moon pulse animation */
@@ -198,13 +201,50 @@
   animation: slide-in-left 0.2s ease-out;
 }
 
-/* Subtle card hover effect */
-.mood-card {
-  transition: all 0.2s ease;
-  border: 1px solid #2A4A6B;
+/* Floating animation for login */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
 }
 
-.mood-card:hover {
-  border-color: #3A5A7B;
-  box-shadow: 0 4px 20px rgba(212, 168, 83, 0.08);
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Fade in animation */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Stat card gradient backgrounds */
+.stat-card-gradient {
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card-gradient::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  opacity: 0.08;
+  transform: translate(30%, -30%);
+}
+
+/* Smooth tab transitions */
+[data-state="active"][role="tab"] {
+  transition: all 0.2s ease;
+}
+
+/* Recharts tooltip direction fix */
+.recharts-tooltip-wrapper {
+  direction: ltr;
 }
