@@ -741,47 +741,24 @@ export async function handleTelegramUpdate(update: {
 
         await sendChatAction(chatId);
 
-        // الخطوة 1: الحصول على رابط الصورة عبر Telegram file URL (دائماً متاح)
-        let imageUrl: string | null = null;
-        try {
-          const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${bestPhoto.file_id}`, {
-            signal: AbortSignal.timeout(10000),
-          });
-          const fileData = await fileRes.json();
-          if (fileData?.result?.file_path) {
-            imageUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
-            console.log(`[Bot] ✅ Image URL obtained: ${imageUrl.substring(0, 80)}...`);
-          } else {
-            console.warn('[Bot] ⚠️ getFile returned no file_path:', JSON.stringify(fileData).substring(0, 200));
-          }
-        } catch (err: any) {
-          console.error(`[Bot] ❌ Could not get image URL: ${err?.message?.substring(0, 100)}`);
-        }
-
-        // الخطوة 2: تحميل base64 فقط للصور الصغيرة (أقل من 1MB) كـ fallback
-        // على Vercel serverless، الصور الكبيرة تسبب مشاكل memory
+        // الخطوة 1: تحميل الصورة كـ base64 (الطريقة الأكثر موثوقية مع VLM)
+        // VLM API لا يقرأ روابط Telegram المباشرة لأنها ترجع Content-Disposition: attachment
         let imageData: { base64: string; mimeType: string } | null = null;
         const imageSize = bestPhoto.file_size || 0;
-        const SMALL_IMAGE_LIMIT = 1 * 1024 * 1024; // 1MB
+        const SMALL_IMAGE_LIMIT = 5 * 1024 * 1024; // 5MB - Vercel serverless limit
 
-        if (imageSize > 0 && imageSize <= SMALL_IMAGE_LIMIT && !imageUrl) {
-          // فقط نحمل base64 إذا لم نحصل على URL والصورة صغيرة
-          console.log('[Bot] Image is small and no URL, attempting base64 download...');
-          imageData = await downloadTelegramFile(bestPhoto.file_id);
-          if (imageData) {
-            console.log(`[Bot] ✅ Image downloaded as base64: ${imageData.base64.length} chars, ${imageData.mimeType}`);
-          } else {
-            console.warn('[Bot] ⚠️ Base64 download failed');
-          }
-        } else if (imageUrl) {
-          console.log('[Bot] Using URL-based approach (skipping base64 download for Vercel compatibility)');
-        } else if (imageSize > SMALL_IMAGE_LIMIT) {
-          console.log(`[Bot] Image too large for base64 (${(imageSize / 1024 / 1024).toFixed(1)}MB), relying on URL`);
+        // نحاول تحميل الصورة كـ base64 دائماً (هذه الطريقة الوحيدة المضمونة مع VLM)
+        console.log('[Bot] Downloading image as base64 for VLM analysis...');
+        imageData = await downloadTelegramFile(bestPhoto.file_id);
+        if (imageData) {
+          console.log(`[Bot] ✅ Image downloaded as base64: ${imageData.base64.length} chars, ${imageData.mimeType}`);
+        } else {
+          console.warn('[Bot] ⚠️ Base64 download failed');
         }
 
-        // إذا فشل التحميل ولا يوجد URL - أرسل رسالة خطأ
-        if (!imageData && !imageUrl) {
-          console.error('[Bot] ❌ No image data available - both URL and base64 failed');
+        // إذا فشل التحميل - أرسل رسالة خطأ
+        if (!imageData) {
+          console.error('[Bot] ❌ Image download failed');
           await sendMessage(chatId, userLang === 'ar'
             ? '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.'
             : '❌ Could not download the image. Please try again.');
@@ -790,8 +767,9 @@ export async function handleTelegramUpdate(update: {
 
         // حفظ رسالة المستخدم في السجل
         const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
+        // لا نحفظ imageUrl المباشر من Telegram لأنه لا يعمل في المتصفح
         await db.message.create({
-          data: { userId, role: 'user', content: userContent, modelUsed: 'vlm', status: 'done', chatId, imageUrl },
+          data: { userId, role: 'user', content: userContent, modelUsed: 'vlm', status: 'done', chatId },
         });
 
         // جلب سجل المحادثة السابقة
@@ -804,16 +782,16 @@ export async function handleTelegramUpdate(update: {
 
         const conversationHistory = dbMessages.map(m => ({ role: m.role, content: m.content }));
 
-        console.log(`[Bot] Starting VLM analysis... (hasBase64=${!!imageData}, hasUrl=${!!imageUrl})`);
+        console.log(`[Bot] Starting VLM analysis... (base64=${!!imageData?.base64})`);
 
-        // تحليل الصورة باستخدام VLM - URL أولاً ثم base64
+        // تحليل الصورة باستخدام VLM - base64 فقط (URL المباشر من Telegram لا يعمل مع VLM API)
         const { reply, provider } = await analyzeImage(
           imageData?.base64 || null,
           imageData?.mimeType || 'image/jpeg',
           caption,
           conversationHistory,
           userLang,
-          imageUrl
+          null // لا نمرر URL المباشر - VLM API لا يستطيع قراءة ملفات Telegram
         );
 
         console.log(`[Bot] ✅ VLM analysis complete: provider=${provider}, reply length=${reply.length}`);
