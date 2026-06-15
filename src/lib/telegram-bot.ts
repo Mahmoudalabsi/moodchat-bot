@@ -85,27 +85,27 @@ async function chatWithAI(userId: number, userMessage: string): Promise<string> 
   // محاولة مع مزود AI مختلف
   const errors: string[] = [];
 
-  // 1. محاولة مع Z-AI (يعمل من بيئة Z.ai)
-  try {
-    return await callZaiAPI(messages);
-  } catch (e) {
-    errors.push(`Z-AI: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // 2. محاولة مع Pollinations.ai (مجاني، بدون مفتاح)
-  try {
-    return await callPollinationsAPI(messages);
-  } catch (e) {
-    errors.push(`Pollinations: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // 3. محاولة مع Gemini (إذا كان المفتاح متوفر)
+  // 1. محاولة مع Gemini (الأفضل - مجاني وموثوق)
   if (GEMINI_API_KEY) {
     try {
       return await callGeminiAPI(messages);
     } catch (e) {
       errors.push(`Gemini: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  // 2. محاولة مع Z-AI (يعمل من بيئة Z.ai المحلية فقط)
+  try {
+    return await callZaiAPI(messages);
+  } catch (e) {
+    errors.push(`Z-AI: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 3. محاولة مع Pollinations.ai (مجاني، بدون مفتاح - قد يكون بطيء)
+  try {
+    return await callPollinationsAPI(messages);
+  } catch (e) {
+    errors.push(`Pollinations: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   throw new Error(`All AI providers failed: ${errors.join(' | ')}`);
