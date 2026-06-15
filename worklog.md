@@ -68,3 +68,32 @@ Stage Summary:
 - Language preference persists in localStorage (key: moodchat_lang)
 - Inline script in layout prevents direction flash on page load
 - All dashboard text translated: auth, stats, users, messages, settings, dialogs
+
+---
+Task ID: 1
+Agent: main
+Task: Add VLM image understanding, expert prompt, user profile photos, image display in chat
+
+Work Log:
+- Added VLM (Vision Language Model) image analysis using Z-AI SDK createVision API
+- Added Gemini Vision as fallback provider for image analysis
+- Download photos from Telegram, convert to base64, analyze with vision model
+- Support captions on images for custom analysis prompts
+- Upgraded system prompt: bot is now an expert that never refuses requests
+- Added getUserProfilePhotoUrl() to fetch user Telegram profile photos
+- Added photoUrl field to TelegramUser schema
+- Added imageUrl field to Message schema
+- Display user avatars (profile photos) in chat messages and user list
+- Show sent images inline in the chat view
+- Enhanced error handling with try/catch in image processing path
+- Fixed ZAI SDK initialization: use ZAI.create() instead of private constructor
+- Updated messages API to include photoUrl and imageUrl
+- Ran prisma db push to update database schema
+- Pushed all changes to GitHub/Vercel
+
+Stage Summary:
+- VLM image analysis feature fully implemented
+- Expert system prompt that never refuses requests
+- User profile photos from Telegram saved and displayed
+- Image messages displayed inline in dashboard chat
+- All builds pass successfully
