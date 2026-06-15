@@ -1,12 +1,11 @@
 /**
  * Telegram Bot Library - Webhook Mode for Vercel
  * يعمل كـ webhook على Vercel Serverless
- * يستخدم Z-AI SDK (مجاني 100%)
+ * يستخدم Z-AI API مباشرة (مجاني 100%)
  * كلمة المرور + ذاكرة المحادثة في قاعدة البيانات
  */
 
 import { db } from './db';
-import ZAI from 'z-ai-web-dev-sdk';
 
 // ============================
 // الإعدادات
@@ -19,37 +18,12 @@ const MAX_HISTORY = 30;
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.";
 
-// ============================
-// Z-AI SDK Instance - Config from env vars for Vercel
-// ============================
-
-let zaiInstance: ZAI | null = null;
-
-async function getZAI(): Promise<ZAI> {
-  if (!zaiInstance) {
-    // On Vercel, create ZAI with env-based config (no .z-ai-config file)
-    const zaiBaseUrl = process.env.ZAI_BASE_URL;
-    const zaiApiKey = process.env.ZAI_API_KEY;
-    const zaiChatId = process.env.ZAI_CHAT_ID;
-    const zaiUserId = process.env.ZAI_USER_ID;
-    const zaiToken = process.env.ZAI_TOKEN;
-
-    if (zaiBaseUrl && zaiApiKey) {
-      // Use environment variables (Vercel production)
-      zaiInstance = new ZAI({
-        baseUrl: zaiBaseUrl,
-        apiKey: zaiApiKey,
-        chatId: zaiChatId || '',
-        userId: zaiUserId || '',
-        token: zaiToken || '',
-      } as Parameters<typeof ZAI>[0]);
-    } else {
-      // Fallback to .z-ai-config file (local development)
-      zaiInstance = await ZAI.create();
-    }
-  }
-  return zaiInstance;
-}
+// Z-AI API Config
+const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
+const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
+const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
+const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
+const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
 
 // ============================
 // Telegram API Helpers
@@ -79,13 +53,11 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
 }
 
 // ============================
-// AI Chat with Z-AI SDK
+// AI Chat with Z-AI API directly (Vercel compatible)
 // ============================
 
 async function chatWithAI(userId: number, userMessage: string): Promise<string> {
   try {
-    const zai = await getZAI();
-
     // بناء سجل المحادثة من قاعدة البيانات
     const dbMessages = await db.message.findMany({
       where: { userId },
@@ -93,35 +65,57 @@ async function chatWithAI(userId: number, userMessage: string): Promise<string> 
       take: MAX_HISTORY,
     });
 
-    // تحويل لصيغة Z-AI
-    const zaiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    // تحويل لصيغة API
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
       { role: 'system', content: SYSTEM_PROMPT },
     ];
 
     for (const msg of dbMessages) {
-      zaiMessages.push({
+      messages.push({
         role: msg.role as 'user' | 'assistant',
         content: msg.content,
       });
     }
 
     // إضافة الرسالة الحالية
-    zaiMessages.push({ role: 'user', content: userMessage });
+    messages.push({ role: 'user', content: userMessage });
 
-    const completion = await zai.chat.completions.create({
-      messages: zaiMessages,
-      temperature: 0.7,
-      max_tokens: 2048,
+    // استدعاء Z-AI API مباشرة
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${ZAI_API_KEY}`,
+      'X-Z-AI-From': 'Z',
+    };
+
+    if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
+    if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
+    if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
+
+    const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        messages,
+        temperature: 0.7,
+        max_tokens: 2048,
+        thinking: { type: 'disabled' },
+      }),
     });
 
-    const reply = completion.choices?.[0]?.message?.content;
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Z-AI API error ${response.status}: ${errorBody}`);
+    }
+
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content;
     if (reply && reply.trim()) {
       return reply.trim();
     }
 
     throw new Error('Empty AI response');
   } catch (error) {
-    console.error('Z-AI SDK Error:', error);
+    console.error('Z-AI API Error:', error);
     throw error;
   }
 }
