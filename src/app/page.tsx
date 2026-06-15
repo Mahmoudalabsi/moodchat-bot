@@ -29,6 +29,18 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 import { useLanguage } from '@/hooks/use-language';
 import { Lang } from '@/lib/i18n';
 
+// Proxy Telegram photo URLs through our API to avoid Content-Disposition: attachment
+function proxyPhotoUrl(url: string | null): string | null {
+  if (!url) return null;
+  // Extract file path from Telegram file URL
+  // Format: https://api.telegram.org/file/bot<TOKEN>/<file_path>
+  const match = url.match(/\/file\/bot[^/]+\/(.+)$/);
+  if (match) {
+    return `/api/photo-proxy?path=${encodeURIComponent(match[1])}`;
+  }
+  return url;
+}
+
 // Types
 interface Stats {
   totalUsers: number; approvedUsers: number; blockedUsers: number; pendingUsers: number;
@@ -882,7 +894,7 @@ export default function Dashboard() {
                             <div className="flex items-center gap-2.5">
                               {u.photoUrl ? (
                                 <img
-                                  src={u.photoUrl}
+                                  src={proxyPhotoUrl(u.photoUrl) || undefined}
                                   alt={u.firstName || 'User'}
                                   className="w-8 h-8 rounded-full object-cover border border-border/50 flex-shrink-0"
                                   onError={(e) => {
@@ -1025,7 +1037,7 @@ export default function Dashboard() {
                         <div className={`flex items-center gap-2.5`}>
                           {u.photoUrl ? (
                             <img
-                              src={u.photoUrl}
+                              src={proxyPhotoUrl(u.photoUrl) || undefined}
                               alt={u.firstName || 'User'}
                               className={`w-8 h-8 rounded-full object-cover border ${
                                 selectedUserId === u.userId
@@ -1136,7 +1148,7 @@ export default function Dashboard() {
                               <div className={`flex-shrink-0 mt-1 ${t.dir === 'rtl' ? 'order-2' : ''}`}>
                                 {m.user?.photoUrl ? (
                                   <img
-                                    src={m.user.photoUrl}
+                                    src={proxyPhotoUrl(m.user.photoUrl) || undefined}
                                     alt={m.user?.firstName || 'User'}
                                     className="w-8 h-8 rounded-full object-cover border border-primary/30"
                                     onError={(e) => {
