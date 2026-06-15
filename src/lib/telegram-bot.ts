@@ -921,8 +921,8 @@ export async function handleTelegramUpdate(update: {
     await sendMessage(chatId, "أرسل /start للبدء.");
     return { ok: true };
 
-  } catch (error) {
-    console.error('[Webhook] CRITICAL Error:', error?. instanceof Error ? `${error.message}\n${error.stack}` : String(error));
+  } catch (error: any) {
+    console.error('[Webhook] CRITICAL Error:', error?.message || String(error), error?.stack || '');
     try {
       if (update.message?.chat?.id) {
         await sendMessage(update.message.chat.id, "عذراً، حدث خطأ أثناء المعالجة. حاول مرة أخرى.");
@@ -1094,4 +1094,3 @@ export async function getJoinPassword(): Promise<string> {
   try { const c = await db.botConfig.findUnique({ where: { key: 'join_password' } }); return c?.value || JOIN_PASSWORD; } catch { return JOIN_PASSWORD; }
 }
 export async function getPasswordEnabled(): Promise<boolean> { return isPasswordEnabled(); }
-// VLM v1781553364
