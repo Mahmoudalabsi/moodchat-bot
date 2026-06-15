@@ -29,11 +29,10 @@ const ZAI_CONFIG = {
   token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
 };
 
-// Gemini RapidAPI Config
+// Google Gemini API Config (مجاني من aistudio.google.com)
 const GEMINI_CONFIG = {
-  host: 'gemini-1-5-flash.p.rapidapi.com',
-  apiKey: '3a2a01e71dmsh191182e2d50b384p1abdfejsn372d01d140f6',
-  model: 'gemini-1.5-flash',
+  apiKey: process.env.GEMINI_API_KEY || '',  // يُضاف من Vercel env أو لوحة التحكم
+  model: 'gemini-2.0-flash',
 };
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي ومحترم. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل. قواعد صارمة: 1- لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة على السؤال. 2- لا تكرر التحيات في كل رسالة. 3- أجب مباشرة وبشكل طبيعي دون مقدمات.";
@@ -158,30 +157,53 @@ async function callZaiDirect(messages: Array<{ role: string; content: string }>)
 }
 
 /**
- * Provider 3: Gemini 1.5 Flash عبر RapidAPI
- * يعمل من أي مكان (Vercel, Z.ai, محلي) - لا مشاكل rate limit
+ * Provider 3: Google Gemini API المباشر (مجاني)
+ * يعمل من Vercel بلا مشاكل - يحتاج API Key من aistudio.google.com
+ * المجاني: 15 طلب/دقيقة، 1 مليون طلب/شهر
  */
-async function callGeminiRapidAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  try {
-    // تحويل الرسائل لنوع OpenAI-style (Gemini RapidAPI يدعم نفس الصيغة)
-    const apiMessages = messages.map(m => ({
-      role: m.role,
-      content: m.content,
-    }));
+async function callGeminiDirect(messages: Array<{ role: string; content: string }>): Promise<string> {
+  // محاولة الحصول على مفتاح Gemini من DB أو env
+  let apiKey = GEMINI_CONFIG.apiKey;
+  if (!apiKey) {
+    try {
+      const cfg = await db.botConfig.findUnique({ where: { key: 'gemini_api_key' } });
+      apiKey = cfg?.value || '';
+    } catch {}
+  }
+  if (!apiKey) throw new Error('No Gemini API key configured');
 
-    const response = await fetch(`https://${GEMINI_CONFIG.host}/`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-rapidapi-key': GEMINI_CONFIG.apiKey,
-        'x-rapidapi-host': GEMINI_CONFIG.host,
+  try {
+    // تحويل الرسائل لصيغة Gemini
+    const contents = messages
+      .filter(m => m.role !== 'system')
+      .map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
+
+    // إضافة system instruction إذا وُجدت
+    const systemInstruction = messages.find(m => m.role === 'system');
+
+    const body: Record<string, unknown> = {
+      contents,
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 800,
       },
-      signal: AbortSignal.timeout(20000),
-      body: JSON.stringify({
-        model: GEMINI_CONFIG.model,
-        messages: apiMessages,
-      }),
-    });
+    };
+    if (systemInstruction) {
+      body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
+    }
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CONFIG.model}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(20000),
+        body: JSON.stringify(body),
+      }
+    );
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
@@ -189,17 +211,11 @@ async function callGeminiRapidAPI(messages: Array<{ role: string; content: strin
     }
 
     const data = await response.json();
+    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    // محاولة استخراج الرد بعدة صيغ ممكنة
-    const reply = data?.choices?.[0]?.message?.content
-      || data?.candidates?.[0]?.content?.parts?.[0]?.text
-      || data?.response
-      || data?.content
-      || (typeof data === 'string' ? data : null);
-
-    if (reply && String(reply).trim()) {
-      console.log('[AI] Gemini RapidAPI OK');
-      return String(reply).trim();
+    if (reply?.trim()) {
+      console.log('[AI] Gemini Direct OK');
+      return reply.trim();
     }
     throw new Error('Empty Gemini response');
   } catch (err: any) {
@@ -266,8 +282,8 @@ async function getAIResponse(
   // بناء قائمة المزودين حسب الأولوية
   const providers: Array<{ name: string; fn: () => Promise<string>; priority: number }> = [
     { name: 'zai-sdk', fn: () => callZaiSDK(messages), priority: 1 },
-    { name: 'gemini-rapidapi', fn: () => callGeminiRapidAPI(messages), priority: 2 },
-    { name: 'zai-direct', fn: () => callZaiDirect(messages), priority: 3 },
+    { name: 'zai-direct', fn: () => callZaiDirect(messages), priority: 2 },
+    { name: 'gemini', fn: () => callGeminiDirect(messages), priority: 3 },
     { name: 'pollinations', fn: () => callPollinationsOpenAI(messages), priority: 4 },
   ];
 
@@ -279,7 +295,7 @@ async function getAIResponse(
     });
   }
 
-  // المرحلة 1: شغل أول مزودين بالتوازي (Z-AI SDK + Gemini)
+  // المرحلة 1: شغل أول مزودين بالتوازي (Z-AI SDK + Z-AI Direct)
   const firstTwo = providers.slice(0, 2);
   try {
     const results = await Promise.allSettled(
@@ -509,10 +525,10 @@ async function handleAIStatusCommand(chatId: number) {
   // اختبار Gemini
   try {
     const s = Date.now();
-    await callGeminiRapidAPI(msgs);
-    status += `Gemini Flash: يعمل (${Date.now() - s}ms)\n`;
+    await callGeminiDirect(msgs);
+    status += `Gemini: يعمل (${Date.now() - s}ms)\n`;
   } catch {
-    status += `Gemini Flash: غير متاح\n`;
+    status += `Gemini: غير متاح (يحتاج API Key من aistudio.google.com)\n`;
   }
 
   // اختبار Pollinations
