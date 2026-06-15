@@ -2,10 +2,11 @@
  * Telegram Bot Library - MoodChat (مود شات)
  * يعمل على Vercel (webhook)
  *
- * نظام AI سريع مع طلبات متوازية:
- * 1. Pollinations.ai - الأولوية (يعمل من Vercel)
- * 2. Z-AI SDK - يعمل من بيئة Z.ai
- * 3. رد ذكي مدمج - لا يفشل أبداً
+ * نظام AI بـ 3 مزودين:
+ * 1. Z-AI SDK (GLM-4 Plus) - الأساسي
+ * 2. Gemini 1.5 Flash (RapidAPI) - الثانوي
+ * 3. Pollinations.ai - الاحتياطي
+ * 4. رد ذكي مدمج - لا يفشل أبداً
  */
 
 import { db } from './db';
@@ -14,15 +15,12 @@ import { db } from './db';
 // الإعدادات
 // ============================
 
-const NEW_BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
-const OLD_BOT_TOKEN = '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
-const envToken = process.env.TELEGRAM_BOT_TOKEN || '';
-const BOT_TOKEN = (envToken === OLD_BOT_TOKEN || !envToken) ? NEW_BOT_TOKEN : envToken;
-
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
 
+// Z-AI SDK Config
 const ZAI_CONFIG = {
   baseUrl: 'https://internal-api.z.ai/v1',
   apiKey: 'Z.ai',
@@ -31,9 +29,16 @@ const ZAI_CONFIG = {
   token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
 };
 
+// Gemini RapidAPI Config
+const GEMINI_CONFIG = {
+  host: 'gemini-1-5-flash.p.rapidapi.com',
+  apiKey: '3a2a01e71dmsh191182e2d50b384p1abdfejsn372d01d140f6',
+  model: 'gemini-1.5-flash',
+};
+
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي ومحترم. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل. قواعد صارمة: 1- لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة على السؤال. 2- لا تكرر التحيات في كل رسالة. 3- أجب مباشرة وبشكل طبيعي دون مقدمات.";
 
-// كاش ذكري
+// كاش ذكري للإعدادات
 let aiConfigCache: { provider: string; baseUrl: string; apiKey: string; model: string; } | null = null;
 let aiConfigCacheTime = 0;
 
@@ -82,53 +87,10 @@ async function sendChatAction(chatId: number) {
 // AI Providers - كل مزود يعمل بشكل مستقل
 // ============================
 
-// Provider 1: Pollinations OpenAI endpoint
-async function callPollinationsOpenAI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const models = ['mistral', 'openai', 'llama'];
-  for (const model of models) {
-    try {
-      const response = await fetch('https://text.pollinations.ai/openai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(15000),
-        body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
-      });
-      if (response.status === 429) continue;
-      if (!response.ok) continue;
-      const data = await response.json();
-      const reply = data.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log(`[AI] Pollinations ${model} OK`);
-        return reply.trim();
-      }
-    } catch { continue; }
-  }
-  throw new Error('Pollinations OpenAI failed');
-}
-
-// Provider 2: Pollinations GET endpoint
-async function callPollinationsGET(messages: Array<{ role: string; content: string }>): Promise<string> {
-  try {
-    const lastMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
-    const systemMsg = messages.find(m => m.role === 'system')?.content || '';
-    const prompt = `${systemMsg}\n\nUser: ${lastMsg}\n\nAssistant:`;
-    const encoded = encodeURIComponent(prompt);
-    const response = await fetch(`https://text.pollinations.ai/${encoded}?model=mistral&seed=${Math.floor(Math.random() * 100000)}`, {
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!response.ok) throw new Error(`GET ${response.status}`);
-    const text = await response.text();
-    if (text?.trim()) {
-      console.log('[AI] Pollinations GET OK');
-      return text.trim();
-    }
-    throw new Error('Empty response');
-  } catch (err: any) {
-    throw new Error(`Pollinations GET: ${err?.message?.substring(0, 50)}`);
-  }
-}
-
-// Provider 3: Z-AI SDK
+/**
+ * Provider 1: Z-AI SDK (z-ai-web-dev-sdk)
+ * يعمل عبر internal-api.z.ai - يحتاج على بيئة Z.ai أو Vercel مع التوكن الصحيح
+ */
 async function callZaiSDK(messages: Array<{ role: string; content: string }>): Promise<string> {
   try {
     const ZAIModule = await import('z-ai-web-dev-sdk');
@@ -139,19 +101,23 @@ async function callZaiSDK(messages: Array<{ role: string; content: string }>): P
       model: 'glm-4-plus',
       temperature: 0.7,
       max_tokens: 800,
+      thinking: { type: 'disabled' },
     });
     const reply = completion?.choices?.[0]?.message?.content;
     if (reply?.trim()) {
       console.log('[AI] Z-AI SDK OK');
       return reply.trim();
     }
-    throw new Error('Empty');
+    throw new Error('Empty response from Z-AI SDK');
   } catch (err: any) {
-    throw new Error(`ZAI SDK: ${err?.message?.substring(0, 50)}`);
+    throw new Error(`ZAI SDK: ${err?.message?.substring(0, 80)}`);
   }
 }
 
-// Provider 4: Z-AI Direct API
+/**
+ * Provider 2: Z-AI Direct API
+ * يرسل طلبات مباشرة لـ internal-api.z.ai بدون SDK
+ */
 async function callZaiDirect(messages: Array<{ role: string; content: string }>): Promise<string> {
   const endpoints = [
     'https://internal-api.z.ai/v1/chat/completions',
@@ -169,15 +135,21 @@ async function callZaiDirect(messages: Array<{ role: string; content: string }>)
       };
       const response = await fetch(url, {
         method: 'POST', headers,
-        signal: AbortSignal.timeout(8000),
-        body: JSON.stringify({ model: 'glm-4-plus', messages, temperature: 0.7, max_tokens: 800, thinking: { type: 'disabled' } }),
+        signal: AbortSignal.timeout(10000),
+        body: JSON.stringify({
+          model: 'glm-4-plus',
+          messages,
+          temperature: 0.7,
+          max_tokens: 800,
+          thinking: { type: 'disabled' },
+        }),
       });
       if (response.status === 429 || response.status === 401 || response.status === 403) continue;
       if (!response.ok) continue;
       const data = await response.json();
       const reply = data?.choices?.[0]?.message?.content;
       if (reply?.trim()) {
-        console.log(`[AI] Z-AI Direct OK`);
+        console.log(`[AI] Z-AI Direct OK (${url})`);
         return reply.trim();
       }
     } catch { continue; }
@@ -185,7 +157,85 @@ async function callZaiDirect(messages: Array<{ role: string; content: string }>)
   throw new Error('Z-AI Direct failed');
 }
 
-// Provider 5: Custom API
+/**
+ * Provider 3: Gemini 1.5 Flash عبر RapidAPI
+ * يعمل من أي مكان (Vercel, Z.ai, محلي) - لا مشاكل rate limit
+ */
+async function callGeminiRapidAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+  try {
+    // تحويل الرسائل لنوع OpenAI-style (Gemini RapidAPI يدعم نفس الصيغة)
+    const apiMessages = messages.map(m => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    const response = await fetch(`https://${GEMINI_CONFIG.host}/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-rapidapi-key': GEMINI_CONFIG.apiKey,
+        'x-rapidapi-host': GEMINI_CONFIG.host,
+      },
+      signal: AbortSignal.timeout(20000),
+      body: JSON.stringify({
+        model: GEMINI_CONFIG.model,
+        messages: apiMessages,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      throw new Error(`Gemini ${response.status}: ${errText.substring(0, 100)}`);
+    }
+
+    const data = await response.json();
+
+    // محاولة استخراج الرد بعدة صيغ ممكنة
+    const reply = data?.choices?.[0]?.message?.content
+      || data?.candidates?.[0]?.content?.parts?.[0]?.text
+      || data?.response
+      || data?.content
+      || (typeof data === 'string' ? data : null);
+
+    if (reply && String(reply).trim()) {
+      console.log('[AI] Gemini RapidAPI OK');
+      return String(reply).trim();
+    }
+    throw new Error('Empty Gemini response');
+  } catch (err: any) {
+    throw new Error(`Gemini: ${err?.message?.substring(0, 80)}`);
+  }
+}
+
+/**
+ * Provider 4: Pollinations OpenAI endpoint
+ */
+async function callPollinationsOpenAI(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const models = ['mistral', 'openai', 'llama'];
+  for (const model of models) {
+    try {
+      const response = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15000),
+        body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
+      });
+      if (response.status === 429) { await new Promise(r => setTimeout(r, 1000)); continue; }
+      if (!response.ok) continue;
+      const data = await response.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply?.trim()) {
+        console.log(`[AI] Pollinations ${model} OK`);
+        return reply.trim();
+      }
+    } catch { continue; }
+  }
+  throw new Error('Pollinations OpenAI failed');
+}
+
+/**
+ * Provider 5: Custom API (مُكوّن من لوحة التحكم)
+ */
 async function callCustomAPI(
   messages: Array<{ role: string; content: string }>,
   config: { baseUrl: string; apiKey: string; model: string }
@@ -200,64 +250,72 @@ async function callCustomAPI(
   const data = await response.json();
   const reply = data.choices?.[0]?.message?.content;
   if (reply?.trim()) return reply.trim();
-  throw new Error('Empty');
+  throw new Error('Empty custom response');
 }
 
 // ============================
-// Unified AI Response - متوازي وسريع
+// Unified AI Response - نظام ذكي متعدد الطبقات
 // ============================
 
 async function getAIResponse(
   messages: Array<{ role: string; content: string }>,
   config: { provider: string; baseUrl?: string; apiKey?: string; model?: string }
 ): Promise<{ reply: string; provider: string }> {
-  // بناء قائمة المزودين
-  const providers: Array<{ name: string; fn: () => Promise<string> }> = [
-    { name: 'pollinations', fn: () => callPollinationsOpenAI(messages) },
-    { name: 'pollinations-get', fn: () => callPollinationsGET(messages) },
-    { name: 'zai-sdk', fn: () => callZaiSDK(messages) },
-    { name: 'zai-direct', fn: () => callZaiDirect(messages) },
+  const errors: string[] = [];
+
+  // بناء قائمة المزودين حسب الأولوية
+  const providers: Array<{ name: string; fn: () => Promise<string>; priority: number }> = [
+    { name: 'zai-sdk', fn: () => callZaiSDK(messages), priority: 1 },
+    { name: 'gemini-rapidapi', fn: () => callGeminiRapidAPI(messages), priority: 2 },
+    { name: 'zai-direct', fn: () => callZaiDirect(messages), priority: 3 },
+    { name: 'pollinations', fn: () => callPollinationsOpenAI(messages), priority: 4 },
   ];
 
   if (config.provider === 'api' && config.baseUrl && config.apiKey) {
     providers.push({
       name: 'custom-api',
       fn: () => callCustomAPI(messages, { baseUrl: config.baseUrl!, apiKey: config.apiKey!, model: config.model || 'gpt-4' }),
+      priority: 5,
     });
   }
 
-  // تشغيل أول مزودين بالتوازي والباقي بالتسلسل
-  // Strategy: Promise.race بين أول 2، ثم الباقي بالتسلسل
-  const errors: string[] = [];
-
-  // المرحلة 1: شغل أول 2 بالتوازي
+  // المرحلة 1: شغل أول مزودين بالتوازي (Z-AI SDK + Gemini)
   const firstTwo = providers.slice(0, 2);
-  const rest = providers.slice(2);
-
   try {
-    const result = await Promise.race(
+    const results = await Promise.allSettled(
       firstTwo.map(async (p) => {
         const reply = await p.fn();
         return { reply, provider: p.name };
       })
     );
-    return result;
+    // أرجع أول نتيجة ناجحة
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        return result.value;
+      }
+    }
+    const failReasons = results
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map((r, i) => `${firstTwo[i].name}: ${r.reason?.message?.substring(0, 40)}`)
+      .join('|');
+    errors.push(`Parallel: ${failReasons}`);
   } catch (err: any) {
-    errors.push(`First2: ${err?.message?.substring(0, 30) || 'fail'}`);
+    errors.push(`Parallel: ${err?.message?.substring(0, 50)}`);
   }
 
-  // المرحلة 2: جرب الباقي بالتسلسل (بسرعة)
+  // المرحلة 2: جرب الباقي بالتسلسل
+  const rest = providers.slice(2);
   for (const provider of rest) {
     try {
       const reply = await provider.fn();
       return { reply, provider: provider.name };
     } catch (err: any) {
-      errors.push(`${provider.name}:${err?.message?.substring(0, 20) || 'fail'}`);
+      errors.push(`${provider.name}: ${err?.message?.substring(0, 40)}`);
     }
   }
 
   // المرحلة الأخيرة: رد ذكي مدمج
-  console.log('[AI] All failed:', errors.join('|'));
+  console.log('[AI] All providers failed:', errors.join(' | '));
   const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
   return { reply: generateSmartFallback(lastUserMsg), provider: 'fallback' };
 }
@@ -331,7 +389,7 @@ export async function handleTelegramUpdate(update: {
     // أمر /start
     if (text === '/start') {
       if (isAdmin(userId) || user.isApproved) {
-        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- يعمل بـ Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة");
+        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- يعمل بـ Z-AI (GLM-4 Plus) + Gemini\n\n/clear - مسح الذاكرة\n/help - المساعدة");
       } else {
         await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
         await db.joinLog.create({ data: { userId, action: 'attempt' } });
@@ -349,7 +407,7 @@ export async function handleTelegramUpdate(update: {
     }
 
     if (text === '/help') {
-      await sendMessage(chatId, "**مود شات - المساعدة**\n\n- ذاكرة ذكية\n- متعدد اللغات\n- يعمل بـ Z-AI (GLM-4 Plus)\n\n/start - بدء المحادثة\n/clear - مسح الذاكرة\n/help - المساعدة");
+      await sendMessage(chatId, "**مود شات - المساعدة**\n\n- ذاكرة ذكية\n- متعدد اللغات\n- يعمل بـ Z-AI + Gemini\n\n/start - بدء المحادثة\n/clear - مسح الذاكرة\n/help - المساعدة");
       return { ok: true };
     }
     if (text === '/clear') {
@@ -436,11 +494,37 @@ export async function handleTelegramUpdate(update: {
 // ============================
 
 async function handleAIStatusCommand(chatId: number) {
-  let status = "**حالة AI:**\n\n";
+  let status = "**حالة مزودي AI:**\n\n";
   const msgs = [{ role: 'user' as const, content: 'say ok' }];
-  try { const s = Date.now(); await callPollinationsOpenAI(msgs); status += `Pollinations: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Pollinations: غير متاح\n`; }
-  try { const s = Date.now(); await callZaiSDK(msgs); status += `Z-AI SDK: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Z-AI SDK: غير متاح\n`; }
-  status += `\nالنظام: Pollinations + Z-AI + رد ذكي`;
+
+  // اختبار Z-AI SDK
+  try {
+    const s = Date.now();
+    await callZaiSDK(msgs);
+    status += `Z-AI SDK: يعمل (${Date.now() - s}ms)\n`;
+  } catch {
+    status += `Z-AI SDK: غير متاح\n`;
+  }
+
+  // اختبار Gemini
+  try {
+    const s = Date.now();
+    await callGeminiRapidAPI(msgs);
+    status += `Gemini Flash: يعمل (${Date.now() - s}ms)\n`;
+  } catch {
+    status += `Gemini Flash: غير متاح\n`;
+  }
+
+  // اختبار Pollinations
+  try {
+    const s = Date.now();
+    await callPollinationsOpenAI(msgs);
+    status += `Pollinations: يعمل (${Date.now() - s}ms)\n`;
+  } catch {
+    status += `Pollinations: غير متاح\n`;
+  }
+
+  status += `\nالنظام: Z-AI SDK + Gemini + Pollinations + رد ذكي`;
   await sendMessage(chatId, status);
 }
 
