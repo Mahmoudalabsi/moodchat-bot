@@ -163,6 +163,7 @@ export default function Dashboard() {
   const [cfgZaiToken, setCfgZaiToken] = useState('');
   const [cfgPassword, setCfgPassword] = useState('');
   const [cfgPasswordEnabled, setCfgPasswordEnabled] = useState(true);
+  const [cfgGeminiKey, setCfgGeminiKey] = useState('');
 
   // Theme
   const { theme, toggleTheme } = useTheme();
@@ -297,6 +298,7 @@ export default function Dashboard() {
         setCfgZaiToken(c.zai_token_raw || '');
         setCfgPassword(c.join_password || '');
         setCfgPasswordEnabled(c.password_enabled !== false);
+        setCfgGeminiKey(c.gemini_api_key_raw || '');
       }
     } catch { /* ignore */ }
   }, []);
@@ -333,6 +335,7 @@ export default function Dashboard() {
           zai_token: cfgZaiToken,
           join_password: cfgPassword,
           password_enabled: cfgPasswordEnabled,
+          gemini_api_key: cfgGeminiKey,
         }),
       });
       await fetchConfig();
@@ -418,6 +421,7 @@ export default function Dashboard() {
           setCfgZaiToken(d.config.zai_token_raw || '');
           setCfgPassword(d.config.join_password || '');
           setCfgPasswordEnabled(d.config.password_enabled !== false);
+          setCfgGeminiKey(d.config.gemini_api_key_raw || '');
         }
         if (d.webhook) {
           setWebhookStatus(d.webhook.online ? 'online' : 'offline');
@@ -1571,6 +1575,44 @@ export default function Dashboard() {
                       className="bg-background border-border text-foreground rounded-lg"
                       disabled={!cfgPasswordEnabled}
                     />
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Gemini API Key - Vision */}
+              <Card className="border-border/50">
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Camera size={20} className="text-primary" />
+                    {lang === 'ar' ? 'مفتاح Gemini API (تحليل الصور)' : 'Gemini API Key (Image Analysis)'}
+                  </CardTitle>
+                  <CardDescription>
+                    {lang === 'ar' 
+                      ? 'مطلوب لتحليل الصور على Vercel. احصل على مفتاح مجاني من Google AI Studio'
+                      : 'Required for image analysis on Vercel. Get a free key from Google AI Studio'}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-muted-foreground">API Key</Label>
+                      <Input
+                        value={cfgGeminiKey}
+                        onChange={e => setCfgGeminiKey(e.target.value)}
+                        placeholder="AIzaSy..."
+                        className="bg-background border-border text-foreground rounded-lg"
+                        dir="ltr"
+                        type="password"
+                      />
+                    </div>
+                    <a
+                      href="https://aistudio.google.com/apikey"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary hover:underline flex items-center gap-1"
+                    >
+                      {lang === 'ar' ? 'احصل على مفتاح مجاني →' : 'Get a free API key →'}
+                    </a>
                   </div>
                 </CardContent>
               </Card>

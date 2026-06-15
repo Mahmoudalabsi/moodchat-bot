@@ -26,6 +26,8 @@ export async function GET() {
       zai_token_raw: configMap.zai_token || configMap.ZAI_TOKEN || '',
       join_password: configMap.join_password || '',
       password_enabled: configMap.password_enabled !== 'false',
+      gemini_api_key: configMap.gemini_api_key ? '••••••••' : '',
+      gemini_api_key_raw: configMap.gemini_api_key || '',
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -46,6 +48,7 @@ export async function PUT(request: NextRequest) {
     if (body.zai_token !== undefined && body.zai_token !== '••••••••') fields.zai_token = body.zai_token;
     if (body.join_password !== undefined) fields.join_password = body.join_password;
     if (body.password_enabled !== undefined) fields.password_enabled = String(body.password_enabled);
+    if (body.gemini_api_key !== undefined && body.gemini_api_key !== '••••••••') fields.gemini_api_key = body.gemini_api_key;
 
     for (const [key, value] of Object.entries(fields)) {
       await db.botConfig.upsert({
