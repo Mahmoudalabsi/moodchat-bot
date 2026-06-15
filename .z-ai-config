@@ -1,5 +1,5 @@
 {
-  "baseUrl": "https://chat.z.ai/api/v1",
+  "baseUrl": "https://internal-api.z.ai/v1",
   "apiKey": "Z.ai",
   "chatId": "chat-c2ae3234-5685-4053-8998-96e9a664f658",
   "userId": "014c4da7-4f7f-4efa-9157-9091a73a3570",
