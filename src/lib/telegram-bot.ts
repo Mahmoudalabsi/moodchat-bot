@@ -213,7 +213,8 @@ export async function handleTelegramUpdate(update: {
 
     // إذا المستخدم ينتظر كلمة المرور
     if (user.waitingForPassword && !isAdmin(userId)) {
-      if (text === JOIN_PASSWORD) {
+      const currentPassword = await getJoinPassword();
+      if (text === currentPassword) {
         await db.telegramUser.update({
           where: { userId },
           data: {
@@ -261,7 +262,6 @@ export async function handleTelegramUpdate(update: {
           + "/start - بدء المحادثة\n"
           + "/clear - مسح سجل المحادثة\n"
           + "/help - عرض المساعدة"
-          + (isAdmin(userId) ? "\n/dashboard - لوحة التحكم" : "")
         );
       } else {
         // المستخدم جديد - يطلب كلمة سر
@@ -318,7 +318,7 @@ export async function handleTelegramUpdate(update: {
 
       if (isAdmin(userId)) {
         helpText += "\n\n👑 **أوامر المدير:**\n"
-          + "/dashboard - إحصائيات البوت\n"
+          + "/stats - إحصائيات البوت\n"
           + "/users - قائمة المستخدمين\n"
           + "/chatlog [ID] - قراءة محادثة مستخدم\n"
           + "/block [ID] - حظر مستخدم\n"
@@ -346,7 +346,7 @@ export async function handleTelegramUpdate(update: {
     // ============================
 
     if (isAdmin(userId)) {
-      if (text === '/dashboard' || text === '/stats') {
+      if (text === '/stats') {
         await handleDashboardCommand(chatId);
         return { ok: true };
       }
@@ -469,7 +469,6 @@ async function handleDashboardCommand(chatId: number) {
     `📩 رسائل اليوم: ${messagesToday}`,
     `🆕 مستخدمين جدد اليوم: ${newUsersToday}`,
     `🤖 مزود AI: Z-AI (GLM-4 Plus) مجاني`,
-    `🔑 كلمة السر: ${JOIN_PASSWORD}`,
   ].join('\n');
 
   await sendMessage(chatId, stats);

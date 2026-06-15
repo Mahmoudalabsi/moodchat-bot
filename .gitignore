@@ -51,3 +51,8 @@ dev.log
 
 # Prisma client generated
 node_modules/.prisma/
+
+# SQLite files (no longer used)
+*.db
+*.db-journal
+tool-results/
