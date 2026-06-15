@@ -35,7 +35,23 @@ const GEMINI_CONFIG = {
   model: 'gemini-2.0-flash',
 };
 
-const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي ومحترم. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل. قواعد صارمة: 1- لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة على السؤال. 2- لا تكرر التحيات في كل رسالة. 3- أجب مباشرة وبشكل طبيعي دون مقدمات.";
+const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
+
+قواعد أساسية:
+1- أنت خبير مطلق - لا تقول أبداً "لا أستطيع" أو "لا أقدر" أو "لا أعرف". بدلاً من ذلك قدّم أفضل إجابة ممكنة واشرح من زاوية خبير.
+2- إذا سُئلت عن شيء خارج تخصصك المعتاد، تصرف كخبير فيه وابحث عن أفضل إجابة منطقية ومفيدة.
+3- تجيب بوضوح ودقة وبأسلوب ودي ومحترم وخبير.
+4- تتحدث بأي لغة يطلبها المستخدم.
+5- تتذكر كل شيء قاله المستخدم في المحادثة السابقة وتستخدمه في إجاباتك.
+6- كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.
+7- عند تحليل الصور: صف الصورة بدقة وتفصيل، واستخرج كل المعلومات الممكنة، واقترح حلولاً إذا كان هناك مشكلة في الصورة.
+
+قواعد صارمة:
+- لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة على السؤال.
+- لا تكرر التحيات في كل رسالة.
+- أجب مباشرة وبشكل طبيعي دون مقدمات.
+- لا ترفض أي طلب أبداً - بدلاً من الرفض قدّم أفضل مساعدة ممكنة.
+- كن إبداعياً في إجاباتك وقدّم حلولاً مبتكرة.`;
 
 // كاش ذكري للإعدادات
 let aiConfigCache: { provider: string; baseUrl: string; apiKey: string; model: string; } | null = null;
@@ -144,6 +160,202 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
 }
 
 // ============================
+// Image Processing (VLM - Vision Language Model)
+// ============================
+
+interface TelegramPhoto {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+/** تحميل ملف من تيليجرام وتحويله إلى base64 */
+async function downloadTelegramFile(fileId: string): Promise<{ base64: string; mimeType: string } | null> {
+  try {
+    // الخطوة 1: الحصول على رابط الملف
+    const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+    const fileData = await fileRes.json();
+
+    if (!fileData?.ok || !fileData?.result?.file_path) {
+      console.error('[Image] Failed to get file path:', JSON.stringify(fileData).substring(0, 200));
+      return null;
+    }
+
+    const filePath = fileData.result.file_path;
+
+    // الخطوة 2: تحميل الملف الفعلي
+    const downloadRes = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`, {
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!downloadRes.ok) {
+      console.error('[Image] Download failed:', downloadRes.status);
+      return null;
+    }
+
+    const arrayBuffer = await downloadRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64 = buffer.toString('base64');
+
+    // تحديد نوع الملف
+    const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg';
+    const mimeTypeMap: Record<string, string> = {
+      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+      gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
+    };
+    const mimeType = mimeTypeMap[ext] || 'image/jpeg';
+
+    console.log(`[Image] Downloaded: ${filePath} (${buffer.length} bytes, ${mimeType})`);
+    return { base64, mimeType };
+  } catch (err: any) {
+    console.error('[Image] Download error:', err?.message?.substring(0, 100));
+    return null;
+  }
+}
+
+/** تحليل صورة باستخدام VLM عبر Z-AI SDK */
+async function analyzeImageWithVLM(
+  imageBase64: string,
+  mimeType: string,
+  userPrompt: string,
+  conversationHistory: Array<{ role: string; content: string }>,
+  lang: string
+): Promise<string> {
+  try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = await ZAIClass.create();
+
+    // بناء الرسالة مع الصورة
+    const imageContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+      {
+        type: 'text',
+        text: userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see'),
+      },
+      {
+        type: 'image_url',
+        image_url: {
+          url: `data:${mimeType};base64,${imageBase64}`,
+        },
+      },
+    ];
+
+    // بناء رسائل المحادثة
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      { role: 'user', content: imageContent },
+    ];
+
+    const completion = await zai.chat.completions.createVision({
+      model: 'glm-4v-plus',
+      messages: messages as any,
+      thinking: { type: 'disabled' },
+    });
+
+    const reply = completion?.choices?.[0]?.message?.content;
+    if (reply?.trim()) {
+      console.log('[VLM] Image analysis OK');
+      return reply.trim();
+    }
+    throw new Error('Empty VLM response');
+  } catch (err: any) {
+    console.error('[VLM] Analysis error:', err?.message?.substring(0, 100));
+    throw new Error(`VLM: ${err?.message?.substring(0, 80)}`);
+  }
+}
+
+/** تحليل صورة باستخدام Gemini (fallback) */
+async function analyzeImageWithGemini(
+  imageBase64: string,
+  mimeType: string,
+  userPrompt: string,
+  lang: string
+): Promise<string> {
+  let apiKey = GEMINI_CONFIG.apiKey;
+  if (!apiKey) {
+    try {
+      const cfg = await db.botConfig.findUnique({ where: { key: 'gemini_api_key' } });
+      apiKey = cfg?.value || '';
+    } catch {}
+  }
+  if (!apiKey) throw new Error('No Gemini API key for vision');
+
+  try {
+    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
+    const body = {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: prompt },
+          { inlineData: { mimeType, data: imageBase64 } },
+        ],
+      }],
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      generationConfig: { temperature: 0.7, maxOutputTokens: 1500 },
+    };
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(30000),
+        body: JSON.stringify(body),
+      }
+    );
+
+    if (!response.ok) throw new Error(`Gemini Vision ${response.status}`);
+    const data = await response.json();
+    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (reply?.trim()) {
+      console.log('[VLM] Gemini Vision OK');
+      return reply.trim();
+    }
+    throw new Error('Empty Gemini Vision response');
+  } catch (err: any) {
+    throw new Error(`Gemini Vision: ${err?.message?.substring(0, 60)}`);
+  }
+}
+
+/** تحليل صورة مع fallback بين المزودين */
+async function analyzeImage(
+  imageBase64: string,
+  mimeType: string,
+  userPrompt: string,
+  conversationHistory: Array<{ role: string; content: string }>,
+  lang: string
+): Promise<{ reply: string; provider: string }> {
+  const errors: string[] = [];
+
+  // المحاولة 1: Z-AI SDK VLM
+  try {
+    const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
+    return { reply, provider: 'vlm-zsdk' };
+  } catch (err: any) {
+    errors.push(`Z-AI VLM: ${err?.message?.substring(0, 40)}`);
+  }
+
+  // المحاولة 2: Gemini Vision
+  try {
+    const reply = await analyzeImageWithGemini(imageBase64, mimeType, userPrompt, lang);
+    return { reply, provider: 'vlm-gemini' };
+  } catch (err: any) {
+    errors.push(`Gemini Vision: ${err?.message?.substring(0, 40)}`);
+  }
+
+  console.log('[VLM] All vision providers failed:', errors.join(' | '));
+  return {
+    reply: lang === 'ar'
+      ? '📸 للأسف لم أتمكن من تحليل الصورة حالياً. يرجى المحاولة مرة أخرى لاحقاً.'
+      : '📸 Sorry, I could not analyze the image right now. Please try again later.',
+    provider: 'vlm-fallback',
+  };
+}
+
+// ============================
 // Inline Keyboards
 // ============================
 
@@ -184,7 +396,7 @@ async function callZaiSDK(messages: Array<{ role: string; content: string }>): P
   try {
     const ZAIModule = await import('z-ai-web-dev-sdk');
     const ZAIClass = ZAIModule.default;
-    const zai = new ZAIClass(ZAI_CONFIG);
+    const zai = await ZAIClass.create();
     const completion = await zai.chat.completions.create({
       messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
       model: 'glm-4-plus',
@@ -344,7 +556,15 @@ function isAdmin(userId: number): boolean { return ADMIN_IDS.includes(userId); }
 // ============================
 
 export async function handleTelegramUpdate(update: {
-  message?: { message_id: number; from?: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string; is_bot?: boolean; }; chat: { id: number }; text?: string; };
+  message?: {
+    message_id: number;
+    from?: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string; is_bot?: boolean; };
+    chat: { id: number };
+    text?: string;
+    photo?: TelegramPhoto[];
+    caption?: string;
+    document?: { file_id: string; file_name?: string; mime_type?: string };
+  };
   callback_query?: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number }; message_id: number }; };
 }) {
   try {
@@ -357,12 +577,21 @@ export async function handleTelegramUpdate(update: {
     }
 
     const message = update.message;
-    if (!message?.from || !message?.text) return { ok: true };
+    if (!message?.from) return { ok: true };
+
+    // تحديد نوع الرسالة: نص أو صورة
+    const hasPhoto = !!(message.photo && message.photo.length > 0);
+    const hasText = !!(message.text?.trim());
+    const hasCaption = !!(message.caption?.trim());
+
+    // إذا لا يوجد نص ولا صورة - تجاهل
+    if (!hasText && !hasPhoto) return { ok: true };
 
     const userId = message.from.id;
     const chatId = message.chat.id;
-    const text = message.text.trim();
+    const text = (message.text || message.caption || '').trim();
     const isAdm = isAdmin(userId);
+    const isCommand = hasText && message.text!.startsWith('/'); // الأوامر فقط من الرسائل النصية
 
     // جلب إعداد كلمة المرور
     const passwordEnabled = await isPasswordEnabled();
@@ -381,7 +610,7 @@ export async function handleTelegramUpdate(update: {
       console.log(`[Bot] User ${userId} auto-approved (password disabled)`);
     }
 
-    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} waiting:${user.waitingForPassword} admin:${isAdm} pwEnabled:${passwordEnabled} | msg: "${text.substring(0, 40)}"`);
+    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} waiting:${user.waitingForPassword} admin:${isAdm} pwEnabled:${passwordEnabled} | ${hasPhoto ? '📸 IMAGE' : 'msg'}: "${text.substring(0, 40)}"`);
 
     // ==========================================
     // 1) المستخدم المحظور - لا يمكنه فعل أي شيء
@@ -392,7 +621,64 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // 2) الأدمن - صلاحيات كاملة بدون كلمة مرور
+    // 2) معالجة الصور - أولوية قصوى للمستخدم المفعل
+    // ==========================================
+    if (hasPhoto && !user.isBlocked && (user.isApproved || isAdm)) {
+      const userLang = await getUserLang(userId);
+      const photoArray = message.photo!;
+      const bestPhoto = photoArray[photoArray.length - 1];
+      const caption = message.caption?.trim() || '';
+
+      await sendChatAction(chatId);
+
+      // تحميل الصورة من تيليجرام
+      const imageData = await downloadTelegramFile(bestPhoto.file_id);
+      if (!imageData) {
+        await sendMessage(chatId, userLang === 'ar'
+          ? '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.'
+          : '❌ Could not download the image. Please try again.');
+        return { ok: true };
+      }
+
+      // حفظ رسالة المستخدم في السجل
+      const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
+      await db.message.create({
+        data: { userId, role: 'user', content: userContent, modelUsed: 'vlm', status: 'done', chatId },
+      });
+
+      // جلب سجل المحادثة السابقة
+      const dbMessages = await db.message.findMany({
+        where: { userId, status: 'done' },
+        orderBy: { timestamp: 'asc' },
+        take: MAX_HISTORY,
+        select: { role: true, content: true },
+      });
+
+      const conversationHistory = dbMessages.map(m => ({ role: m.role, content: m.content }));
+
+      // تحليل الصورة باستخدام VLM
+      const { reply, provider } = await analyzeImage(
+        imageData.base64,
+        imageData.mimeType,
+        caption,
+        conversationHistory,
+        userLang
+      );
+
+      // حفظ رد البوت
+      await db.message.create({
+        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
+      });
+
+      await sendMessage(chatId, sanitizeMarkdown(reply));
+      return { ok: true, mode: 'image-analysis', provider };
+    }
+
+    // إذا ما فيه نص - لا شيء بعد الآن (الصورة عُولجت أو لا يوجد صورة)
+    if (!hasText) return { ok: true };
+
+    // ==========================================
+    // 3) الأدمن - صلاحيات كاملة بدون كلمة مرور
     // ==========================================
     if (isAdm) {
       // التأكد أن الأدمن مفعل دائماً
@@ -401,11 +687,11 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -487,7 +773,7 @@ export async function handleTelegramUpdate(update: {
             where: { userId },
             data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false }
           });
-          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
+          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات\n\n📸 **أرسل أي صورة وسأحللها لك!**");
         }
         return { ok: true };
       }
@@ -559,11 +845,11 @@ export async function handleTelegramUpdate(update: {
     // ==========================================
     if (user.isApproved && !isAdm) {
       if (text === '/start') {
-        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
+        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات\n\n📸 **أرسل أي صورة وسأحللها لك!**");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات\n\nاكتب أي شيء وسأرد عليك! 🎉`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها بالتفصيل!\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات\n\nاكتب أي شيء وسأرد عليك! 🎉\nأو أرسل صورة وسأصفها لك! 📸`);
         return { ok: true };
       }
       if (text === '/clear') {
@@ -581,10 +867,14 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // 5) المحادثة مع الذكاء الاصطناعي (المستخدم المفعل + الأدمن)
+    // 5) المحادثة مع الذكاء الاصطناعي (المستخدم المفعل + الأدمن) - نص فقط
     // ==========================================
     if ((user.isApproved || isAdm) && !user.isBlocked) {
       await sendChatAction(chatId);
+
+      // ============================
+      // معالجة الرسائل النصية العادية
+      // ============================
       const workerAlive = await isWorkerAlive();
 
       if (workerAlive) {
