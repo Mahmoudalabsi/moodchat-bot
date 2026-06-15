@@ -88,7 +88,8 @@ async function sendChatAction(chatId: number) {
 
 /**
  * Provider 1: Z-AI SDK (z-ai-web-dev-sdk)
- * يعمل عبر internal-api.z.ai - يحتاج على بيئة Z.ai أو Vercel مع التوكن الصحيح
+ * يعمل عبر internal-api.z.ai - يعمل من بيئة Z.ai فقط
+ * من Vercel سيفشل (internal-api.z.ai غير متاح خارجياً) وينتقل للمزود التالي
  */
 async function callZaiSDK(messages: Array<{ role: string; content: string }>): Promise<string> {
   try {
@@ -107,7 +108,7 @@ async function callZaiSDK(messages: Array<{ role: string; content: string }>): P
       console.log('[AI] Z-AI SDK OK');
       return reply.trim();
     }
-    throw new Error('Empty response from Z-AI SDK');
+    throw new Error('Empty Z-AI response');
   } catch (err: any) {
     throw new Error(`ZAI SDK: ${err?.message?.substring(0, 80)}`);
   }
@@ -280,6 +281,8 @@ async function getAIResponse(
   const errors: string[] = [];
 
   // بناء قائمة المزودين حسب الأولوية
+  // من Vercel: Z-AI سيفشل سريعاً، ثم Gemini ينجح
+  // من Z.ai: Z-AI ينجح مباشرة
   const providers: Array<{ name: string; fn: () => Promise<string>; priority: number }> = [
     { name: 'zai-sdk', fn: () => callZaiSDK(messages), priority: 1 },
     { name: 'zai-direct', fn: () => callZaiDirect(messages), priority: 2 },
@@ -295,8 +298,9 @@ async function getAIResponse(
     });
   }
 
-  // المرحلة 1: شغل أول مزودين بالتوازي (Z-AI SDK + Z-AI Direct)
-  const firstTwo = providers.slice(0, 2);
+  // المرحلة 1: شغل أول 3 مزودين بالتوازي (Z-AI SDK + Z-AI Direct + Gemini)
+  // أول نتيجة ناجحة تُستخدم
+  const firstBatch = providers.slice(0, 3);
   try {
     const results = await Promise.allSettled(
       firstTwo.map(async (p) => {
