@@ -452,32 +452,60 @@ export default function Dashboard() {
                   {/* API Token Option */}
                   <button onClick={() => setCfgProvider('api')}
                     style={{ padding: 20, borderRadius: 12, border: `2px solid ${cfgProvider === 'api' ? C.accent : C.border}`, background: cfgProvider === 'api' ? `${C.accent}10` : 'transparent', cursor: 'pointer', textAlign: 'right', transition: 'all 0.2s' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={{ width: 20, height: 20, borderRadius: '50%', border: `2px solid ${cfgProvider === 'api' ? C.accent : C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        {cfgProvider === 'api' && <div style={{ width: 10, height: 10, borderRadius: '50%', background: C.accent }} />}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={{ width: 20, height: 20, borderRadius: '50%', border: `2px solid ${cfgProvider === 'api' ? C.accent : C.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          {cfgProvider === 'api' && <div style={{ width: 10, height: 10, borderRadius: '50%', background: C.accent }} />}
+                        </div>
+                        <span style={{ color: C.text, fontWeight: 700, fontSize: 15 }}>API Token</span>
                       </div>
-                      <span style={{ color: C.text, fontWeight: 700, fontSize: 15 }}>API Token</span>
+                      <Badge style={{ background: '#60A5FA20', color: '#60A5FA', border: 'none', fontWeight: 700 }}>موصى به لـ Vercel</Badge>
                     </div>
-                    <p style={{ color: C.textSec, fontSize: 13, marginTop: 8, margin: '8px 0 0 30px' }}>استخدم أي مزود AI يدعم OpenAI API (Groq, OpenRouter, Gemini, إلخ)</p>
+                    <p style={{ color: C.textSec, fontSize: 13, marginTop: 8, margin: '8px 0 0 30px' }}>استخدم أي مزود AI يدعم OpenAI API — يعمل من Vercel بشكل موثوق</p>
                   </button>
 
                   {/* API Config */}
                   {cfgProvider === 'api' && (
                     <div style={{ marginRight: 30, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {/* Quick Setup Buttons */}
+                      <div style={{ background: `${C.bg}80`, borderRadius: 10, padding: 14, border: `1px solid ${C.border}40` }}>
+                        <p style={{ color: C.accent, fontSize: 13, fontWeight: 700, margin: '0 0 10px' }}>⚡ إعداد سريع — مزودين مجانيين موصى بهم:</p>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <button onClick={() => { setCfgApiUrl('https://api.groq.com/openai/v1'); setCfgApiModel('llama-3.3-70b-versatile'); }}
+                            style={{ padding: '6px 14px', borderRadius: 8, background: `${C.accent}20`, border: `1px solid ${C.accent}40`, color: C.accent, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                            🚀 Groq (مجاني وسريع)
+                          </button>
+                          <button onClick={() => { setCfgApiUrl('https://openrouter.ai/api/v1'); setCfgApiModel('meta-llama/llama-3.3-70b-instruct:free'); }}
+                            style={{ padding: '6px 14px', borderRadius: 8, background: '#A78BFA20', border: '1px solid #A78BFA40', color: '#A78BFA', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                            🌐 OpenRouter (نماذج مجانية)
+                          </button>
+                        </div>
+                        <p style={{ color: C.textSec, fontSize: 11, margin: '8px 0 0' }}>
+                          Groq: سجّل في console.groq.com واحصل على مفتاح مجاني | OpenRouter: سجّل في openrouter.ai
+                        </p>
+                      </div>
                       <div>
                         <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>رابط API (Base URL)</label>
-                        <Input value={cfgApiUrl} onChange={e => setCfgApiUrl(e.target.value)} placeholder="https://api.example.com/v1" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
+                        <Input value={cfgApiUrl} onChange={e => setCfgApiUrl(e.target.value)} placeholder="https://api.groq.com/openai/v1" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
                       </div>
                       <div>
                         <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>مفتاح API</label>
-                        <Input value={cfgApiKey} onChange={e => setCfgApiKey(e.target.value)} type="password" placeholder="sk-..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
+                        <Input value={cfgApiKey} onChange={e => setCfgApiKey(e.target.value)} type="password" placeholder="gsk_... أو sk-..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
                       </div>
                       <div>
                         <label style={{ color: C.textSec, fontSize: 12, display: 'block', marginBottom: 4 }}>اسم النموذج (Model)</label>
-                        <Input value={cfgApiModel} onChange={e => setCfgApiModel(e.target.value)} placeholder="gpt-4, llama-3, gemini-pro..." style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
+                        <Input value={cfgApiModel} onChange={e => setCfgApiModel(e.target.value)} placeholder="llama-3.3-70b-versatile" style={{ background: C.bg, border: `1px solid ${C.border}`, color: C.text, borderRadius: 8, direction: 'ltr' }} />
                       </div>
                     </div>
                   )}
+
+                  {/* Pollinations Fallback Info */}
+                  <div style={{ background: `${C.bg}60`, borderRadius: 10, padding: 14, border: `1px solid ${C.border}30` }}>
+                    <p style={{ color: C.textSec, fontSize: 12, margin: 0, lineHeight: 1.7 }}>
+                      💡 <span style={{ color: C.text, fontWeight: 600 }}>ملاحظة:</span> البوت يستخدم Pollinations.ai كاحتياطي تلقائي مجاني (بدون مفتاح) عند فشل المزود الأساسي.
+                      لضمان أفضل أداء وموثوقية، يُنصح باستخدام API Token مع Groq أو OpenRouter.
+                    </p>
+                  </div>
                 </CardContent>
               </Card>
 

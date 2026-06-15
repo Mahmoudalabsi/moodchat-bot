@@ -245,36 +245,49 @@ async function callCustomAPI(
 // ============================
 
 async function callPollinationsAPI(
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string }>,
+  retries: number = 2
 ): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
 
-  try {
-    const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        messages,
-        model: 'openai',
-        temperature: 0.7,
-      }),
-    });
+    try {
+      if (attempt > 0) {
+        // انتظار قبل إعادة المحاولة
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
 
-    if (!response.ok) {
-      throw new Error(`Pollinations ${response.status}`);
+      const response = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          messages,
+          model: 'openai',
+          temperature: 0.7,
+          seed: Math.floor(Math.random() * 10000),
+        }),
+      });
+
+      if (!response.ok) {
+        if (response.status === 429 && attempt < retries) continue;
+        throw new Error(`Pollinations ${response.status}`);
+      }
+
+      const data = await response.json();
+      const reply = data.choices?.[0]?.message?.content;
+      if (reply && reply.trim()) return reply.trim();
+      throw new Error('Empty Pollinations response');
+    } catch (error) {
+      if (attempt === retries) throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply && reply.trim()) return reply.trim();
-    throw new Error('Empty Pollinations response');
-  } finally {
-    clearTimeout(timeout);
   }
+  throw new Error('Pollinations all retries failed');
 }
 
 // ============================
