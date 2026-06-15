@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "لوحة تحكم بوت التليجرام - AI",
-  description: "لوحة تحكم بوت التليجرام الذكاء الاصطناعي مع مراقبة المستخدمين والرسائل",
+  title: "MoodChat - لوحة تحكم بوت التليجرام",
+  description: "Smart Telegram Bot Dashboard - لوحة تحكم بوت التليجرام الذكاء الاصطناعي",
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
@@ -31,7 +31,26 @@ export default function RootLayout({
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('moodchat_theme');if(t!=='light')document.documentElement.classList.add('dark')}catch{document.documentElement.classList.add('dark')}})()`,
+            __html: `(function(){
+              try{
+                // Theme
+                var t=localStorage.getItem('moodchat_theme');
+                if(t!=='light')document.documentElement.classList.add('dark');
+                // Language direction
+                var l=localStorage.getItem('moodchat_lang');
+                if(l==='en'){
+                  document.documentElement.dir='ltr';
+                  document.documentElement.lang='en';
+                } else {
+                  document.documentElement.dir='rtl';
+                  document.documentElement.lang='ar';
+                }
+              }catch{
+                document.documentElement.classList.add('dark');
+                document.documentElement.dir='rtl';
+                document.documentElement.lang='ar';
+              }
+            })()`,
           }}
         />
       </head>

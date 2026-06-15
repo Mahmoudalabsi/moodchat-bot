@@ -47,3 +47,24 @@ Stage Summary:
 - With cache: ~0.5s (10x faster)
 - Auth is instant on page load (no server wait)
 - All data loaded in single request
+---
+Task ID: 1
+Agent: Main Agent
+Task: Create language system (i18n) for MoodChat admin dashboard
+
+Work Log:
+- Created `/home/z/my-project/src/lib/i18n.ts` - Full translation system with AR/EN strings covering all UI text
+- Created `/home/z/my-project/src/hooks/use-language.ts` - useLanguage hook with localStorage persistence and auto RTL/LTR switching
+- Updated `/home/z/my-project/src/app/layout.tsx` - Added inline script for language-aware direction on first load (prevents flash)
+- Updated `/home/z/my-project/src/app/page.tsx` - Complete rewrite with all hardcoded Arabic strings replaced by translation system
+- Added language toggle button (🌐) in header and login screen
+- Added Language settings card in Settings tab with visual language picker
+- Build test: successful ✅
+- Dev server test: successful ✅
+
+Stage Summary:
+- Full bilingual support (Arabic/English) implemented
+- Direction switches automatically (RTL for Arabic, LTR for English)
+- Language preference persists in localStorage (key: moodchat_lang)
+- Inline script in layout prevents direction flash on page load
+- All dashboard text translated: auth, stats, users, messages, settings, dialogs
