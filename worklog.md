@@ -1,18 +1,22 @@
 ---
 Task ID: 1
 Agent: Main Agent
-Task: Fix MoodChat bot - remove channel join message and greeting in every reply
+Task: إصلاح بوت مود شات وربطه بـ Z-AI SDK
 
 Work Log:
-- Fixed SYSTEM_PROMPT in both bot-polling.ts and telegram-bot.ts
-- Removed "تبدأ بالسلام" from the AI instructions
-- Added strict rules: no greeting at start of every reply, answer directly
-- Channel join message "🚀 To use this bot, you must join our channel" needs to be disabled from BotFather manually
-- Bot is running in polling mode and receiving/responding to messages
-- Pushed all fixes to GitHub
+- فحص حالة المشروع ووجد أن الويب هوك فارغ (السبب الرئيسي لعدم عمل البوت)
+- فحص Z-AI SDK ووجد أنه مثبت (z-ai-web-dev-sdk@0.0.17)
+- اكتشف أن internal-api.z.ai يعمل فقط من بيئة Z.ai ولا يعمل من Vercel
+- اكتشف أن chat.z.ai/api/v1 يرجع 404 و z.ai/api/v1 يرجع خطأ مصادقة (الرمز منتهي)
+- أعاد كتابة كود البوت مع نظام متعدد الطبقات: Z-AI SDK → Direct API → Pollinations → Smart Fallback
+- أنشأ بوت polling محلي (polling-bot.mjs) يعمل من بيئة Z.ai مع internal-api
+- أنشأ نظام daemon (bot-daemon.sh) لإعادة التشغيل التلقائي
+- البوت يعمل الآن بنجاح ويرد على الرسائل باستخدام Z-AI SDK (GLM-4 Plus)
 
 Stage Summary:
-- Bot works in polling mode with Z-AI internal API
-- System prompt updated to prevent greetings in every reply
-- Vercel webhook backup code also updated
-- Channel join message must be removed via BotFather by user
+- ✅ البوت يعمل الآن ويرد على الرسائل عبر Z-AI SDK
+- ✅ نظام إعادة تشغيل تلقائي (bot-daemon.sh)
+- ✅ كود Vercel محدث كنسخة احتياطية (webhook mode)
+- ⚠️ البوت يعمل بنظام polling محلي وليس webhook على Vercel
+- ⚠️ internal-api.z.ai لا يعمل من Vercel (يحتاج بيئة Z.ai)
+- ⚠️ الرمز العام (public token) منتهي الصلاحية
