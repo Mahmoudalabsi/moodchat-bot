@@ -1,11 +1,11 @@
 /**
  * Telegram Bot Library - MoodChat (مود شات)
- * يعمل على Vercel (webhook) عبر z-ai-web-dev-sdk
+ * يعمل على Vercel (webhook)
  *
  * النظام متعدد الطبقات:
- * 1. Z-AI SDK (new ZAI(config)) - يعمل بدون ملف كونفج
- * 2. Z-AI Direct API - مباشرة عبر fetch مع JWT auth
- * 3. Pollinations.ai - مجاني، يعمل من أي مكان
+ * 1. Z-AI SDK (new ZAI(config)) - يعمل من بيئة Z.ai
+ * 2. Z-AI Direct API - يجرب عدة endpoints
+ * 3. Pollinations.ai - مجاني مع عدة نماذج
  * 4. رد ذكي مدمج - لا يفشل أبداً
  */
 
@@ -15,7 +15,6 @@ import { db } from './db';
 // الإعدادات
 // ============================
 
-// استخدام التوكن الجديد دائماً - حتى لو كان env var قديم
 const NEW_BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const OLD_BOT_TOKEN = '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
 const envToken = process.env.TELEGRAM_BOT_TOKEN || '';
@@ -40,9 +39,9 @@ const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شا�
 let aiConfigCache: { provider: string; baseUrl: string; apiKey: string; model: string; } | null = null;
 let aiConfigCacheTime = 0;
 
-// Rate limiter بسيط
+// Rate limiter
 let lastAICallTime = 0;
-const MIN_AI_CALL_INTERVAL = 1500;
+const MIN_AI_CALL_INTERVAL = 2000;
 
 async function rateLimitedSleep(): Promise<void> {
   const now = Date.now();
@@ -96,39 +95,33 @@ async function sendChatAction(chatId: number) {
 
 // ============================
 // AI Provider 1: Z-AI SDK (new ZAI(config))
-// يستخدم الكونستراكتور مباشرة - لا يحتاج ملف كونفج
 // ============================
 
 async function callZaiSDK(
   messages: Array<{ role: string; content: string }>,
-  retries: number = 2
+  retries: number = 1
 ): Promise<string> {
   for (let attempt = 0; attempt < retries; attempt++) {
     if (attempt > 0) await sleep(2000 * attempt + Math.random() * 1000);
-
     try {
       await rateLimitedSleep();
-
-      // استخدام new ZAI(config) مباشرة - يتجاوز الحاجة لملف كونفج
       const ZAIModule = await import('z-ai-web-dev-sdk');
       const ZAIClass = ZAIModule.default;
       const zai = new ZAIClass(ZAI_CONFIG);
-
       const completion = await zai.chat.completions.create({
         messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
         model: 'glm-4-plus',
         temperature: 0.7,
         max_tokens: 800,
       });
-
       const reply = completion?.choices?.[0]?.message?.content;
       if (reply?.trim()) {
         console.log('[AI] Z-AI SDK succeeded');
         return reply.trim();
       }
-      throw new Error('Empty Z-AI SDK response');
+      throw new Error('Empty response');
     } catch (err: any) {
-      console.log(`[AI] Z-AI SDK attempt ${attempt + 1}/${retries} failed: ${err?.message?.substring(0, 100)}`);
+      console.log(`[AI] Z-AI SDK failed: ${err?.message?.substring(0, 80)}`);
       if (attempt === retries - 1) throw err;
     }
   }
@@ -136,136 +129,111 @@ async function callZaiSDK(
 }
 
 // ============================
-// AI Provider 2: Z-AI Direct API (fetch)
-// يجرب عدة endpoints مع التوكن JWT
+// AI Provider 2: Z-AI Direct API
 // ============================
 
 async function callZaiDirectAPI(
-  messages: Array<{ role: string; content: string }>,
-  retries: number = 2
+  messages: Array<{ role: string; content: string }>
 ): Promise<string> {
   const endpoints = [
     { name: 'internal', url: 'https://internal-api.z.ai/v1/chat/completions' },
     { name: 'z.ai', url: 'https://z.ai/api/v1/chat/completions' },
-    { name: 'chat.z.ai', url: 'https://chat.z.ai/api/v1/chat/completions' },
   ];
 
   for (const endpoint of endpoints) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      await rateLimitedSleep();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ZAI_CONFIG.apiKey}`,
+        'X-Z-AI-From': 'Z',
+      };
+      if (ZAI_CONFIG.chatId) headers['X-Chat-Id'] = ZAI_CONFIG.chatId;
+      if (ZAI_CONFIG.userId) headers['X-User-Id'] = ZAI_CONFIG.userId;
+      if (ZAI_CONFIG.token) headers['X-Token'] = ZAI_CONFIG.token;
+
+      const response = await fetch(endpoint.url, {
+        method: 'POST', headers, signal: ctrl.signal,
+        body: JSON.stringify({ model: 'glm-4-plus', messages, temperature: 0.7, max_tokens: 800, thinking: { type: 'disabled' } }),
+      });
+      if (response.status === 429 || response.status === 401 || response.status === 403) {
+        console.log(`[AI] Z-AI ${endpoint.name} ${response.status}`);
+        continue;
+      }
+      if (!response.ok) continue;
+      const data = await response.json();
+      const reply = data?.choices?.[0]?.message?.content;
+      if (reply?.trim()) {
+        console.log(`[AI] Z-AI ${endpoint.name} succeeded`);
+        return reply.trim();
+      }
+    } catch (err: any) {
+      console.log(`[AI] Z-AI ${endpoint.name} error: ${err?.message?.substring(0, 60)}`);
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  throw new Error('Z-AI Direct failed');
+}
+
+// ============================
+// AI Provider 3: Pollinations.ai - عدة نماذج
+// ============================
+
+const POLLINATIONS_MODELS = [
+  { name: 'mistral', model: 'mistral' },
+  { name: 'openai', model: 'openai' },
+  { name: 'llama', model: 'llama' },
+];
+
+async function callPollinationsAPI(
+  messages: Array<{ role: string; content: string }>,
+  retries: number = 2
+): Promise<string> {
+  for (const modelConfig of POLLINATIONS_MODELS) {
     for (let attempt = 0; attempt < retries; attempt++) {
-      if (attempt > 0) await sleep(1500 * attempt + Math.random() * 500);
+      if (attempt > 0) await sleep(3000 * attempt + Math.random() * 2000);
 
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 15000);
+      const t = setTimeout(() => ctrl.abort(), 25000);
 
       try {
         await rateLimitedSleep();
 
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${ZAI_CONFIG.token}`,
-          'X-Z-AI-From': 'Z',
-          'X-Chat-Id': ZAI_CONFIG.chatId,
-          'X-User-Id': ZAI_CONFIG.userId,
-          'X-Token': ZAI_CONFIG.token,
-        };
-
-        const response = await fetch(endpoint.url, {
+        const response = await fetch('https://text.pollinations.ai/openai', {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           signal: ctrl.signal,
           body: JSON.stringify({
-            model: 'glm-4-plus',
+            model: modelConfig.model,
             messages,
             temperature: 0.7,
-            max_tokens: 800,
-            thinking: { type: 'disabled' },
+            seed: Math.floor(Math.random() * 100000),
           }),
         });
 
         if (response.status === 429) {
-          console.log(`[AI] Z-AI ${endpoint.name} rate limited`);
-          break; // انتقل للـ endpoint التالي
+          console.log(`[AI] Pollinations ${modelConfig.name} rate limited`);
+          break; // انتقل للنموذج التالي
         }
 
-        if (response.status === 401 || response.status === 403) {
-          console.log(`[AI] Z-AI ${endpoint.name} auth failed ${response.status}`);
-          break; // انتقل للـ endpoint التالي
-        }
-
-        if (!response.ok) {
-          const errText = await response.text().catch(() => '');
-          console.log(`[AI] Z-AI ${endpoint.name} error ${response.status}: ${errText.substring(0, 80)}`);
-          continue; // حاول مرة أخرى
-        }
+        if (!response.ok) throw new Error(`Pollinations ${response.status}`);
 
         const data = await response.json();
-        const reply = data?.choices?.[0]?.message?.content;
+        const reply = data.choices?.[0]?.message?.content;
         if (reply?.trim()) {
-          console.log(`[AI] Z-AI ${endpoint.name} succeeded`);
+          console.log(`[AI] Pollinations ${modelConfig.name} succeeded`);
           return reply.trim();
         }
+        throw new Error('Empty response');
       } catch (err: any) {
-        if (err?.name === 'AbortError') {
-          console.log(`[AI] Z-AI ${endpoint.name} timeout`);
-          break; // انتقل للـ endpoint التالي
-        }
-        if (attempt === retries - 1) break; // انتقل للـ endpoint التالي
+        if (err?.name === 'AbortError') break;
+        if (attempt === retries - 1) break;
       } finally {
         clearTimeout(t);
       }
-    }
-  }
-  throw new Error('Z-AI Direct failed for all endpoints');
-}
-
-// ============================
-// AI Provider 3: Pollinations.ai
-// ============================
-
-async function callPollinationsAPI(
-  messages: Array<{ role: string; content: string }>,
-  retries: number = 3
-): Promise<string> {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    if (attempt > 0) await sleep(3000 * attempt + Math.random() * 2000);
-
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 25000);
-
-    try {
-      await rateLimitedSleep();
-
-      const response = await fetch('https://text.pollinations.ai/openai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: ctrl.signal,
-        body: JSON.stringify({
-          model: 'openai',
-          messages,
-          temperature: 0.7,
-          seed: Math.floor(Math.random() * 100000),
-        }),
-      });
-
-      if (response.status === 429) {
-        console.log(`[AI] Pollinations rate limited (attempt ${attempt + 1}/${retries})`);
-        continue;
-      }
-
-      if (!response.ok) throw new Error(`Pollinations ${response.status}`);
-
-      const data = await response.json();
-      const reply = data.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log('[AI] Pollinations succeeded');
-        return reply.trim();
-      }
-      throw new Error('Empty response');
-    } catch (err: any) {
-      if (err?.name === 'AbortError') continue;
-      if (attempt === retries - 1) throw err;
-    } finally {
-      clearTimeout(t);
     }
   }
   throw new Error('Pollinations failed');
@@ -308,28 +276,28 @@ async function getAIResponse(
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // الطبقة 1: Z-AI SDK (new ZAI(config))
+  // الطبقة 1: Z-AI SDK
   try {
     const reply = await callZaiSDK(messages);
     return { reply, provider: 'zai-sdk' };
   } catch (err: any) {
-    errors.push(`Z-AI SDK: ${err?.message?.substring(0, 60) || 'failed'}`);
+    errors.push(`SDK: ${err?.message?.substring(0, 50) || 'fail'}`);
   }
 
-  // الطبقة 2: Z-AI Direct API
+  // الطبقة 2: Z-AI Direct
   try {
     const reply = await callZaiDirectAPI(messages);
     return { reply, provider: 'zai-direct' };
   } catch (err: any) {
-    errors.push(`Z-AI Direct: ${err?.message?.substring(0, 60) || 'failed'}`);
+    errors.push(`Direct: ${err?.message?.substring(0, 50) || 'fail'}`);
   }
 
-  // الطبقة 3: Pollinations.ai
+  // الطبقة 3: Pollinations (عدة نماذج)
   try {
     const reply = await callPollinationsAPI(messages);
     return { reply, provider: 'pollinations' };
   } catch (err: any) {
-    errors.push(`Pollinations: ${err?.message?.substring(0, 60) || 'failed'}`);
+    errors.push(`Pollinations: ${err?.message?.substring(0, 50) || 'fail'}`);
   }
 
   // الطبقة 4: Custom API
@@ -338,12 +306,12 @@ async function getAIResponse(
       const reply = await callCustomAPI(messages, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model || 'gpt-4' });
       return { reply, provider: 'custom-api' };
     } catch (err: any) {
-      errors.push(`Custom API: ${err?.message?.substring(0, 60) || 'failed'}`);
+      errors.push(`Custom: ${err?.message?.substring(0, 50) || 'fail'}`);
     }
   }
 
   // الطبقة الأخيرة: رد ذكي مدمج
-  console.log('[AI] All providers failed. Errors:', errors.join('; '));
+  console.log('[AI] All providers failed:', errors.join('; '));
   const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
   return { reply: generateSmartFallback(lastUserMsg), provider: 'fallback' };
 }
@@ -524,7 +492,7 @@ export async function handleTelegramUpdate(update: {
 async function handleAIStatusCommand(chatId: number) {
   let status = "**حالة مزودي AI:**\n\n";
   try { const s = Date.now(); await callZaiSDK([{ role: 'user', content: 'مرحبا' }], 1); status += `Z-AI SDK: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Z-AI SDK: غير متاح\n`; }
-  try { const s = Date.now(); await callZaiDirectAPI([{ role: 'user', content: 'مرحبا' }], 1); status += `Z-AI Direct: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Z-AI Direct: غير متاح\n`; }
+  try { const s = Date.now(); await callZaiDirectAPI([{ role: 'user', content: 'مرحبا' }]); status += `Z-AI Direct: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Z-AI Direct: غير متاح\n`; }
   try { const s = Date.now(); await callPollinationsAPI([{ role: 'user', content: 'مرحبا' }], 1); status += `Pollinations: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Pollinations: غير متاح\n`; }
   status += `\nالنظام: Z-AI SDK + Direct + Pollinations + رد ذكي`;
   await sendMessage(chatId, status);
