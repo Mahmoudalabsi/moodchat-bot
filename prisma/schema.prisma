@@ -34,10 +34,13 @@ model Message {
   content   String
   modelUsed String?
   timestamp DateTime     @default(now())
+  status    String       @default("done")  // "pending" = يحتاج رد AI, "done" = تم الرد
+  chatId    Int?                            // معرف المحادثة لإرسال الرد
   user      TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
   @@index([timestamp])
+  @@index([status])
 }
 
 model JoinLog {

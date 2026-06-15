@@ -575,22 +575,17 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ============================
-    // محادثة عادية مع الذكاء الاصطناعي (مع ذاكرة كاملة)
+    // محادثة عادية مع الذكاء الاصطناعي
+    // النظام الهجين: يحفظ الرسالة كـ "pending" والـ AI Worker يعالجها
     // ============================
 
     await sendChatAction(chatId);
 
     await db.message.create({
-      data: { userId, role: 'user', content: text, modelUsed: 'moodchat' },
+      data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
     });
 
-    const aiReply = await chatWithAI(userId, text);
-
-    await db.message.create({
-      data: { userId, role: 'assistant', content: aiReply, modelUsed: 'moodchat' },
-    });
-
-    await sendMessage(chatId, aiReply);
+    // لا ننتظر رد AI هنا - الـ Worker المحلي سيعالج الرسالة ويرسل الرد
     return { ok: true };
 
   } catch (error) {
