@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 
+const ZAI_CONFIG = {
+  baseUrl: 'https://internal-api.z.ai/v1',
+  apiKey: 'Z.ai',
+  chatId: 'chat-c2ae3234-5685-4053-8998-96e9a664f658',
+  userId: '014c4da7-4f7f-4efa-9157-9091a73a3570',
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
+};
+
 export async function GET(request: NextRequest) {
   const logs: string[] = [];
   const log = (msg: string) => { console.log(msg); logs.push(msg); };
@@ -71,8 +79,8 @@ export async function GET(request: NextRequest) {
       const ZAIClass = ZAIModule.default;
       log(`ZAI module loaded, type: ${typeof ZAIClass}`);
 
-      const zai = await ZAIClass.create();
-      log('ZAI instance created');
+      const zai = new ZAIClass(ZAI_CONFIG);
+      log('ZAI instance created via new ZAIClass(config)');
 
       const completion = await zai.chat.completions.createVision({
         model: 'glm-4v-plus',

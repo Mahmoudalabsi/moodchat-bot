@@ -264,7 +264,7 @@ async function analyzeImageWithVLM(
   try {
     const ZAIModule = await import('z-ai-web-dev-sdk');
     const ZAIClass = ZAIModule.default;
-    const zai = await ZAIClass.create();
+    const zai = new ZAIClass(ZAI_CONFIG);
 
     // بناء الرسالة مع الصورة
     const imageContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
@@ -375,7 +375,7 @@ async function analyzeImage(
       console.log('[VLM] Attempting URL-based VLM analysis...');
       const ZAIModule = await import('z-ai-web-dev-sdk');
       const ZAIClass = ZAIModule.default;
-      const zai = await ZAIClass.create();
+      const zai = new ZAIClass(ZAI_CONFIG);
 
       const imageContent = [
         { type: 'text', text: userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل' : 'Analyze this image in detail') },
@@ -485,7 +485,7 @@ async function callZaiSDK(messages: Array<{ role: string; content: string }>): P
   try {
     const ZAIModule = await import('z-ai-web-dev-sdk');
     const ZAIClass = ZAIModule.default;
-    const zai = await ZAIClass.create();
+    const zai = new ZAIClass(ZAI_CONFIG);
     const completion = await zai.chat.completions.create({
       messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
       model: 'glm-4-plus',
