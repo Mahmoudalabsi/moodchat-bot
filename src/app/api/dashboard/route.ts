@@ -125,6 +125,7 @@ export async function GET(request: NextRequest) {
         zai_token: configMap.zai_token ? '••••••••' : '',
         zai_token_raw: configMap.zai_token || configMap.ZAI_TOKEN || '',
         join_password: configMap.join_password || '',
+        password_enabled: configMap.password_enabled !== 'false',
       },
       webhook: {
         online: !!webhookData?.result?.url,

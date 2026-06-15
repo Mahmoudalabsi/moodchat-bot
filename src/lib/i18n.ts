@@ -96,6 +96,10 @@ export interface Translations {
   bot: string;
 
   // Settings
+  passwordToggle: string;
+  passwordEnabled: string;
+  passwordDisabled: string;
+  passwordToggleDesc: string;
   aiProvider: string;
   chooseAiProvider: string;
   free: string;
@@ -204,6 +208,10 @@ const ar: Translations = {
   user: 'المستخدم',
   bot: 'البوت',
 
+  passwordToggle: 'تفعيل كلمة المرور',
+  passwordEnabled: 'مفعلة - المستخدمون يحتاجون كلمة مرور للدخول',
+  passwordDisabled: 'معطلة - المستخدمون يدخلون مباشرة بدون كلمة مرور',
+  passwordToggleDesc: 'عند تفعيل كلمة المرور، يجب على المستخدمين إدخالها للدخول. عند إلغائها، يدخل الجميع مباشرة.',
   aiProvider: 'مزود الذكاء الاصطناعي',
   chooseAiProvider: 'اختر مزود الذكاء الاصطناعي للبوت',
   free: 'مجاني',
@@ -311,6 +319,10 @@ const en: Translations = {
   user: 'User',
   bot: 'Bot',
 
+  passwordToggle: 'Password Protection',
+  passwordEnabled: 'Enabled - Users need a password to join',
+  passwordDisabled: 'Disabled - Users can join directly without password',
+  passwordToggleDesc: 'When enabled, users must enter a password to join. When disabled, everyone can use the bot directly.',
   aiProvider: 'AI Provider',
   chooseAiProvider: 'Choose the AI provider for the bot',
   free: 'Free',

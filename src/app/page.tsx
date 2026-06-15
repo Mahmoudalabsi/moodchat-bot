@@ -53,7 +53,7 @@ interface Message {
 interface BotConfig {
   ai_provider: string; api_base_url: string; api_key: string; api_key_raw: string;
   api_model: string; zai_chat_id: string; zai_user_id: string;
-  zai_token: string; zai_token_raw: string; join_password: string;
+  zai_token: string; zai_token_raw: string; join_password: string; password_enabled: boolean;
 }
 
 // Theme hook
@@ -145,6 +145,7 @@ export default function Dashboard() {
   const [cfgZaiUserId, setCfgZaiUserId] = useState('');
   const [cfgZaiToken, setCfgZaiToken] = useState('');
   const [cfgPassword, setCfgPassword] = useState('');
+  const [cfgPasswordEnabled, setCfgPasswordEnabled] = useState(true);
 
   // Theme
   const { theme, toggleTheme } = useTheme();
@@ -278,6 +279,7 @@ export default function Dashboard() {
         setCfgZaiUserId(c.zai_user_id || '');
         setCfgZaiToken(c.zai_token_raw || '');
         setCfgPassword(c.join_password || '');
+        setCfgPasswordEnabled(c.password_enabled !== false);
       }
     } catch { /* ignore */ }
   }, []);
@@ -313,6 +315,7 @@ export default function Dashboard() {
           zai_user_id: cfgZaiUserId,
           zai_token: cfgZaiToken,
           join_password: cfgPassword,
+          password_enabled: cfgPasswordEnabled,
         }),
       });
       await fetchConfig();
@@ -378,6 +381,7 @@ export default function Dashboard() {
           setCfgZaiUserId(d.config.zai_user_id || '');
           setCfgZaiToken(d.config.zai_token_raw || '');
           setCfgPassword(d.config.join_password || '');
+          setCfgPasswordEnabled(d.config.password_enabled !== false);
         }
         if (d.webhook) {
           setWebhookStatus(d.webhook.online ? 'online' : 'offline');
@@ -1341,8 +1345,51 @@ export default function Dashboard() {
                 </CardContent>
               </Card>
 
-              {/* Password Settings */}
+              {/* Password Toggle */}
               <Card className="border-border/50">
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Shield size={20} className="text-primary" />
+                    {t.passwordToggle}
+                  </CardTitle>
+                  <CardDescription>{t.passwordToggleDesc}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <button
+                    onClick={() => setCfgPasswordEnabled(prev => !prev)}
+                    className={`w-full p-4 rounded-xl border-2 transition-all ${
+                      cfgPasswordEnabled
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border bg-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`w-12 h-7 rounded-full flex items-center transition-all p-0.5 ${
+                          cfgPasswordEnabled ? 'bg-primary justify-end' : 'bg-muted justify-start'
+                        }`}>
+                          <div className="w-6 h-6 rounded-full bg-white shadow-md" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-sm">
+                            {cfgPasswordEnabled ? `🔒 ${t.passwordEnabled}` : `🔓 ${t.passwordDisabled}`}
+                          </p>
+                        </div>
+                      </div>
+                      <Badge className={`border-0 ${
+                        cfgPasswordEnabled
+                          ? 'bg-emerald-500/15 text-emerald-500'
+                          : 'bg-yellow-500/15 text-yellow-500'
+                      }`}>
+                        {cfgPasswordEnabled ? (lang === 'ar' ? 'مفعلة' : 'On') : (lang === 'ar' ? 'معطلة' : 'Off')}
+                      </Badge>
+                    </div>
+                  </button>
+                </CardContent>
+              </Card>
+
+              {/* Password Settings */}
+              <Card className={`border-border/50 ${!cfgPasswordEnabled ? 'opacity-50' : ''}`}>
                 <CardHeader>
                   <CardTitle className="text-base flex items-center gap-2">
                     <Key size={20} className="text-primary" />
@@ -1358,6 +1405,7 @@ export default function Dashboard() {
                       onChange={e => setCfgPassword(e.target.value)}
                       placeholder={t.newPassword}
                       className="bg-background border-border text-foreground rounded-lg"
+                      disabled={!cfgPasswordEnabled}
                     />
                   </div>
                 </CardContent>

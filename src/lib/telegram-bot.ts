@@ -2,7 +2,7 @@
  * Telegram Bot Library - MoodChat (مود شات)
  * 
  * نظام هجين ذكي:
- * - Vercel Webhook: يستقبل الرسائل ويحفظها كـ "pending"
+ * - Vercel Webhook: يستقبل الرسائل ويعالجها
  * - Z.ai Worker: يعالج الرسائل باستخدام Z-AI SDK (الأساسي)
  * - إذا Worker غير متاح: Vercel يعالج مباشرة بـ Gemini/Pollinations
  * - لا ضياع للرسائل أبداً!
@@ -18,7 +18,7 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJq
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
-const WORKER_TIMEOUT = 30000; // 30 ثانية - إذا لم يعالج Worker خلالها، يعالج Vercel
+const WORKER_TIMEOUT = 30000;
 
 // Z-AI SDK Config
 const ZAI_CONFIG = {
@@ -64,6 +64,48 @@ async function getAIConfig() {
 export function clearAIConfigCache() { aiConfigCache = null; aiConfigCacheTime = 0; }
 
 // ============================
+// Bot Config Helpers
+// ============================
+
+async function getConfigValue(key: string): Promise<string | null> {
+  try {
+    const cfg = await db.botConfig.findUnique({ where: { key } });
+    return cfg?.value || null;
+  } catch {
+    return null;
+  }
+}
+
+async function setConfigValue(key: string, value: string): Promise<void> {
+  await db.botConfig.upsert({
+    where: { key },
+    update: { value },
+    create: { key, value },
+  });
+}
+
+/** هل كلمة المرور مفعلة؟ افتراضياً: نعم */
+async function isPasswordEnabled(): Promise<boolean> {
+  const val = await getConfigValue('password_enabled');
+  // إذا لم يكن موجود = مفعّل افتراضياً
+  return val !== 'false';
+}
+
+/** لغة البوت للمستخدم (af = عربي، en = إنجليزي) - الافتراضي عربي */
+async function getUserLang(userId: number): Promise<string> {
+  try {
+    const val = await getConfigValue(`user_lang_${userId}`);
+    return val || 'ar';
+  } catch {
+    return 'ar';
+  }
+}
+
+async function setUserLang(userId: number, lang: string): Promise<void> {
+  await setConfigValue(`user_lang_${userId}`, lang);
+}
+
+// ============================
 // فحص حالة الـ Worker
 // ============================
 
@@ -72,7 +114,7 @@ async function isWorkerAlive(): Promise<boolean> {
     const heartbeat = await db.botConfig.findUnique({ where: { key: 'worker_heartbeat' } });
     if (!heartbeat?.value) return false;
     const lastBeat = new Date(heartbeat.value).getTime();
-    return (Date.now() - lastBeat) < 120000; // أقل من دقيقتين = Worker شغال
+    return (Date.now() - lastBeat) < 120000;
   } catch {
     return false;
   }
@@ -97,8 +139,45 @@ async function sendChatAction(chatId: number) {
   return telegramAPI('sendChatAction', { chat_id: chatId, action: 'typing' });
 }
 
+async function editMessage(chatId: number, messageId: number, text: string, extra?: Record<string, unknown>) {
+  return telegramAPI('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: 'Markdown', ...extra });
+}
+
 // ============================
-// AI Providers (لاستخدام Vercel fallback فقط)
+// Inline Keyboards
+// ============================
+
+function settingsKeyboard(isAdminUser: boolean, passwordEnabled: boolean, userLang: string) {
+  const buttons = [
+    [
+      { text: userLang === 'ar' ? '🧹 مسح الذاكرة' : '🧹 Clear Memory', callback_data: 'settings:clear' },
+      { text: userLang === 'ar' ? '🌍 اللغة' : '🌍 Language', callback_data: 'settings:lang' },
+    ],
+  ];
+
+  // أزرار الأدمن فقط
+  if (isAdminUser) {
+    buttons.push([
+      { text: passwordEnabled ? '🔓 إلغاء كلمة المرور' : '🔒 تفعيل كلمة المرور', callback_data: `settings:toggle_password` },
+    ]);
+  }
+
+  return { inline_keyboard: buttons };
+}
+
+function langKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🇸🇦 العربية', callback_data: 'lang:ar' },
+        { text: '🇺🇸 English', callback_data: 'lang:en' },
+      ],
+    ],
+  };
+}
+
+// ============================
+// AI Providers (Vercel fallback)
 // ============================
 
 async function callZaiSDK(messages: Array<{ role: string; content: string }>): Promise<string> {
@@ -189,14 +268,13 @@ async function callCustomAPI(messages: Array<{ role: string; content: string }>,
   throw new Error('Empty custom');
 }
 
-// Vercel Fallback: يعمل فقط عندما Worker غير متاح
+// Vercel Fallback
 async function getAIResponseFallback(
   messages: Array<{ role: string; content: string }>,
   config: { provider: string; baseUrl?: string; apiKey?: string; model?: string }
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // جرب Z-AI SDK أولاً (قد يعمل من Z.ai إذا كان الـ webhook يعالج هناك)
   const providers: Array<{ name: string; fn: () => Promise<string> }> = [
     { name: 'zai-sdk', fn: () => callZaiSDK(messages) },
     { name: 'gemini', fn: () => callGeminiDirect(messages) },
@@ -253,7 +331,7 @@ async function getOrCreateUser(u: { id: number; username?: string; first_name?: 
       totalMessages: 1,
       isApproved: isAdmin(u.id),
       approvedAt: isAdmin(u.id) ? new Date() : null,
-      waitingForPassword: !isAdmin(u.id), // المستخدم العادي يحتاج كلمة مرور
+      waitingForPassword: false, // سيتحدد لاحقاً بناءً على إعداد كلمة المرور
     },
     update: { username: u.username || null, firstName: u.first_name || null, lastName: u.last_name || null, totalMessages: { increment: 1 } },
   });
@@ -262,17 +340,19 @@ async function getOrCreateUser(u: { id: number; username?: string; first_name?: 
 function isAdmin(userId: number): boolean { return ADMIN_IDS.includes(userId); }
 
 // ============================
-// Main Webhook Handler - نظام هجين ذكي
+// Main Webhook Handler
 // ============================
 
 export async function handleTelegramUpdate(update: {
   message?: { message_id: number; from?: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string; is_bot?: boolean; }; chat: { id: number }; text?: string; };
-  callback_query?: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number } }; };
+  callback_query?: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number }; message_id: number }; };
 }) {
   try {
-    // رد على الأزرار التفاعلية
+    // ============================
+    // معالجة الأزرار التفاعلية (Callback Query)
+    // ============================
     if (update.callback_query) {
-      await telegramAPI('answerCallbackQuery', { callback_query_id: update.callback_query.id });
+      await handleCallbackQuery(update.callback_query);
       return { ok: true };
     }
 
@@ -284,9 +364,24 @@ export async function handleTelegramUpdate(update: {
     const text = message.text.trim();
     const isAdm = isAdmin(userId);
 
+    // جلب إعداد كلمة المرور
+    const passwordEnabled = await isPasswordEnabled();
+
     // إنشاء أو تحديث المستخدم
     const user = await getOrCreateUser(message.from);
-    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} waiting:${user.waitingForPassword} admin:${isAdm} | msg: "${text.substring(0, 40)}"`);
+
+    // إذا كلمة المرور معطلة والمستخدم غير مفعل وغير محظور => فعّله تلقائياً
+    if (!passwordEnabled && !user.isApproved && !user.isBlocked && !isAdm) {
+      await db.telegramUser.update({
+        where: { userId },
+        data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false },
+      });
+      user.isApproved = true;
+      user.waitingForPassword = false;
+      console.log(`[Bot] User ${userId} auto-approved (password disabled)`);
+    }
+
+    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} waiting:${user.waitingForPassword} admin:${isAdm} pwEnabled:${passwordEnabled} | msg: "${text.substring(0, 40)}"`);
 
     // ==========================================
     // 1) المستخدم المحظور - لا يمكنه فعل أي شيء
@@ -306,11 +401,11 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**أوامر عامة:** /clear /help /start\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -326,8 +421,17 @@ export async function handleTelegramUpdate(update: {
       if (text.startsWith('/unblock ')) {
         const tid = parseInt(text.split(' ')[1]);
         if (tid) {
-          await db.telegramUser.update({ where: { userId: tid }, data: { isBlocked: false, isApproved: false, waitingForPassword: true, joinAttempts: 0 } });
-          await sendMessage(chatId, `تم إلغاء حظر \`${tid}\` - يجب عليه إدخال كلمة المرور مجدداً`);
+          const unblockData: Record<string, unknown> = { isBlocked: false, isApproved: false, joinAttempts: 0 };
+          // إذا كلمة المرور معطلة، فعّله مباشرة
+          if (!passwordEnabled) {
+            unblockData.isApproved = true;
+            unblockData.approvedAt = new Date();
+            unblockData.waitingForPassword = false;
+          } else {
+            unblockData.waitingForPassword = true;
+          }
+          await db.telegramUser.update({ where: { userId: tid }, data: unblockData });
+          await sendMessage(chatId, `تم إلغاء حظر \`${tid}\`${!passwordEnabled ? ' - مفعل تلقائياً (كلمة المرور معطلة)' : ' - يجب عليه إدخال كلمة المرور مجدداً'}`);
         }
         return { ok: true };
       }
@@ -349,6 +453,13 @@ export async function handleTelegramUpdate(update: {
         else await sendMessage(chatId, "كلمة المرور يجب أن تكون 3 أحرف على الأقل");
         return { ok: true };
       }
+      // أمر /settings للأدمن
+      if (text === '/settings') {
+        const pwEnabled = await isPasswordEnabled();
+        const uLang = await getUserLang(userId);
+        await sendMessage(chatId, "⚙️ **إعدادات البوت**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(true, pwEnabled, uLang)) });
+        return { ok: true };
+      }
       // أمر /clear للأدمن أيضاً
       if (text === '/clear') {
         await db.message.deleteMany({ where: { userId } });
@@ -363,53 +474,82 @@ export async function handleTelegramUpdate(update: {
     // 3) المستخدم غير المفعل (غير الأدمن) - نظام كلمة المرور
     // ==========================================
     if (!user.isApproved && !isAdm) {
-      // أمر /start - اعرض رسالة الترحيب مع طلب كلمة المرور
+      // أمر /start
       if (text === '/start') {
-        if (!user.waitingForPassword) {
-          await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
-        }
-        await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nلتفعيل حسابك والمحادثة مع الذكاء الاصطناعي، أرسل كلمة المرور:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
-        return { ok: true };
-      }
-
-      // أي أمر ثاني - اطلب كلمة المرور
-      if (text.startsWith('/')) {
-        await sendMessage(chatId, "🔒 أرسل كلمة المرور أولاً لتفعيل حسابك!");
-        return { ok: true };
-      }
-
-      // تحقق من كلمة المرور
-      const pw = await getJoinPassword();
-      if (text === pw) {
-        // ✅ كلمة المرور صحيحة - فعّل الحساب
-        await db.telegramUser.update({
-          where: { userId },
-          data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false, joinAttempts: 0 }
-        });
-        await db.joinLog.create({ data: { userId, action: 'success' } });
-        console.log(`[Bot] User ${userId} activated successfully!`);
-        await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\nابدأ محادثتك الآن! اكتب أي شيء 🎉");
-        return { ok: true };
-      } else {
-        // ❌ كلمة المرور خاطئة
-        const newAttempts = (user.joinAttempts || 0) + 1;
-        await db.telegramUser.update({
-          where: { userId },
-          data: { joinAttempts: newAttempts }
-        });
-        await db.joinLog.create({ data: { userId, action: 'fail', passwordTried: text.substring(0, 50) } });
-
-        if (newAttempts >= 5) {
-          // حظر بعد 5 محاولات
+        if (passwordEnabled) {
+          if (!user.waitingForPassword) {
+            await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
+          }
+          await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nلتفعيل حسابك والمحادثة مع الذكاء الاصطناعي، أرسل كلمة المرور:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
+        } else {
+          // كلمة المرور معطلة - فعّل تلقائياً
           await db.telegramUser.update({
             where: { userId },
-            data: { isBlocked: true, waitingForPassword: false }
+            data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false }
           });
-          console.log(`[Bot] User ${userId} blocked after 5 failed attempts`);
-          await sendMessage(chatId, "🚫 تم حظرك بسبب 5 محاولات خاطئة متتالية.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
-        } else {
-          await sendMessage(chatId, `❌ كلمة المرور خاطئة!\n\nالمحاولات المتبقية: ${5 - newAttempts}/5\n\nحاول مرة أخرى:`);
+          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         }
+        return { ok: true };
+      }
+
+      // أمر /settings حتى قبل التفعيل (إذا كلمة المرور معطلة)
+      if (text === '/settings' && !passwordEnabled) {
+        const uLang = await getUserLang(userId);
+        await sendMessage(chatId, "⚙️ **الإعدادات**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(false, passwordEnabled, uLang)) });
+        return { ok: true };
+      }
+
+      // أي أمر ثاني - اطلب كلمة المرور (فقط إذا مفعلة)
+      if (text.startsWith('/')) {
+        if (passwordEnabled) {
+          await sendMessage(chatId, "🔒 أرسل كلمة المرور أولاً لتفعيل حسابك!");
+        } else {
+          await sendMessage(chatId, "أرسل /start للبدء.");
+        }
+        return { ok: true };
+      }
+
+      // تحقق من كلمة المرور (فقط إذا مفعلة)
+      if (passwordEnabled) {
+        const pw = await getJoinPassword();
+        if (text === pw) {
+          // ✅ كلمة المرور صحيحة - فعّل الحساب
+          await db.telegramUser.update({
+            where: { userId },
+            data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false, joinAttempts: 0 }
+          });
+          await db.joinLog.create({ data: { userId, action: 'success' } });
+          console.log(`[Bot] User ${userId} activated successfully!`);
+          await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\nابدأ محادثتك الآن! اكتب أي شيء 🎉");
+          return { ok: true };
+        } else {
+          // ❌ كلمة المرور خاطئة
+          const newAttempts = (user.joinAttempts || 0) + 1;
+          await db.telegramUser.update({
+            where: { userId },
+            data: { joinAttempts: newAttempts }
+          });
+          await db.joinLog.create({ data: { userId, action: 'fail', passwordTried: text.substring(0, 50) } });
+
+          if (newAttempts >= 5) {
+            await db.telegramUser.update({
+              where: { userId },
+              data: { isBlocked: true, waitingForPassword: false }
+            });
+            console.log(`[Bot] User ${userId} blocked after 5 failed attempts`);
+            await sendMessage(chatId, "🚫 تم حظرك بسبب 5 محاولات خاطئة متتالية.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
+          } else {
+            await sendMessage(chatId, `❌ كلمة المرور خاطئة!\n\nالمحاولات المتبقية: ${5 - newAttempts}/5\n\nحاول مرة أخرى:`);
+          }
+          return { ok: true };
+        }
+      } else {
+        // كلمة المرور معطلة لكن المستخدم غير مفعل (حالة نادرة) - فعّله
+        await db.telegramUser.update({
+          where: { userId },
+          data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false }
+        });
+        await sendMessage(chatId, "✅ تم تفعيل حسابك! ابدأ محادثتك الآن 🎉");
         return { ok: true };
       }
     }
@@ -419,16 +559,22 @@ export async function handleTelegramUpdate(update: {
     // ==========================================
     if (user.isApproved && !isAdm) {
       if (text === '/start') {
-        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة");
+        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n\nاكتب أي شيء وسأرد عليك! 🎉`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات\n\nاكتب أي شيء وسأرد عليك! 🎉`);
         return { ok: true };
       }
       if (text === '/clear') {
         await db.message.deleteMany({ where: { userId } });
         await sendMessage(chatId, "تم مسح سجل محادثتك.\n\nابدأ محادثة جديدة!");
+        return { ok: true };
+      }
+      if (text === '/settings') {
+        const pwEnabled = await isPasswordEnabled();
+        const uLang = await getUserLang(userId);
+        await sendMessage(chatId, "⚙️ **الإعدادات**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(false, pwEnabled, uLang)) });
         return { ok: true };
       }
       // المحادثة مع AI تقع في القسم أدناه
@@ -494,6 +640,78 @@ export async function handleTelegramUpdate(update: {
 }
 
 // ============================
+// معالجة الأزرار التفاعلية (Callback Queries)
+// ============================
+
+async function handleCallbackQuery(cb: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number }; message_id: number }; }) {
+  const userId = cb.from.id;
+  const chatId = cb.message?.chat?.id;
+  const messageId = cb.message?.message_id;
+  const data = cb.data || '';
+
+  if (!chatId || !messageId) {
+    await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: 'OK' });
+    return;
+  }
+
+  const isAdm = isAdmin(userId);
+  const uLang = await getUserLang(userId);
+
+  // ============================
+  // أزرار الإعدادات
+  // ============================
+  if (data === 'settings:clear') {
+    await db.message.deleteMany({ where: { userId } });
+    const msg = uLang === 'ar' ? '✅ تم مسح سجل محادثتك!\n\nابدأ محادثة جديدة 🎉' : '✅ Chat history cleared!\n\nStart a new conversation 🎉';
+    await editMessage(chatId, messageId, msg);
+    await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: uLang === 'ar' ? 'تم المسح!' : 'Cleared!' });
+    return;
+  }
+
+  if (data === 'settings:lang') {
+    const msg = uLang === 'ar' ? '🌍 اختر لغة البوت:' : '🌍 Choose bot language:';
+    await editMessage(chatId, messageId, msg, { reply_markup: JSON.stringify(langKeyboard()) });
+    await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id });
+    return;
+  }
+
+  if (data === 'settings:toggle_password') {
+    if (!isAdm) {
+      await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: '❌ للأدمن فقط', show_alert: true });
+      return;
+    }
+    const current = await isPasswordEnabled();
+    const newVal = !current;
+    await setConfigValue('password_enabled', String(newVal));
+
+    const pwEnabled = await isPasswordEnabled();
+    const statusText = newVal ? '🔒 تم تفعيل كلمة المرور' : '🔓 تم إلغاء كلمة المرور';
+    const settingsMsg = `✅ ${statusText}\n\n⚙️ **إعدادات البوت**\n\nاختر من القائمة:`;
+    await editMessage(chatId, messageId, settingsMsg, { reply_markup: JSON.stringify(settingsKeyboard(true, pwEnabled, uLang)) });
+    await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: statusText });
+    return;
+  }
+
+  // ============================
+  // أزرار اللغة
+  // ============================
+  if (data === 'lang:ar' || data === 'lang:en') {
+    const selectedLang = data === 'lang:ar' ? 'ar' : 'en';
+    await setUserLang(userId, selectedLang);
+
+    const pwEnabled = await isPasswordEnabled();
+    const confirmMsg = selectedLang === 'ar' ? '✅ تم تغيير اللغة إلى العربية' : '✅ Language changed to English';
+    const settingsMsg = `${confirmMsg}\n\n⚙️ ${selectedLang === 'ar' ? '**إعدادات البوت**\n\nاختر من القائمة:' : '**Bot Settings**\n\nChoose from the menu:'}`;
+    await editMessage(chatId, messageId, settingsMsg, { reply_markup: JSON.stringify(settingsKeyboard(isAdm, pwEnabled, selectedLang)) });
+    await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: selectedLang === 'ar' ? 'تم التغيير!' : 'Changed!' });
+    return;
+  }
+
+  // زر غير معروف
+  await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: 'OK' });
+}
+
+// ============================
 // أوامر المدير
 // ============================
 
@@ -548,7 +766,8 @@ async function handleDashboardCommand(chatId: number) {
     db.telegramUser.count({ where: { firstSeen: { gte: today } } }),
     db.message.count({ where: { status: 'pending' } }),
   ]);
-  await sendMessage(chatId, `**إحصائيات مود شات**\n\nالمستخدمين: ${tu}\nالمفعلين: ${au}\nالمحظورين: ${bu}\nالرسائل: ${tm}\nرسائل اليوم: ${mt}\nمستخدمين جدد: ${nu}\nمعلقة: ${pm}`);
+  const pwEnabled = await isPasswordEnabled();
+  await sendMessage(chatId, `**إحصائيات مود شات**\n\nالمستخدمين: ${tu}\nالمفعلين: ${au}\nالمحظورين: ${bu}\nالرسائل: ${tm}\nرسائل اليوم: ${mt}\nمستخدمين جدد: ${nu}\nمعلقة: ${pm}\nكلمة المرور: ${pwEnabled ? 'مفعلة 🔒' : 'معطلة 🔓'}`);
 }
 
 async function handleUsersCommand(chatId: number) {
@@ -581,3 +800,4 @@ export async function deleteWebhook() { return telegramAPI('deleteWebhook', {});
 export async function getJoinPassword(): Promise<string> {
   try { const c = await db.botConfig.findUnique({ where: { key: 'join_password' } }); return c?.value || JOIN_PASSWORD; } catch { return JOIN_PASSWORD; }
 }
+export async function getPasswordEnabled(): Promise<boolean> { return isPasswordEnabled(); }
