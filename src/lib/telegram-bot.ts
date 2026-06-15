@@ -4,12 +4,15 @@
  *
  * النظام:
  * 1. المزود الرئيسي: Z-AI SDK (GLM-4 Plus) عبر z-ai-web-dev-sdk
- * 2. المزود الاحتياطي 1: استدعاء مباشر لـ Z-AI API (عبر env vars)
+ * 2. المزود الاحتياطي 1: استدعاء مباشر لـ Z-AI API (عبر chat.z.ai)
  * 3. المزود الاحتياطي 2: Pollinations.ai
  * 4. المزود الاحتياطي 3: رد ذكي مدمج (لا يفشل أبداً)
  */
 
 import { db } from './db';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 // ============================
 // الإعدادات
@@ -20,12 +23,15 @@ const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').m
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
 
-// Z-AI SDK credentials from environment
-const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
+// Z-AI credentials from environment
+const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://chat.z.ai/api/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
 const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || 'chat-c2ae3234-5685-4053-8998-96e9a664f658';
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '014c4da7-4f7f-4efa-9157-9091a73a3570';
 const ZAI_TOKEN = process.env.ZAI_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0';
+
+// Internal API (works from Z.ai environment only)
+const ZAI_INTERNAL_URL = 'https://internal-api.z.ai/v1';
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي ومفيد اسمك مود شات. تجيب بوضوح ودقة وبأسلوب ودي ومحترم. يمكنك التحدث بأي لغة يطلبها المستخدم. تذكر كل شيء قاله المستخدم في المحادثة السابقة واستخدمه في إجاباتك. كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل. قواعد صارمة: 1- لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة على السؤال. 2- لا تكرر التحيات في كل رسالة. 3- أجب مباشرة وبشكل طبيعي دون مقدمات.";
 
@@ -36,6 +42,45 @@ let aiConfigCacheTime = 0;
 // Z-AI SDK instance cache
 let zaiInstance: any = null;
 let zaiInstanceTime = 0;
+
+// Track if config file was written
+let configWritten = false;
+
+/**
+ * كتابة ملف إعدادات Z-AI SDK ليعمل على Vercel
+ * الـ SDK يبحث عن .z-ai-config في process.cwd() و homeDir و /etc/
+ */
+async function ensureZaiConfig() {
+  if (configWritten) return;
+
+  const config = {
+    baseUrl: ZAI_BASE_URL,
+    apiKey: ZAI_API_KEY,
+    chatId: ZAI_CHAT_ID,
+    userId: ZAI_USER_ID,
+    token: ZAI_TOKEN,
+  };
+
+  const configStr = JSON.stringify(config, null, 2);
+
+  // Try writing to multiple locations the SDK checks
+  const paths = [
+    path.join(process.cwd(), '.z-ai-config'),
+    path.join(os.homedir(), '.z-ai-config'),
+    '/tmp/.z-ai-config',
+  ];
+
+  for (const filePath of paths) {
+    try {
+      fs.writeFileSync(filePath, configStr, 'utf-8');
+      console.log(`[ZAI Config] Written to ${filePath}`);
+    } catch (err: any) {
+      // Silently skip if can't write
+    }
+  }
+
+  configWritten = true;
+}
 
 async function getAIConfig() {
   if (aiConfigCache && Date.now() - aiConfigCacheTime < 300000) return aiConfigCache;
@@ -86,13 +131,15 @@ async function callZaiSDK(
   messages: Array<{ role: string; content: string }>,
   retries: number = 2
 ): Promise<string> {
+  // Ensure config file exists for SDK
+  await ensureZaiConfig();
+
   for (let attempt = 0; attempt < retries; attempt++) {
     if (attempt > 0) {
       await sleep(2000 * attempt + Math.random() * 1000);
     }
 
     try {
-      // Try to use z-ai-web-dev-sdk
       let zai = zaiInstance;
       if (!zai || Date.now() - zaiInstanceTime > 600000) {
         const ZAIModule = await import('z-ai-web-dev-sdk');
@@ -128,72 +175,82 @@ async function callZaiSDK(
 }
 
 // ============================
-// AI Provider 2: Z-AI Direct API Call
+// AI Provider 2: Z-AI Direct API Call (chat.z.ai - public endpoint)
 // ============================
 
 async function callZaiDirectAPI(
   messages: Array<{ role: string; content: string }>,
   retries: number = 2
 ): Promise<string> {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    if (attempt > 0) {
-      await sleep(2000 * attempt + Math.random() * 1000);
-    }
+  // Try public endpoint first, then internal
+  const endpoints = [ZAI_BASE_URL, ZAI_INTERNAL_URL];
 
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 30000);
-
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${ZAI_API_KEY}`,
-        'X-Z-AI-From': 'Z',
-      };
-      if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
-      if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
-      if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
-
-      const response = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers,
-        signal: ctrl.signal,
-        body: JSON.stringify({
-          model: 'glm-4-plus',
-          messages,
-          temperature: 0.7,
-          max_tokens: 800,
-          thinking: { type: 'disabled' },
-        }),
-      });
-
-      if (response.status === 429) {
-        console.log(`[AI] Z-AI Direct rate limited (attempt ${attempt + 1}/${retries})`);
-        continue;
+  for (const baseUrl of endpoints) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      if (attempt > 0) {
+        await sleep(2000 * attempt + Math.random() * 1000);
       }
 
-      if (!response.ok) {
-        const errBody = await response.text().catch(() => '');
-        throw new Error(`Z-AI Direct ${response.status}: ${errBody.substring(0, 200)}`);
-      }
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 30000);
 
-      const data = await response.json();
-      const reply = data?.choices?.[0]?.message?.content;
-      if (reply?.trim()) {
-        console.log('[AI] Z-AI Direct API succeeded');
-        return reply.trim();
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${ZAI_API_KEY}`,
+          'X-Z-AI-From': 'Z',
+        };
+        if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
+        if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
+        if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
+
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers,
+          signal: ctrl.signal,
+          body: JSON.stringify({
+            model: 'glm-4-plus',
+            messages,
+            temperature: 0.7,
+            max_tokens: 800,
+            thinking: { type: 'disabled' },
+          }),
+        });
+
+        if (response.status === 429) {
+          console.log(`[AI] Z-AI Direct (${baseUrl}) rate limited (attempt ${attempt + 1})`);
+          continue; // retry same endpoint
+        }
+
+        if (!response.ok) {
+          const errBody = await response.text().catch(() => '');
+          console.log(`[AI] Z-AI Direct (${baseUrl}) error ${response.status}`);
+          // Try next endpoint instead of retrying
+          break;
+        }
+
+        const data = await response.json();
+        const reply = data?.choices?.[0]?.message?.content;
+        if (reply?.trim()) {
+          console.log(`[AI] Z-AI Direct (${baseUrl}) succeeded`);
+          return reply.trim();
+        }
+        throw new Error('Empty Z-AI Direct response');
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          console.log(`[AI] Z-AI Direct (${baseUrl}) timeout (attempt ${attempt + 1})`);
+          continue;
+        }
+        if (attempt === retries - 1) {
+          console.log(`[AI] Z-AI Direct (${baseUrl}) failed: ${err?.message}`);
+          break; // Try next endpoint
+        }
+      } finally {
+        clearTimeout(t);
       }
-      throw new Error('Empty Z-AI Direct response');
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        console.log(`[AI] Z-AI Direct timeout (attempt ${attempt + 1}/${retries})`);
-        if (attempt < retries - 1) continue;
-      }
-      if (attempt === retries - 1) throw err;
-    } finally {
-      clearTimeout(t);
     }
   }
-  throw new Error('Z-AI Direct failed after retries');
+  throw new Error('Z-AI Direct failed for all endpoints');
 }
 
 // ============================
@@ -433,6 +490,9 @@ export async function handleTelegramUpdate(update: {
   callback_query?: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number } }; };
 }) {
   try {
+    // Ensure Z-AI config is written for SDK
+    await ensureZaiConfig();
+
     if (update.callback_query) {
       await telegramAPI('answerCallbackQuery', { callback_query_id: update.callback_query.id });
       return { ok: true };
@@ -464,7 +524,7 @@ export async function handleTelegramUpdate(update: {
     // أمر /start
     if (text === '/start') {
       if (isAdmin(userId) || user.isApproved) {
-        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n\n/clear - مسح الذاكرة\n/help - المساعدة");
+        await sendMessage(chatId, "السلام عليكم ورحمة الله وبركاته\n\nأهلاً بك في بوت **مود شات**!\n\n- ذاكرة ذكية - أتذكر كل محادثاتنا\n- متعدد اللغات - أتحدث أي لغة\n- يعمل بـ Z-AI SDK (GLM-4 Plus)\n\n/clear - مسح الذاكرة\n/help - المساعدة");
       } else {
         await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
         await db.joinLog.create({ data: { userId, action: 'attempt' } });
@@ -547,13 +607,13 @@ export async function handleTelegramUpdate(update: {
       getAIConfig(),
     ]);
 
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+    const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
     ];
 
     // الحصول على رد AI (دائماً ينجح)
-    const { reply, provider } = await getAIResponse(messages, config);
+    const { reply, provider } = await getAIResponse(aiMessages, config);
 
     // حفظ رد AI
     await db.message.create({
@@ -591,7 +651,7 @@ async function handleAIStatusCommand(chatId: number) {
     const ms = Date.now() - start;
     status += `Z-AI SDK: يعمل (${ms}ms)\n`;
   } catch (err: any) {
-    status += `Z-AI SDK: غير متاح (${err?.message?.substring(0, 50) || 'error'})\n`;
+    status += `Z-AI SDK: غير متاح\n`;
   }
 
   // اختبار Z-AI Direct API
