@@ -23,20 +23,22 @@ model TelegramUser {
   approvedAt         DateTime?
   joinAttempts       Int       @default(0)
   waitingForPassword Boolean   @default(false)
+  photoUrl           String?   // رابط صورة البروفايل من تيليجرام
   messages           Message[]
   joinLogs           JoinLog[]
 }
 
 model Message {
-  id        String       @id @default(cuid())
-  userId    Int
-  role      String
-  content   String
-  modelUsed String?
-  timestamp DateTime     @default(now())
-  status    String       @default("done")  // "pending" = يحتاج رد AI, "done" = تم الرد
-  chatId    Int?                            // معرف المحادثة لإرسال الرد
-  user      TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  id         String       @id @default(cuid())
+  userId     Int
+  role       String
+  content    String
+  modelUsed  String?
+  timestamp  DateTime     @default(now())
+  status     String       @default("done")  // "pending" = يحتاج رد AI, "done" = تم الرد
+  chatId     Int?                             // معرف المحادثة لإرسال الرد
+  imageUrl   String?                         // رابط الصورة إذا كانت الرسالة تحتوي صورة
+  user       TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
   @@index([timestamp])

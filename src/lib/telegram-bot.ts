@@ -159,6 +159,29 @@ async function editMessage(chatId: number, messageId: number, text: string, extr
   return telegramAPI('editMessageText', { chat_id: chatId, message_id: messageId, text, parse_mode: 'Markdown', ...extra });
 }
 
+/** جلب صورة بروفايل المستخدم من تيليجرام */
+async function getUserProfilePhotoUrl(userId: number): Promise<string | null> {
+  try {
+    const res = await telegramAPI('getUserProfilePhotos', { user_id: userId, limit: 1 });
+    const photos = res?.result?.photos;
+    if (!photos || photos.length === 0) return null;
+
+    // اختيار أكبر صورة (آخر عنصر)
+    const photoSizes = photos[0];
+    const biggest = photoSizes[photoSizes.length - 1];
+
+    // الحصول على رابط الملف
+    const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${biggest.file_id}`);
+    const fileData = await fileRes.json();
+    if (!fileData?.ok || !fileData?.result?.file_path) return null;
+
+    return `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
+  } catch (err: any) {
+    console.error('[Profile Photo] Error:', err?.message?.substring(0, 80));
+    return null;
+  }
+}
+
 // ============================
 // Image Processing (VLM - Vision Language Model)
 // ============================
@@ -531,7 +554,7 @@ function generateSmartFallback(userMessage: string): string {
 // ============================
 
 async function getOrCreateUser(u: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string; is_bot?: boolean; }) {
-  return db.telegramUser.upsert({
+  const result = await db.telegramUser.upsert({
     where: { userId: u.id },
     create: {
       userId: u.id,
@@ -543,10 +566,27 @@ async function getOrCreateUser(u: { id: number; username?: string; first_name?: 
       totalMessages: 1,
       isApproved: isAdmin(u.id),
       approvedAt: isAdmin(u.id) ? new Date() : null,
-      waitingForPassword: false, // سيتحدد لاحقاً بناءً على إعداد كلمة المرور
+      waitingForPassword: false,
     },
     update: { username: u.username || null, firstName: u.first_name || null, lastName: u.last_name || null, totalMessages: { increment: 1 } },
   });
+
+  // جلب صورة البروفايل إذا لم تكن محفوظة (بشكل غير متزامن)
+  if (!result.photoUrl) {
+    getUserProfilePhotoUrl(u.id).then(async (photoUrl) => {
+      if (photoUrl) {
+        try {
+          await db.telegramUser.update({
+            where: { userId: u.id },
+            data: { photoUrl },
+          });
+          console.log(`[Bot] Saved profile photo for user ${u.id}`);
+        } catch {}
+      }
+    }).catch(() => {}); // تجاهل الأخطاء
+  }
+
+  return result;
 }
 
 function isAdmin(userId: number): boolean { return ADMIN_IDS.includes(userId); }
@@ -624,57 +664,83 @@ export async function handleTelegramUpdate(update: {
     // 2) معالجة الصور - أولوية قصوى للمستخدم المفعل
     // ==========================================
     if (hasPhoto && !user.isBlocked && (user.isApproved || isAdm)) {
-      console.log(`[Bot] 📸 IMAGE received from user ${userId} - processing...`);
-      const userLang = await getUserLang(userId);
-      const photoArray = message.photo!;
-      const bestPhoto = photoArray[photoArray.length - 1];
-      const caption = message.caption?.trim() || '';
+      try {
+        console.log(`[Bot] 📸 IMAGE received from user ${userId} - processing...`);
+        const userLang = await getUserLang(userId);
+        const photoArray = message.photo!;
+        const bestPhoto = photoArray[photoArray.length - 1];
+        const caption = message.caption?.trim() || '';
 
-      console.log(`[Bot] Image: fileId=${bestPhoto.file_id}, size=${bestPhoto.file_size}, caption="${caption.substring(0, 50)}"`);
+        console.log(`[Bot] Image: fileId=${bestPhoto.file_id}, size=${bestPhoto.file_size}, caption="${caption.substring(0, 50)}"`);
 
-      await sendChatAction(chatId);
+        await sendChatAction(chatId);
 
-      // تحميل الصورة من تيليجرام
-      const imageData = await downloadTelegramFile(bestPhoto.file_id);
-      if (!imageData) {
-        await sendMessage(chatId, userLang === 'ar'
-          ? '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.'
-          : '❌ Could not download the image. Please try again.');
-        return { ok: true };
+        // تحميل الصورة من تيليجرام
+        const imageData = await downloadTelegramFile(bestPhoto.file_id);
+        if (!imageData) {
+          console.log('[Bot] Image download failed');
+          await sendMessage(chatId, userLang === 'ar'
+            ? '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.'
+            : '❌ Could not download the image. Please try again.');
+          return { ok: true, mode: 'image-download-failed' };
+        }
+
+        console.log(`[Bot] Image downloaded: ${imageData.base64.length} chars, ${imageData.mimeType}`);
+
+        // حفظ رابط الصورة (عبر Telegram file URL)
+        let imageUrl: string | null = null;
+        try {
+          const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${bestPhoto.file_id}`);
+          const fileData = await fileRes.json();
+          if (fileData?.ok?.result?.file_path) {
+            imageUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
+          }
+        } catch {}
+
+        // حفظ رسالة المستخدم في السجل
+        const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
+        await db.message.create({
+          data: { userId, role: 'user', content: userContent, modelUsed: 'vlm', status: 'done', chatId, imageUrl },
+        });
+
+        // جلب سجل المحادثة السابقة
+        const dbMessages = await db.message.findMany({
+          where: { userId, status: 'done' },
+          orderBy: { timestamp: 'asc' },
+          take: MAX_HISTORY,
+          select: { role: true, content: true },
+        });
+
+        const conversationHistory = dbMessages.map(m => ({ role: m.role, content: m.content }));
+
+        console.log('[Bot] Starting VLM analysis...');
+
+        // تحليل الصورة باستخدام VLM
+        const { reply, provider } = await analyzeImage(
+          imageData.base64,
+          imageData.mimeType,
+          caption,
+          conversationHistory,
+          userLang
+        );
+
+        console.log(`[Bot] VLM analysis complete: provider=${provider}, reply length=${reply.length}`);
+
+        // حفظ رد البوت
+        await db.message.create({
+          data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
+        });
+
+        await sendMessage(chatId, sanitizeMarkdown(reply));
+        return { ok: true, mode: 'image-analysis', provider };
+      } catch (imgErr: any) {
+        console.error('[Bot] Image processing error:', imgErr?.message || String(imgErr));
+        // في حالة فشل معالجة الصورة، أرسل رسالة خطأ للمستخدم
+        try {
+          await sendMessage(chatId, '📸 حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى.');
+        } catch {}
+        return { ok: true, mode: 'image-error', error: imgErr?.message };
       }
-
-      // حفظ رسالة المستخدم في السجل
-      const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
-      await db.message.create({
-        data: { userId, role: 'user', content: userContent, modelUsed: 'vlm', status: 'done', chatId },
-      });
-
-      // جلب سجل المحادثة السابقة
-      const dbMessages = await db.message.findMany({
-        where: { userId, status: 'done' },
-        orderBy: { timestamp: 'asc' },
-        take: MAX_HISTORY,
-        select: { role: true, content: true },
-      });
-
-      const conversationHistory = dbMessages.map(m => ({ role: m.role, content: m.content }));
-
-      // تحليل الصورة باستخدام VLM
-      const { reply, provider } = await analyzeImage(
-        imageData.base64,
-        imageData.mimeType,
-        caption,
-        conversationHistory,
-        userLang
-      );
-
-      // حفظ رد البوت
-      await db.message.create({
-        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
-      });
-
-      await sendMessage(chatId, sanitizeMarkdown(reply));
-      return { ok: true, mode: 'image-analysis', provider };
     }
 
     // إذا ما فيه نص - لا شيء بعد الآن (الصورة عُولجت أو لا يوجد صورة)

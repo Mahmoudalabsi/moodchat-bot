@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     const page = parseInt(searchParams.get('page') || '1');
 
     const includeUser = {
-      user: { select: { firstName: true, username: true, userId: true } },
+      user: { select: { firstName: true, username: true, userId: true, photoUrl: true } },
     };
 
     if (userId) {

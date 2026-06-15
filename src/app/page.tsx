@@ -8,7 +8,7 @@ import {
   Send, Key, Wifi, WifiOff, Settings, Moon,
   Sun, Save, LogOut, Lock,
   MessageCircle, TrendingUp, UserPlus, AlertTriangle,
-  ChevronDown, ArrowLeft, Languages
+  ChevronDown, ArrowLeft, Languages, Image as ImageIcon
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -41,13 +41,13 @@ interface User {
   id: string; userId: number; username: string | null; firstName: string | null;
   lastName: string | null; isApproved: boolean; isBlocked: boolean;
   waitingForPassword: boolean; totalMessages: number; firstSeen: string;
-  lastActive: string; joinAttempts: number; _count: { messages: number };
+  lastActive: string; joinAttempts: number; photoUrl: string | null; _count: { messages: number };
 }
 
 interface Message {
   id: string; userId: number; role: string; content: string;
-  modelUsed: string | null; timestamp: string;
-  user?: { firstName: string | null; username: string | null; userId: number } | null;
+  modelUsed: string | null; timestamp: string; imageUrl: string | null;
+  user?: { firstName: string | null; username: string | null; userId: number; photoUrl: string | null } | null;
 }
 
 interface BotConfig {
@@ -961,7 +961,26 @@ export default function Dashboard() {
                         }`}
                       >
                         <div className={`flex items-center gap-2.5`}>
+                          {u.photoUrl ? (
+                            <img
+                              src={u.photoUrl}
+                              alt={u.firstName || 'User'}
+                              className={`w-8 h-8 rounded-full object-cover border ${
+                                selectedUserId === u.userId
+                                  ? 'border-primary/50'
+                                  : 'border-border/50'
+                              }`}
+                              onError={(e) => {
+                                (e.target as HTMLImageElement).style.display = 'none';
+                                if ((e.target as HTMLImageElement).nextElementSibling) {
+                                  (e.target as HTMLImageElement).nextElementSibling!.classList.remove('hidden');
+                                }
+                              }}
+                            />
+                          ) : null}
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                            u.photoUrl ? 'hidden' : ''
+                          } ${
                             selectedUserId === u.userId
                               ? 'bg-primary/20 text-primary'
                               : 'bg-muted text-muted-foreground'
@@ -1048,9 +1067,30 @@ export default function Dashboard() {
                         {userMessages.map(m => (
                           <div
                             key={m.id}
-                            className={`flex ${m.role === 'user' ? (t.dir === 'rtl' ? 'justify-start' : 'justify-start') : (t.dir === 'rtl' ? 'justify-end' : 'justify-end')}`}
+                            className={`flex ${m.role === 'user' ? 'justify-start' : 'justify-end'} gap-2`}
                           >
-                            <div className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-3 ${
+                            {/* صورة البروفايل للمستخدم */}
+                            {m.role === 'user' && (
+                              <div className="flex-shrink-0 mt-1">
+                                {m.user?.photoUrl ? (
+                                  <img
+                                    src={m.user.photoUrl}
+                                    alt={m.user?.firstName || 'User'}
+                                    className="w-8 h-8 rounded-full object-cover border border-primary/30"
+                                    onError={(e) => {
+                                      (e.target as HTMLImageElement).style.display = 'none';
+                                      (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
+                                    }}
+                                  />
+                                ) : (
+                                  <div className="w-8 h-8 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center">
+                                    <Send size={12} className="text-primary" />
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            <div className={`max-w-[80%] sm:max-w-[70%] rounded-2xl px-4 py-3 ${
                               m.role === 'user'
                                 ? 'bg-primary/10 border border-primary/20 chat-bubble-user'
                                 : 'bg-emerald-500/10 border border-emerald-500/20 chat-bubble-bot'
@@ -1074,6 +1114,30 @@ export default function Dashboard() {
                                 )}
                               </div>
 
+                              {/* صورة الرسالة */}
+                              {m.imageUrl && (
+                                <div className="mb-2">
+                                  <a href={m.imageUrl} target="_blank" rel="noopener noreferrer">
+                                    <img
+                                      src={m.imageUrl}
+                                      alt="Image"
+                                      className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity"
+                                      onError={(e) => {
+                                        (e.target as HTMLImageElement).style.display = 'none';
+                                      }}
+                                    />
+                                  </a>
+                                </div>
+                              )}
+
+                              {/* مؤشر صورة بدون رابط */}
+                              {!m.imageUrl && m.content.includes('📷') && (
+                                <div className="mb-1.5 flex items-center gap-1 text-xs text-muted-foreground">
+                                  <ImageIcon size={12} />
+                                  <span>{lang === 'ar' ? 'صورة' : 'Image'}</span>
+                                </div>
+                              )}
+
                               {/* Message content */}
                               <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                                 {m.content}
@@ -1084,6 +1148,15 @@ export default function Dashboard() {
                                 {formatDateTime(m.timestamp, lang)}
                               </span>
                             </div>
+
+                            {/* أيقونة البوت */}
+                            {m.role === 'assistant' && (
+                              <div className="flex-shrink-0 mt-1">
+                                <div className="w-8 h-8 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center">
+                                  <Bot size={14} className="text-emerald-500" />
+                                </div>
+                              </div>
+                            )}
                           </div>
                         ))}
                         <div ref={chatEndRef} />
