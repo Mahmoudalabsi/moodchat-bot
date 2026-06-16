@@ -266,55 +266,75 @@ async function analyzeImageWithPollinationsVision(
 ): Promise<string> {
   const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
 
-  // نحاول عدة نماذج - بعضها يدعم الرؤية
+  // نحاول عدة نماذج مع إعادة المحاولة عند 429
   const models = ['openai', 'mistral', 'llama'];
+  const maxRetries = 2;
 
   for (const model of models) {
-    try {
-      console.log(`[VLM-Pollinations] Trying model: ${model}...`);
+    for (let retry = 0; retry < maxRetries; retry++) {
+      try {
+        // انتظر قبل إعادة المحاولة (لتجنب rate limit)
+        if (retry > 0) {
+          const delay = retry * 3000; // 3s, 6s
+          console.log(`[VLM-Pollinations] Waiting ${delay}ms before retry ${retry}...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
 
-      const messages = [
-        { role: 'system' as const, content: SYSTEM_PROMPT },
-        ...conversationHistory.slice(-6).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        {
-          role: 'user' as const,
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-          ],
-        },
-      ];
+        console.log(`[VLM-Pollinations] Trying model: ${model} (attempt ${retry + 1})...`);
 
-      const response = await fetch('https://text.pollinations.ai/openai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(30000),
-        body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
-      });
+        const messages = [
+          { role: 'system' as const, content: SYSTEM_PROMPT },
+          ...conversationHistory.slice(-6).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+          {
+            role: 'user' as const,
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+            ],
+          },
+        ];
 
-      if (!response.ok) {
-        console.log(`[VLM-Pollinations] Model ${model}: HTTP ${response.status}`);
-        continue;
-      }
+        const response = await fetch('https://text.pollinations.ai/openai', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(30000),
+          body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
+        });
 
-      const data = await response.json();
-      const reply = data?.choices?.[0]?.message?.content;
+        if (response.status === 429) {
+          console.log(`[VLM-Pollinations] Model ${model}: rate limited (429), will retry...`);
+          continue; // أعد المحاولة
+        }
 
-      if (reply?.trim() && reply.trim().length > 20) {
-        // تحقق أن الرد فعلاً يحلل الصورة وليس "لا أستطيع رؤية الصور"
-        const lowerReply = reply.toLowerCase();
-        if (lowerReply.includes("can't see") || lowerReply.includes("cannot see") ||
-            lowerReply.includes("cannot view") || lowerReply.includes("can't view") ||
-            lowerReply.includes("لا أستطيع رؤية") || lowerReply.includes("لا أرى")) {
-          console.log(`[VLM-Pollinations] Model ${model}: says it can't see images, skipping`);
+        if (response.status === 502 || response.status === 503) {
+          console.log(`[VLM-Pollinations] Model ${model}: server error (${response.status}), will retry...`);
           continue;
         }
-        console.log(`[VLM-Pollinations] ✅ Model ${model} OK (${reply.length} chars)`);
-        return reply.trim();
+
+        if (!response.ok) {
+          console.log(`[VLM-Pollinations] Model ${model}: HTTP ${response.status}, skipping`);
+          break; // لا تعد المحاولة مع هذا النموذج
+        }
+
+        const data = await response.json();
+        const reply = data?.choices?.[0]?.message?.content;
+
+        if (reply?.trim() && reply.trim().length > 20) {
+          // تحقق أن الرد فعلاً يحلل الصورة وليس "لا أستطيع رؤية الصور"
+          const lowerReply = reply.toLowerCase();
+          if (lowerReply.includes("can't see") || lowerReply.includes("cannot see") ||
+              lowerReply.includes("cannot view") || lowerReply.includes("can't view") ||
+              lowerReply.includes("لا أستطيع رؤية") || lowerReply.includes("لا أرى")) {
+            console.log(`[VLM-Pollinations] Model ${model}: says it can't see images, skipping`);
+            break; // هذا النموذج لا يدعم الرؤية، جرب النموذج التالي
+          }
+          console.log(`[VLM-Pollinations] ✅ Model ${model} OK (${reply.length} chars)`);
+          return reply.trim();
+        }
+      } catch (err: any) {
+        console.log(`[VLM-Pollinations] Model ${model} error: ${err?.message?.substring(0, 60)}`);
+        if (retry < maxRetries - 1) continue;
       }
-    } catch (err: any) {
-      console.log(`[VLM-Pollinations] Model ${model} error: ${err?.message?.substring(0, 60)}`);
-      continue;
     }
   }
 
@@ -327,63 +347,80 @@ async function analyzeImageWithHuggingFace(
   mimeType: string,
   lang: string
 ): Promise<string> {
-  try {
-    console.log('[VLM-HuggingFace] Starting BLIP image captioning...');
+  // تحويل base64 إلى Buffer
+  const imageBuffer = Buffer.from(imageBase64, 'base64');
+  const binaryData = new Uint8Array(imageBuffer);
 
-    // تحويل base64 إلى Buffer ثم إرسال كـ binary
-    const imageBuffer = Buffer.from(imageBase64, 'base64');
+  // نحاول عدة نقاط نهاية (endpoints) لـ HuggingFace
+  const endpoints = [
+    'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
+    'https://router.huggingface.co/hf-inference/models/Salesforce/blip-image-captioning-large',
+  ];
 
-    const response = await fetch(
-      'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
-      {
+  for (const endpoint of endpoints) {
+    try {
+      console.log(`[VLM-HuggingFace] Trying: ${endpoint.substring(0, 60)}...`);
+
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': mimeType },
-        signal: AbortSignal.timeout(20000),
-        body: new Uint8Array(imageBuffer),
-      }
-    );
+        signal: AbortSignal.timeout(25000),
+        body: binaryData,
+      });
 
-    if (!response.ok) {
       // إذا النموذج بارد (cold start)، ننتظر وأعد المحاولة
       if (response.status === 503) {
         const data = await response.json().catch(() => ({}));
-        const waitTime = data?.estimated_time || 20;
-        console.log(`[VLM-HuggingFace] Model loading, waiting ${waitTime}s...`);
-        await new Promise(resolve => setTimeout(resolve, Math.min(waitTime * 1000, 30000)));
+        const waitTime = data?.estimated_time || 15;
+        console.log(`[VLM-HuggingFace] Model loading (cold start), waiting ${waitTime}s...`);
+        await new Promise(resolve => setTimeout(resolve, Math.min(waitTime * 1000, 20000)));
 
-        // إعادة المحاولة
-        const retryResponse = await fetch(
-          'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': mimeType },
-            signal: AbortSignal.timeout(25000),
-            body: new Uint8Array(imageBuffer),
-          }
-        );
+        const retryResponse = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': mimeType },
+          signal: AbortSignal.timeout(25000),
+          body: binaryData,
+        });
 
-        if (!retryResponse.ok) throw new Error(`HuggingFace retry ${retryResponse.status}`);
+        if (!retryResponse.ok) {
+          console.log(`[VLM-HuggingFace] Retry failed: ${retryResponse.status}`);
+          continue; // جرب الـ endpoint التالي
+        }
+
         const retryData = await retryResponse.json();
         const caption = retryData?.[0]?.generated_text;
         if (caption?.trim()) {
           console.log(`[VLM-HuggingFace] ✅ BLIP caption (retry): ${caption.substring(0, 80)}`);
           return caption.trim();
         }
-        throw new Error('Empty HuggingFace retry response');
+        continue;
       }
-      throw new Error(`HuggingFace ${response.status}`);
-    }
 
-    const data = await response.json();
-    const caption = data?.[0]?.generated_text;
-    if (caption?.trim()) {
-      console.log(`[VLM-HuggingFace] ✅ BLIP caption: ${caption.substring(0, 80)}`);
-      return caption.trim();
+      if (response.status === 401) {
+        console.log(`[VLM-HuggingFace] Auth required for this endpoint, trying next...`);
+        continue;
+      }
+
+      if (!response.ok) {
+        console.log(`[VLM-HuggingFace] Failed: ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const caption = data?.[0]?.generated_text;
+      if (caption?.trim()) {
+        console.log(`[VLM-HuggingFace] ✅ BLIP caption: ${caption.substring(0, 80)}`);
+        return caption.trim();
+      }
+      console.log(`[VLM-HuggingFace] Empty response: ${JSON.stringify(data).substring(0, 100)}`);
+      continue;
+    } catch (err: any) {
+      console.log(`[VLM-HuggingFace] Error: ${err?.message?.substring(0, 80)}`);
+      continue;
     }
-    throw new Error('Empty HuggingFace response');
-  } catch (err: any) {
-    throw new Error(`HuggingFace: ${err?.message?.substring(0, 60)}`);
   }
+
+  throw new Error('HuggingFace: all endpoints failed');
 }
 
 /** تحليل صورة باستخدام VLM عبر Z-AI SDK (يعمل فقط داخل شبكة Z.ai) */
