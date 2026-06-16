@@ -68,7 +68,7 @@ export async function PUT(request: NextRequest) {
   }
 }
 
-// Delete user
+// Delete user (keep messages in database)
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -76,9 +76,9 @@ export async function DELETE(request: NextRequest) {
 
     if (!userId) return NextResponse.json({ error: 'userId required' }, { status: 400 });
 
-    await db.message.deleteMany({ where: { userId } });
-    await db.joinLog.deleteMany({ where: { userId } });
-    await db.telegramUser.delete({ where: { userId } });
+    // حذف المستخدم لكن الحفاظ على الرسائل في قاعدة البيانات
+    try { await db.joinLog.deleteMany({ where: { userId } }); } catch {}
+    try { await db.telegramUser.delete({ where: { userId } }); } catch {}
 
     return NextResponse.json({ ok: true });
   } catch (error) {

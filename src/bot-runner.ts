@@ -382,9 +382,14 @@ async function handleMessage(update: {
     }
 
     if (text === '/clear') {
-      await db.message.deleteMany({ where: { userId } });
-      await sendMessage(chatId, "🗑️ تم مسح سجل محادثتك وذاكرتي.\n\nيمكنك البدء بمحادثة جديدة الآن!");
-      console.log('🗑️ تم مسح ذاكرة مستخدم');
+      // لا نحذف الرسائل - فقط نضيف علامة مسح الذاكرة
+      await db.botConfig.upsert({
+        where: { key: `clear_marker_${userId}` },
+        update: { value: new Date().toISOString() },
+        create: { key: `clear_marker_${userId}`, value: new Date().toISOString() },
+      });
+      await sendMessage(chatId, "تم مسح ذاكرة المحادثة. سأبدأ محادثة جديدة معك! 🎉");
+      console.log('🧹 تم مسح ذاكرة مستخدم (الرسائل محفوظة)');
       return;
     }
 
@@ -428,10 +433,10 @@ async function handleMessage(update: {
       if (text.startsWith('/kick ')) {
         const targetId = parseInt(text.split(' ')[1]);
         if (targetId && targetId !== userId) {
-          await db.message.deleteMany({ where: { userId: targetId } });
-          await db.joinLog.deleteMany({ where: { userId: targetId } });
-          await db.telegramUser.delete({ where: { userId: targetId } });
-          await sendMessage(chatId, `🗑️ تم حذف المستخدم \`${targetId}\``);
+          // حذف المستخدم لكن الحفاظ على الرسائل في قاعدة البيانات
+          try { await db.telegramUser.delete({ where: { userId: targetId } }); } catch {}
+          try { await db.joinLog.deleteMany({ where: { userId: targetId } }); } catch {}
+          await sendMessage(chatId, `تم حذف \`${targetId}\` (الرسائل محفوظة)`);
         }
         return;
       }

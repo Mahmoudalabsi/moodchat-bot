@@ -557,7 +557,12 @@ export async function handleTelegramUpdate(update: {
       }
       if (text.startsWith('/kick ')) {
         const tid = parseInt(text.split(' ')[1]);
-        if (tid && tid !== userId) { await db.message.deleteMany({ where: { userId: tid } }); await db.joinLog.deleteMany({ where: { userId: tid } }); await db.telegramUser.delete({ where: { userId: tid } }); await sendMessage(chatId, `تم حذف \`${tid}\``); }
+        if (tid && tid !== userId) {
+          // حذف المستخدم لكن الحفاظ على الرسائل في قاعدة البيانات
+          try { await db.telegramUser.delete({ where: { userId: tid } }); } catch {}
+          try { await db.joinLog.deleteMany({ where: { userId: tid } }); } catch {}
+          await sendMessage(chatId, `تم حذف \`${tid}\` (الرسائل محفوظة في قاعدة البيانات)`);
+        }
         return { ok: true };
       }
       if (text.startsWith('/broadcast ')) {
@@ -580,8 +585,13 @@ export async function handleTelegramUpdate(update: {
         return { ok: true };
       }
       if (text === '/clear') {
-        await db.message.deleteMany({ where: { userId } });
-        await sendMessage(chatId, "تم مسح سجل محادثتك.");
+        // لا نحذف الرسائل من قاعدة البيانات - فقط نضيف علامة مسح الذاكرة
+        await db.botConfig.upsert({
+          where: { key: `clear_marker_${userId}` },
+          update: { value: new Date().toISOString() },
+          create: { key: `clear_marker_${userId}`, value: new Date().toISOString() },
+        });
+        await sendMessage(chatId, "تم مسح ذاكرة المحادثة. سأبدأ محادثة جديدة معك! (الرسائل السابقة محفوظة)");
         return { ok: true };
       }
       // أمر /doc - إنشاء ملف Word
@@ -669,8 +679,13 @@ export async function handleTelegramUpdate(update: {
         return { ok: true };
       }
       if (text === '/clear') {
-        await db.message.deleteMany({ where: { userId } });
-        await sendMessage(chatId, "تم مسح سجل محادثتك.\n\nابدأ محادثة جديدة!");
+        // لا نحذف الرسائل من قاعدة البيانات - فقط نضيف علامة مسح الذاكرة
+        await db.botConfig.upsert({
+          where: { key: `clear_marker_${userId}` },
+          update: { value: new Date().toISOString() },
+          create: { key: `clear_marker_${userId}`, value: new Date().toISOString() },
+        });
+        await sendMessage(chatId, "تم مسح ذاكرة المحادثة. سأبدأ محادثة جديدة معك! 🎉");
         return { ok: true };
       }
       if (text === '/settings') {
@@ -753,7 +768,12 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
   const uLang = await getUserLang(userId);
 
   if (data === 'settings:clear') {
-    await db.message.deleteMany({ where: { userId } });
+    // لا نحذف الرسائل - فقط نضيف علامة مسح الذاكرة
+    await db.botConfig.upsert({
+      where: { key: `clear_marker_${userId}` },
+      update: { value: new Date().toISOString() },
+      create: { key: `clear_marker_${userId}`, value: new Date().toISOString() },
+    });
     const msg = uLang === 'ar' ? '✅ تم مسح سجل محادثتك!\n\nابدأ محادثة جديدة 🎉' : '✅ Chat history cleared!\n\nStart a new conversation 🎉';
     await editMessage(chatId, messageId, msg);
     await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: uLang === 'ar' ? 'تم المسح!' : 'Cleared!' });

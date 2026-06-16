@@ -9,7 +9,8 @@ import {
   Sun, Save, LogOut, Lock,
   MessageCircle, TrendingUp, UserPlus, AlertTriangle,
   ChevronDown, ArrowLeft, Languages, Image as ImageIcon,
-  Camera, X, ZoomIn
+  Camera, X, ZoomIn, File as FileIcon, Mic, Music,
+  Video, FileText, Code as CodeIcon, Sticker as StickerIcon
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -253,15 +254,15 @@ export default function Dashboard() {
     } catch { /* ignore */ }
   }, []);
 
-  // Fetch user messages with pagination
+  // Fetch user messages - ALL messages (no limit)
   const fetchUserMessages = useCallback(async (uid: number) => {
     try {
-      const r = await fetch(`/api/messages?userId=${uid}&limit=50`);
+      const r = await fetch(`/api/messages?userId=${uid}&limit=99999`);
       if (r.ok) {
         const d = await r.json();
         setUserMessages(d.messages || []);
         setUserMessagesTotal(d.total || 0);
-        setUserMessagesHasMore(d.hasMore || false);
+        setUserMessagesHasMore(false); // No pagination - all loaded
       }
     } catch { /* ignore */ }
   }, []);
@@ -1016,17 +1017,17 @@ export default function Dashboard() {
           {/* ========== MESSAGES TAB ========== */}
           <TabsContent value="messages" className="animate-fade-in mt-6">
             <div className={`grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 min-w-0`}>
-              {/* Users List */}
+              {/* Users List - ALL users */}
               <Card className="border-border/50 overflow-hidden">
                 <CardHeader className="p-4 pb-2">
                   <CardTitle className="text-sm font-bold flex items-center gap-2">
                     <Users size={16} className="text-primary" />
                     {t.users}
-                    <Badge variant="secondary" className={`text-xs ${t.dir === 'rtl' ? 'mr-auto' : 'ml-auto'}`}>{messageUsers.length}</Badge>
+                    <Badge variant="secondary" className={`text-xs ${t.dir === 'rtl' ? 'mr-auto' : 'ml-auto'}`}>{users.length}</Badge>
                   </CardTitle>
                 </CardHeader>
                 <ScrollArea className="h-[500px] lg:h-[calc(100vh-280px)]">
-                  {messageUsers.length > 0 ? messageUsers.map(u => {
+                  {users.length > 0 ? users.map(u => {
                     if (!u) return null;
                     return (
                       <button
@@ -1070,7 +1071,12 @@ export default function Dashboard() {
                             {u.username && <p className="text-xs text-muted-foreground">@{u.username}</p>}
                           </div>
                         </div>
-                        <ChevronDown size={14} className="text-muted-foreground" style={{ transform: t.dir === 'rtl' ? 'rotate(90deg)' : 'rotate(-90deg)' }} />
+                        <div className="flex items-center gap-1.5">
+                          {u.isBlocked && <Ban size={12} className="text-red-500" />}
+                          {!u.isApproved && !u.isBlocked && <Clock size={12} className="text-orange-500" />}
+                          <span className="text-[10px] text-muted-foreground">{u._count?.messages || 0}</span>
+                          <ChevronDown size={14} className="text-muted-foreground" style={{ transform: t.dir === 'rtl' ? 'rotate(90deg)' : 'rotate(-90deg)' }} />
+                        </div>
                       </button>
                     );
                   }) : (
@@ -1230,6 +1236,62 @@ export default function Dashboard() {
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/30 rounded-lg px-2.5 py-1.5">
                                   <ImageIcon size={12} />
                                   <span>{lang === 'ar' ? 'صورة مرفقة' : 'Attached image'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر ملف مرفق */}
+                              {m.content.includes('📎') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-blue-500 bg-blue-500/10 rounded-lg px-2.5 py-1.5">
+                                  <FileIcon size={12} />
+                                  <span>{lang === 'ar' ? 'ملف مرفق' : 'Attached file'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر رسالة صوتية */}
+                              {m.content.includes('🎤') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-purple-500 bg-purple-500/10 rounded-lg px-2.5 py-1.5">
+                                  <Mic size={12} />
+                                  <span>{lang === 'ar' ? 'رسالة صوتية' : 'Voice message'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر ملف صوتي */}
+                              {m.content.includes('🎵') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-pink-500 bg-pink-500/10 rounded-lg px-2.5 py-1.5">
+                                  <Music size={12} />
+                                  <span>{lang === 'ar' ? 'ملف صوتي' : 'Audio file'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر فيديو */}
+                              {m.content.includes('🎬') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-red-500 bg-red-500/10 rounded-lg px-2.5 py-1.5">
+                                  <Video size={12} />
+                                  <span>{lang === 'ar' ? 'فيديو' : 'Video'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر ملصق */}
+                              {m.content.includes('🏷️') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-orange-500 bg-orange-500/10 rounded-lg px-2.5 py-1.5">
+                                  <StickerIcon size={12} />
+                                  <span>{lang === 'ar' ? 'ملصق' : 'Sticker'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر إنشاء ملف Word */}
+                              {m.content.includes('📄 إنشاء') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-emerald-500 bg-emerald-500/10 rounded-lg px-2.5 py-1.5">
+                                  <FileText size={12} />
+                                  <span>{lang === 'ar' ? 'إنشاء ملف Word' : 'Creating Word file'}</span>
+                                </div>
+                              )}
+
+                              {/* مؤشر إنشاء كود */}
+                              {m.content.includes('💻 إنشاء') && (
+                                <div className="mb-1.5 flex items-center gap-1.5 text-xs text-cyan-500 bg-cyan-500/10 rounded-lg px-2.5 py-1.5">
+                                  <CodeIcon size={12} />
+                                  <span>{lang === 'ar' ? 'إنشاء ملف كود' : 'Creating code file'}</span>
                                 </div>
                               )}
 
