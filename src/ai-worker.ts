@@ -202,6 +202,29 @@ async function analyzeImageWithVLM(
 }
 
 // ============================
+// تصفية الردود المتكررة
+// ============================
+
+function filterDuplicateReplies(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
+  const result: Array<{ role: string; content: string }> = [];
+  let lastAssistantReply = '';
+  let sameReplyCount = 0;
+  for (const m of messages) {
+    if (m.role === 'assistant') {
+      if (m.content === lastAssistantReply) {
+        sameReplyCount++;
+        if (sameReplyCount > 1) continue; // تخطي التكرار الثالث فما فوق
+      } else {
+        lastAssistantReply = m.content;
+        sameReplyCount = 0;
+      }
+    }
+    result.push(m);
+  }
+  return result;
+}
+
+// ============================
 // معالجة الرسائل المعلقة
 // ============================
 
@@ -261,13 +284,13 @@ async function processPendingMessages() {
             continue;
           }
 
-          // جلب سجل المحادثة
-          const history = await db.message.findMany({
+          // جلب سجل المحادثة - تصفية الرسائل المتكررة
+          const allImgHistory = await db.message.findMany({
             where: { userId: msg.userId, status: 'done' },
-            orderBy: { timestamp: 'asc' }, take: MAX_HISTORY,
+            orderBy: { timestamp: 'asc' }, take: MAX_HISTORY * 2,
             select: { role: true, content: true },
           });
-          const conversationHistory = history.map(m => ({ role: m.role, content: m.content }));
+          const conversationHistory = filterDuplicateReplies(allImgHistory).slice(-MAX_HISTORY);
 
           // استخراج الـ caption من المحتوى
           const caption = msg.content.includes('[صورة]') || msg.content.includes('[Image]') ? '' : msg.content;
@@ -276,15 +299,16 @@ async function processPendingMessages() {
           provider = 'zai-vlm';
         } else {
           // === معالجة النص ===
-          const history = await db.message.findMany({
+          const allHistory = await db.message.findMany({
             where: { userId: msg.userId, status: { in: ['done', 'processing'] } },
-            orderBy: { timestamp: 'asc' }, take: MAX_HISTORY,
+            orderBy: { timestamp: 'asc' }, take: MAX_HISTORY * 2,
             select: { role: true, content: true },
           });
+          const recentHistory = filterDuplicateReplies(allHistory).slice(-MAX_HISTORY);
 
           const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
             { role: 'system', content: SYSTEM_PROMPT },
-            ...history.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+            ...recentHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
           ];
 
           reply = await callZaiSDK(aiMessages);
