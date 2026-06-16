@@ -40,37 +40,42 @@ export async function GET(request: NextRequest) {
 
     // Step 2: Test HuggingFace BLIP (free, no API key)
     log('Step 2: Testing HuggingFace BLIP...');
-    try {
-      const imageBuffer = Buffer.from(base64, 'base64');
-      const hfRes = await fetch(
-        'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
-        {
+    const hfEndpoints = [
+      'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
+      'https://router.huggingface.co/hf-inference/models/Salesforce/blip-image-captioning-large',
+    ];
+    for (const endpoint of hfEndpoints) {
+      try {
+        const imageBuffer = Buffer.from(base64, 'base64');
+        log(`  Trying: ${endpoint.substring(0, 60)}...`);
+        const hfRes = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': mimeType },
-          signal: AbortSignal.timeout(30000),
+          signal: AbortSignal.timeout(15000),
           body: new Uint8Array(imageBuffer),
-        }
-      );
-      
-      log(`HuggingFace status: ${hfRes.status}`);
-      
-      if (hfRes.ok) {
-        const hfData = await hfRes.json();
-        const caption = hfData?.[0]?.generated_text;
-        if (caption) {
-          log(`HuggingFace BLIP SUCCESS: "${caption}"`);
+        });
+        
+        log(`  Status: ${hfRes.status}`);
+        
+        if (hfRes.ok) {
+          const hfData = await hfRes.json();
+          const caption = hfData?.[0]?.generated_text;
+          if (caption) {
+            log(`  ✅ SUCCESS: "${caption}"`);
+            break;
+          } else {
+            log(`  Response: ${JSON.stringify(hfData).substring(0, 200)}`);
+          }
+        } else if (hfRes.status === 503) {
+          const hfData = await hfRes.json().catch(() => ({}));
+          log(`  Model loading: estimated_time=${hfData?.estimated_time}`);
         } else {
-          log(`HuggingFace response: ${JSON.stringify(hfData).substring(0, 300)}`);
+          const errText = await hfRes.text().catch(() => '');
+          log(`  Failed: ${errText.substring(0, 150)}`);
         }
-      } else if (hfRes.status === 503) {
-        const hfData = await hfRes.json().catch(() => ({}));
-        log(`HuggingFace model loading (cold start): estimated_time=${hfData?.estimated_time}`);
-      } else {
-        const errText = await hfRes.text().catch(() => '');
-        log(`HuggingFace failed: ${errText.substring(0, 200)}`);
+      } catch (hfErr: any) {
+        log(`  Error: ${hfErr?.message?.substring(0, 150)}`);
       }
-    } catch (hfErr: any) {
-      log(`HuggingFace error: ${hfErr?.message?.substring(0, 200)}`);
     }
 
     // Step 3: Test Pollinations Vision (free, no API key) - with openai model
