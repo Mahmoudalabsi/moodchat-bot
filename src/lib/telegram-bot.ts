@@ -341,7 +341,7 @@ async function analyzeImageWithPollinationsVision(
   throw new Error('Pollinations Vision: no model could analyze the image');
 }
 
-/** تحليل صورة باستخدام HuggingFace Inference API (مجاني - بدون مفتاح API) */
+/** تحليل صورة باستخدام HuggingFace Inference API */
 async function analyzeImageWithHuggingFace(
   imageBase64: string,
   mimeType: string,
@@ -351,19 +351,43 @@ async function analyzeImageWithHuggingFace(
   const imageBuffer = Buffer.from(imageBase64, 'base64');
   const binaryData = new Uint8Array(imageBuffer);
 
+  // الحصول على HuggingFace token من قاعدة البيانات (إن وجد)
+  let hfToken = '';
+  try {
+    const cfg = await db.botConfig.findUnique({ where: { key: 'hf_api_token' } });
+    hfToken = cfg?.value || '';
+  } catch {}
+
   // نحاول عدة نقاط نهاية (endpoints) لـ HuggingFace
   const endpoints = [
-    'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
-    'https://router.huggingface.co/hf-inference/models/Salesforce/blip-image-captioning-large',
+    {
+      url: 'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
+      needsAuth: false,
+    },
+    {
+      url: 'https://router.huggingface.co/hf-inference/models/Salesforce/blip-image-captioning-large',
+      needsAuth: true,
+    },
   ];
 
   for (const endpoint of endpoints) {
-    try {
-      console.log(`[VLM-HuggingFace] Trying: ${endpoint.substring(0, 60)}...`);
+    // تخطي الـ endpoint إذا كان يحتاج مصادقة وليس لدينا token
+    if (endpoint.needsAuth && !hfToken) {
+      console.log(`[VLM-HuggingFace] Skipping ${endpoint.url.substring(0, 50)}... (needs HF token)`);
+      continue;
+    }
 
-      const response = await fetch(endpoint, {
+    try {
+      console.log(`[VLM-HuggingFace] Trying: ${endpoint.url.substring(0, 60)}...`);
+
+      const headers: Record<string, string> = { 'Content-Type': mimeType };
+      if (hfToken && endpoint.needsAuth) {
+        headers['Authorization'] = `Bearer ${hfToken}`;
+      }
+
+      const response = await fetch(endpoint.url, {
         method: 'POST',
-        headers: { 'Content-Type': mimeType },
+        headers,
         signal: AbortSignal.timeout(25000),
         body: binaryData,
       });
@@ -375,16 +399,21 @@ async function analyzeImageWithHuggingFace(
         console.log(`[VLM-HuggingFace] Model loading (cold start), waiting ${waitTime}s...`);
         await new Promise(resolve => setTimeout(resolve, Math.min(waitTime * 1000, 20000)));
 
-        const retryResponse = await fetch(endpoint, {
+        const retryHeaders: Record<string, string> = { 'Content-Type': mimeType };
+        if (hfToken && endpoint.needsAuth) {
+          retryHeaders['Authorization'] = `Bearer ${hfToken}`;
+        }
+
+        const retryResponse = await fetch(endpoint.url, {
           method: 'POST',
-          headers: { 'Content-Type': mimeType },
+          headers: retryHeaders,
           signal: AbortSignal.timeout(25000),
           body: binaryData,
         });
 
         if (!retryResponse.ok) {
           console.log(`[VLM-HuggingFace] Retry failed: ${retryResponse.status}`);
-          continue; // جرب الـ endpoint التالي
+          continue;
         }
 
         const retryData = await retryResponse.json();
@@ -397,7 +426,7 @@ async function analyzeImageWithHuggingFace(
       }
 
       if (response.status === 401) {
-        console.log(`[VLM-HuggingFace] Auth required for this endpoint, trying next...`);
+        console.log(`[VLM-HuggingFace] Auth required, trying next endpoint...`);
         continue;
       }
 
@@ -1054,7 +1083,7 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/setgeminikey [key] - تعيين مفتح Gemini API للصور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/setgeminikey [key] - تعيين مفتح Gemini API للصور\n/sethfkey [token] - تعيين HuggingFace token للصور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
         return { ok: true };
       }
       if (text === '/help') {
@@ -1115,6 +1144,17 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, `✅ تم تعيين مفتح Gemini API الجديد بنجاح!\n\nالآن تحليل الصور سيعمل باستخدام Gemini Vision.`);
         } else {
           await sendMessage(chatId, "❌ مفتح API غير صالح. يجب أن يكون 20 حرف على الأقل.\n\nاحصل على مفتح مجاني من: https://aistudio.google.com/apikey");
+        }
+        return { ok: true };
+      }
+      // أمر /sethfkey - تعيين HuggingFace API token
+      if (text.startsWith('/sethfkey ')) {
+        const newToken = text.replace('/sethfkey ', '').trim();
+        if (newToken.length >= 20) {
+          await db.botConfig.upsert({ where: { key: 'hf_api_token' }, update: { value: newToken }, create: { key: 'hf_api_token', value: newToken } });
+          await sendMessage(chatId, `✅ تم تعيين HuggingFace token الجديد!\n\nالآن تحليل الصور سيعمل باستخدام HuggingFace BLIP.`);
+        } else {
+          await sendMessage(chatId, "❌ Token غير صالح. يجب أن يكون 20 حرف على الأقل.\n\nاحصل على token مجاني من: https://huggingface.co/settings/tokens");
         }
         return { ok: true };
       }
