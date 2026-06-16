@@ -298,21 +298,33 @@ async function downloadTelegramFileBuffer(fileId: string): Promise<{ buffer: Buf
     const fileName = filePath.split('/').pop() || `file.${ext}`;
     return { buffer, fileName, mimeType };
   } catch (err: any) {
-    console.error('[Worker] File download error:', err?.message?.substring(0, 80)]);
+    console.error('[Worker] File download error:', err?.message?.substring(0, 80));
     return null;
   }
 }
 
-/** استخراج النص من ملف PDF */
+/** استخراج النص من ملف PDF باستخدام pdfjs-dist مباشرة */
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
   try {
-    const pdfParse = require('pdf-parse');
-    const data = await pdfParse(buffer);
-    const text = data.text?.trim() || '';
-    if (text) return text;
+    const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.mjs');
+    const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const numPages = doc.numPages;
+    let fullText = '';
+
+    for (let i = 1; i <= numPages; i++) {
+      const page = await doc.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map((item: any) => item.str || '')
+        .join(' ');
+      fullText += `\n--- صفحة ${i}/${numPages} ---\n${pageText}\n`;
+    }
+
+    const text = fullText.trim();
+    if (text.length > 50) return text;
     return '[PDF لا يحتوي على نص قابل للقراءة - قد يكون صورة ممسوحة ضوئياً]';
   } catch (err: any) {
-    console.error('[Worker] PDF parse error:', err?.message?.substring(0, 80)]);
+    console.error('[Worker] PDF parse error:', err?.message?.substring(0, 80));
     return '[خطأ في قراءة ملف PDF]';
   }
 }
@@ -324,7 +336,7 @@ async function extractTextFromDOCX(buffer: Buffer): Promise<string> {
     const result = await mammoth.extractRawText({ buffer });
     return result.value?.trim() || '[ملف DOCX فارغ]';
   } catch (err: any) {
-    console.error('[Worker] DOCX parse error:', err?.message?.substring(0, 80)]);
+    console.error('[Worker] DOCX parse error:', err?.message?.substring(0, 80));
     return '[خطأ في قراءة ملف DOCX]';
   }
 }
@@ -345,7 +357,7 @@ async function extractTextFromExcel(buffer: Buffer): Promise<string> {
 
     return allText.trim() || '[ملف Excel فارغ]';
   } catch (err: any) {
-    console.error('[Worker] Excel parse error:', err?.message?.substring(0, 80)]);
+    console.error('[Worker] Excel parse error:', err?.message?.substring(0, 80));
     return '[خطأ في قراءة ملف Excel]';
   }
 }
@@ -469,7 +481,7 @@ async function transcribeAudio(buffer: Buffer, fileName: string, mimeType: strin
     }
     return '[لم أتمكن من تفريغ الصوت]';
   } catch (err: any) {
-    console.error('[Worker] ASR error:', err?.message?.substring(0, 100)]);
+    console.error('[Worker] ASR error:', err?.message?.substring(0, 100));
     return `[خطأ في تفريغ الصوت: ${err?.message?.substring(0, 50)}]`;
   }
 }
