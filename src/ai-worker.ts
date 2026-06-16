@@ -16,7 +16,6 @@ import {
   AlignmentType, BorderStyle, TableRow, TableCell, Table,
   WidthType, PageBreak, ShadingType,
 } from 'docx';
-
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const MAX_HISTORY = 20;
@@ -254,6 +253,225 @@ async function analyzeImageWithVLM(
     }
   }
   throw new Error('VLM failed after retries');
+}
+
+// ============================
+// تحليل الملفات - استخراج النص
+// ============================
+
+/** تحميل ملف من تيليجرام وإرجاعه كـ Buffer */
+async function downloadTelegramFileBuffer(fileId: string): Promise<{ buffer: Buffer; fileName: string; mimeType: string } | null> {
+  try {
+    const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    const fileData = await fileRes.json();
+    if (!fileData?.ok || !fileData?.result?.file_path) return null;
+
+    const filePath = fileData.result.file_path;
+    const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+    const downloadRes = await fetch(downloadUrl, { signal: AbortSignal.timeout(60000) });
+    if (!downloadRes.ok) return null;
+
+    const arrayBuffer = await downloadRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const ext = filePath.split('.').pop()?.toLowerCase() || '';
+    const mimeTypeMap: Record<string, string> = {
+      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+      gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
+      pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      doc: 'application/msword', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      xls: 'application/vnd.ms-excel', csv: 'text/csv', txt: 'text/plain',
+      json: 'application/json', xml: 'text/xml', html: 'text/html', htm: 'text/html',
+      py: 'text/x-python', js: 'text/javascript', ts: 'text/typescript',
+      java: 'text/x-java-source', c: 'text/x-c', cpp: 'text/x-c++',
+      go: 'text/x-go', rs: 'text/x-rust', rb: 'text/x-ruby', php: 'text/x-php',
+      swift: 'text/x-swift', kt: 'text/x-kotlin', sql: 'text/x-sql',
+      sh: 'text/x-shellscript', ps1: 'text/x-powershell',
+      md: 'text/markdown', yml: 'text/yaml', yaml: 'text/yaml',
+      mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4',
+      mp4: 'video/mp4', avi: 'video/avi', mov: 'video/quicktime',
+      zip: 'application/zip', rar: 'application/x-rar-compressed',
+      '7z': 'application/x-7z-compressed', tar: 'application/x-tar', gz: 'application/gzip',
+    };
+    const mimeType = mimeTypeMap[ext] || 'application/octet-stream';
+    const fileName = filePath.split('/').pop() || `file.${ext}`;
+    return { buffer, fileName, mimeType };
+  } catch (err: any) {
+    console.error('[Worker] File download error:', err?.message?.substring(0, 80)]);
+    return null;
+  }
+}
+
+/** استخراج النص من ملف PDF */
+async function extractTextFromPDF(buffer: Buffer): Promise<string> {
+  try {
+    const pdfParse = require('pdf-parse');
+    const data = await pdfParse(buffer);
+    const text = data.text?.trim() || '';
+    if (text) return text;
+    return '[PDF لا يحتوي على نص قابل للقراءة - قد يكون صورة ممسوحة ضوئياً]';
+  } catch (err: any) {
+    console.error('[Worker] PDF parse error:', err?.message?.substring(0, 80)]);
+    return '[خطأ في قراءة ملف PDF]';
+  }
+}
+
+/** استخراج النص من ملف DOCX */
+async function extractTextFromDOCX(buffer: Buffer): Promise<string> {
+  try {
+    const mammoth = require('mammoth');
+    const result = await mammoth.extractRawText({ buffer });
+    return result.value?.trim() || '[ملف DOCX فارغ]';
+  } catch (err: any) {
+    console.error('[Worker] DOCX parse error:', err?.message?.substring(0, 80)]);
+    return '[خطأ في قراءة ملف DOCX]';
+  }
+}
+
+/** استخراج النص من ملف Excel (XLSX/XLS) */
+async function extractTextFromExcel(buffer: Buffer): Promise<string> {
+  try {
+    const XLSX = require('xlsx');
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    let allText = '';
+
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      const csvContent = XLSX.utils.sheet_to_csv(sheet);
+      const rowCount = csvContent.split('\n').filter((r: string) => r.trim()).length;
+      allText += `\n=== ورقة: ${sheetName} (${rowCount} صف) ===\n${csvContent}\n`;
+    }
+
+    return allText.trim() || '[ملف Excel فارغ]';
+  } catch (err: any) {
+    console.error('[Worker] Excel parse error:', err?.message?.substring(0, 80)]);
+    return '[خطأ في قراءة ملف Excel]';
+  }
+}
+
+/** قراءة ملف نصي عادي */
+function extractTextFromPlain(buffer: Buffer): string {
+  try {
+    const text = buffer.toString('utf-8').trim();
+    return text || '[ملف فارغ]';
+  } catch {
+    return '[خطأ في قراءة الملف النصي]';
+  }
+}
+
+/** استخراج النص من ملف حسب نوعه */
+async function extractTextFromFile(buffer: Buffer, fileName: string, mimeType: string): Promise<{ text: string; isImage: boolean; isAudio: boolean }> {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  
+  // أنواع الصور - ستعالج بالـ VLM
+  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'tif'];
+  const imageMimes = ['image/'];
+  if (imageExts.includes(ext) || imageMimes.some(m => mimeType.startsWith(m))) {
+    return { text: '', isImage: true, isAudio: false };
+  }
+
+  // أنواع الصوت - ستعالج بالـ ASR
+  const audioExts = ['mp3', 'ogg', 'wav', 'm4a', 'flac', 'aac', 'wma', 'opus'];
+  const audioMimes = ['audio/'];
+  if (audioExts.includes(ext) || audioMimes.some(m => mimeType.startsWith(m))) {
+    return { text: '', isImage: false, isAudio: true };
+  }
+
+  // أنواع الفيديو
+  const videoExts = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', '3gp'];
+  const videoMimes = ['video/'];
+  if (videoExts.includes(ext) || videoMimes.some(m => mimeType.startsWith(m))) {
+    return { text: `[ملف فيديو: ${fileName} - ${mimeType}]`, isImage: false, isAudio: false };
+  }
+
+  // PDF
+  if (ext === 'pdf' || mimeType === 'application/pdf') {
+    const text = await extractTextFromPDF(buffer);
+    return { text, isImage: false, isAudio: false };
+  }
+
+  // DOCX
+  if (ext === 'docx' || mimeType.includes('wordprocessingml')) {
+    const text = await extractTextFromDOCX(buffer);
+    return { text, isImage: false, isAudio: false };
+  }
+
+  // Excel
+  if (['xlsx', 'xls'].includes(ext) || mimeType.includes('spreadsheet') || mimeType.includes('excel')) {
+    const text = await extractTextFromExcel(buffer);
+    return { text, isImage: false, isAudio: false };
+  }
+
+  // ملفات نصية وكود
+  const textExts = [
+    'txt', 'md', 'csv', 'json', 'xml', 'html', 'htm', 'css',
+    'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'c', 'cpp', 'h', 'hpp',
+    'go', 'rs', 'rb', 'php', 'swift', 'kt', 'scala', 'lua', 'perl', 'pl',
+    'sql', 'sh', 'bash', 'zsh', 'ps1', 'bat', 'cmd',
+    'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env',
+    'log', 'rtf', 'diff', 'patch',
+    'dockerfile', 'makefile', 'cmake', 'gradle',
+    'vue', 'svelte',
+  ];
+  const textMimes = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/x-'];
+  if (textExts.includes(ext) || textMimes.some(m => mimeType.startsWith(m))) {
+    const text = extractTextFromPlain(buffer);
+    return { text, isImage: false, isAudio: false };
+  }
+
+  // DOC (قديم)
+  if (ext === 'doc') {
+    // محاولة قراءة كنص
+    const text = extractTextFromPlain(buffer);
+    if (text.length > 50 && !text.includes('\0')) {
+      return { text, isImage: false, isAudio: false };
+    }
+    return { text: '[ملف DOC قديم - يُنصح بتحويله إلى DOCX]', isImage: false, isAudio: false };
+  }
+
+  // ملفات مضغوطة
+  const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'];
+  if (archiveExts.includes(ext)) {
+    return { text: `[ملف مضغوط: ${fileName} - ${mimeType}]`, isImage: false, isAudio: false };
+  }
+
+  // أنواع غير معروفة - محاولة قراءة كنص
+  try {
+    const text = buffer.toString('utf-8').trim();
+    // إذا كان النص نظيفاً (بدون أحرف null كثيرة)
+    const nullCount = (text.match(/\0/g) || []).length;
+    if (text.length > 20 && nullCount < text.length * 0.01) {
+      return { text, isImage: false, isAudio: false };
+    }
+  } catch {}
+
+  return { text: `[ملف غير معروف: ${fileName} (${mimeType})]`, isImage: false, isAudio: false };
+}
+
+/** تحليل ملف صوتي باستخدام Z-AI ASR */
+async function transcribeAudio(buffer: Buffer, fileName: string, mimeType: string, lang: string): Promise<string> {
+  try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = new ZAIClass(ZAI_CONFIG);
+
+    const base64Audio = buffer.toString('base64');
+    const audioDataUrl = `data:${mimeType || 'audio/ogg'};base64,${base64Audio}`;
+
+    const result = await zai.asr.create({
+      audio: audioDataUrl,
+      language: lang === 'ar' ? 'ar' : 'en',
+    });
+
+    if (result?.text?.trim()) {
+      return result.text.trim();
+    }
+    return '[لم أتمكن من تفريغ الصوت]';
+  } catch (err: any) {
+    console.error('[Worker] ASR error:', err?.message?.substring(0, 100)]);
+    return `[خطأ في تفريغ الصوت: ${err?.message?.substring(0, 50)}]`;
+  }
 }
 
 // ============================
@@ -660,8 +878,169 @@ async function processPendingMessages() {
         }
 
         // ============================
-        // معالجة الصور (VLM)
+        // هل الطلب تحليل ملف (مستند)؟
         // ============================
+        if (msg.modelUsed === 'file-analyze') {
+          console.log(`[Worker] 📎 Analyzing file...`);
+          
+          try {
+            const fileData = await downloadTelegramFileBuffer(msg.imageUrl!);
+            if (!fileData) {
+              await sendMessage(chatId, '❌ لم أتمكن من تحميل الملف. حاول مرة أخرى.');
+              await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              totalFailed++;
+              continue;
+            }
+
+            // استخراج اسم الملف و mimeType من المحتوى
+            const contentMatch = msg.content.match(/📎 \[ملف: (.+?)\] (.+)/);
+            const fileName = contentMatch?.[1] || fileData.fileName;
+            const mimeType = contentMatch?.[2] || fileData.mimeType;
+            const userCaption = msg.content.includes('\n') ? msg.content.split('\n').slice(1).join('\n').trim() : '';
+
+            const extracted = await extractTextFromFile(fileData.buffer, fileName, mimeType);
+
+            // صورة مرسلة كمستند - استخدم VLM
+            if (extracted.isImage) {
+              const base64 = fileData.buffer.toString('base64');
+              const allImgHistory = await db.message.findMany({
+                where: { userId: msg.userId, status: 'done' },
+                orderBy: { timestamp: 'asc' }, take: MAX_HISTORY * 2,
+                select: { role: true, content: true },
+              });
+              const conversationHistory = filterDuplicateReplies(allImgHistory).slice(-MAX_HISTORY);
+              const reply = await analyzeImageWithVLM(base64, mimeType, userCaption, conversationHistory);
+              
+              await db.message.create({
+                data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-vlm', status: 'done', chatId: msg.chatId },
+              });
+              await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              await sendMessage(chatId, sanitizeMarkdown(reply));
+              totalProcessed++;
+              continue;
+            }
+
+            // ملف صوتي مرسل كمستند - استخدم ASR
+            if (extracted.isAudio) {
+              const transcription = await transcribeAudio(fileData.buffer, fileName, mimeType, 'ar');
+              const audioPrompt = userCaption || 'حلل هذا المقطع الصوتي';
+              const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: `🎤 تفريغ الصوت:\n${transcription}\n\n${audioPrompt}` },
+              ];
+              const reply = await callZaiSDK(aiMessages, 2000);
+              
+              await db.message.create({
+                data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-asr', status: 'done', chatId: msg.chatId },
+              });
+              await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              await sendMessage(chatId, sanitizeMarkdown(reply));
+              totalProcessed++;
+              continue;
+            }
+
+            // ملف نصي/مستند - أرسل المحتوى للـ AI للتحليل
+            const fileContent = extracted.text;
+            const MAX_FILE_TEXT = 8000; // حد أقصى لعدد الأحرف
+            const truncatedContent = fileContent.length > MAX_FILE_TEXT
+              ? fileContent.substring(0, MAX_FILE_TEXT) + '\n\n[... تم اقتطاع المحتوى لأنه طويل جداً ...]'
+              : fileContent;
+
+            const analyzePrompt = userCaption || 'حلل هذا الملف بالتفصيل';
+            
+            const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: `📎 ملف: ${fileName}\nالنوع: ${mimeType}\n\nمحتوى الملف:\n${truncatedContent}\n\nطلب المستخدم: ${analyzePrompt}` },
+            ];
+
+            const reply = await callZaiSDK(aiMessages, 3000);
+
+            await db.message.create({
+              data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-file', status: 'done', chatId: msg.chatId },
+            });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await sendMessage(chatId, sanitizeMarkdown(reply));
+            totalProcessed++;
+            console.log(`[Worker] ✅ File analyzed for user ${msg.userId}: ${fileName}`);
+
+          } catch (fileErr: any) {
+            console.error(`[Worker] File analysis error: ${fileErr?.message?.substring(0, 100)}`);
+            await sendMessage(chatId, '❌ حدث خطأ أثناء تحليل الملف. حاول مرة أخرى.');
+            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            totalFailed++;
+          }
+          continue;
+        }
+
+        // ============================
+        // هل الطلب تحليل رسالة صوتية؟
+        // ============================
+        if (msg.modelUsed === 'voice-analyze' || msg.modelUsed === 'audio-analyze') {
+          console.log(`[Worker] 🎤 Analyzing audio...`);
+          
+          try {
+            const fileData = await downloadTelegramFileBuffer(msg.imageUrl!);
+            if (!fileData) {
+              await sendMessage(chatId, '❌ لم أتمكن من تحميل الملف الصوتي. حاول مرة أخرى.');
+              await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              totalFailed++;
+              continue;
+            }
+
+            const transcription = await transcribeAudio(fileData.buffer, fileData.fileName, fileData.mimeType, 'ar');
+            const userCaption = msg.content.includes('\n') ? msg.content.split('\n').slice(1).join('\n').trim() : '';
+            const audioPrompt = userCaption || 'حلل هذا المقطع الصوتي';
+            
+            const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: `🎤 تفريغ الصوت:\n${transcription}\n\n${audioPrompt}` },
+            ];
+
+            const reply = await callZaiSDK(aiMessages, 2000);
+
+            await db.message.create({
+              data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-asr', status: 'done', chatId: msg.chatId },
+            });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await sendMessage(chatId, sanitizeMarkdown(reply));
+            totalProcessed++;
+            console.log(`[Worker] ✅ Audio analyzed for user ${msg.userId}`);
+
+          } catch (audioErr: any) {
+            console.error(`[Worker] Audio analysis error: ${audioErr?.message?.substring(0, 100)}`);
+            await sendMessage(chatId, '❌ حدث خطأ أثناء تحليل الصوت. حاول مرة أخرى.');
+            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            totalFailed++;
+          }
+          continue;
+        }
+
+        // ============================
+        // هل الطلب تحليل فيديو؟
+        // ============================
+        if (msg.modelUsed === 'video-analyze') {
+          console.log(`[Worker] 🎬 Analyzing video...`);
+          const videoInfo = msg.content.replace(/🎬 \[فيديو: \d+ث\]\s*/, '').trim();
+          const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: `🎬 استلمت ملف فيديو منك.\n${videoInfo ? `طلب: ${videoInfo}` : ''}\n\nملاحظة: لا أستطيع حالياً تحليل محتوى الفيديو مباشرة، لكن يمكنني مساعدتك في أي سؤال يتعلق به. يمكنك وصف محتوى الفيديو وسأحلله لك.` },
+          ];
+          try {
+            const reply = await callZaiSDK(aiMessages, 800);
+            await db.message.create({
+              data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-video', status: 'done', chatId: msg.chatId },
+            });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await sendMessage(chatId, sanitizeMarkdown(reply));
+            totalProcessed++;
+          } catch (videoErr: any) {
+            console.error(`[Worker] Video analysis error: ${videoErr?.message?.substring(0, 100)}`);
+            await sendMessage(chatId, '🎬 استلمت الفيديو. لا أستطيع تحليل الفيديو مباشرة حالياً، لكن صف لي محتواه وسأساعدك.');
+            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            totalFailed++;
+          }
+          continue;
+        }
         const hasImage = !!msg.imageUrl;
         let reply: string;
         let provider: string;

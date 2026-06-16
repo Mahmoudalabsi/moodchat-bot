@@ -341,6 +341,11 @@ export async function handleTelegramUpdate(update: {
     photo?: TelegramPhoto[];
     caption?: string;
     document?: { file_id: string; file_name?: string; mime_type?: string };
+    voice?: { file_id: string; duration?: number; mime_type?: string };
+    audio?: { file_id: string; duration?: number; title?: string; mime_type?: string };
+    video?: { file_id: string; duration?: number; width?: number; height?: number; mime_type?: string };
+    video_note?: { file_id: string; duration?: number };
+    sticker?: { file_id: string; emoji?: string; set_name?: string };
   };
   callback_query?: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number }; message_id: number }; };
 }) {
@@ -357,9 +362,15 @@ export async function handleTelegramUpdate(update: {
     if (!message?.from) return { ok: true };
 
     const hasPhoto = !!(message.photo && message.photo.length > 0);
+    const hasDocument = !!(message.document);
+    const hasVoice = !!(message.voice);
+    const hasAudio = !!(message.audio);
+    const hasVideo = !!(message.video || message.video_note);
+    const hasSticker = !!(message.sticker);
+    const hasFile = hasPhoto || hasDocument || hasVoice || hasAudio || hasVideo || hasSticker;
     const hasText = !!(message.text?.trim());
     const hasCaption = !!(message.caption?.trim());
-    if (!hasText && !hasPhoto) return { ok: true };
+    if (!hasText && !hasFile) return { ok: true };
 
     const userId = message.from.id;
     const chatId = message.chat.id;
@@ -376,7 +387,7 @@ export async function handleTelegramUpdate(update: {
       user.waitingForPassword = false;
     }
 
-    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} admin:${isAdm} | ${hasPhoto ? '📸 IMAGE' : 'msg'}: "${text.substring(0, 40)}"`);
+    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} admin:${isAdm} | ${hasPhoto ? '📸 IMAGE' : hasDocument ? '📎 FILE' : hasVoice ? '🎤 VOICE' : hasAudio ? '🎵 AUDIO' : hasVideo ? '🎬 VIDEO' : hasSticker ? '🏷️ STICKER' : 'msg'}: "${text.substring(0, 40)}"`);
 
     // ==========================================
     // المستخدم المحظور
@@ -387,40 +398,125 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // معالجة الصور - حفظ كـ pending للـ Worker
+    // معالجة الملفات (صور + مستندات + صوت + فيديو) - حفظ كـ pending للـ Worker
     // ==========================================
-    if (hasPhoto && !user.isBlocked && (user.isApproved || isAdm)) {
+    if (hasFile && !user.isBlocked && (user.isApproved || isAdm)) {
       try {
         const userLang = await getUserLang(userId);
-        const photoArray = message.photo!;
-        const bestPhoto = photoArray[photoArray.length - 1];
         const caption = message.caption?.trim() || '';
-
         await sendChatAction(chatId);
 
-        // حفظ رسالة المستخدم كـ pending مع بيانات الصورة
-        const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
-        await db.message.create({
-          data: {
-            userId, role: 'user', content: userContent,
-            modelUsed: 'vlm', status: 'pending', chatId,
-            // حفظ file_id في حقل imageUrl لكي يعالجها الـ Worker
-            imageUrl: bestPhoto.file_id,
-          },
-        });
+        // === صورة ===
+        if (hasPhoto) {
+          const photoArray = message.photo!;
+          const bestPhoto = photoArray[photoArray.length - 1];
+          const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
+          await db.message.create({
+            data: {
+              userId, role: 'user', content: userContent,
+              modelUsed: 'vlm', status: 'pending', chatId,
+              imageUrl: bestPhoto.file_id,
+            },
+          });
+          console.log(`[Bot] 📸 Image saved as pending. fileId=${bestPhoto.file_id}`);
+          return { ok: true, mode: 'image-pending' };
+        }
 
-        console.log(`[Bot] 📸 Image saved as pending for Worker. fileId=${bestPhoto.file_id}`);
-        return { ok: true, mode: 'image-pending' };
-      } catch (imgErr: any) {
-        console.error('[Bot] Image save error:', imgErr?.message);
+        // === مستند (PDF, DOCX, TXT, كود, Excel, إلخ) ===
+        if (hasDocument) {
+          const doc = message.document!;
+          const fileName = doc.file_name || 'document';
+          const mimeType = doc.mime_type || 'application/octet-stream';
+          const userContent = caption
+            ? `📎 [ملف: ${fileName}] ${mimeType}\n${caption}`
+            : `📎 [ملف: ${fileName}] ${mimeType}`;
+          await db.message.create({
+            data: {
+              userId, role: 'user', content: userContent,
+              modelUsed: 'file-analyze', status: 'pending', chatId,
+              imageUrl: doc.file_id,
+            },
+          });
+          console.log(`[Bot] 📎 Document saved as pending. fileId=${doc.file_id} name=${fileName} mime=${mimeType}`);
+          return { ok: true, mode: 'document-pending' };
+        }
+
+        // === رسالة صوتية ===
+        if (hasVoice) {
+          const voice = message.voice!;
+          const userContent = caption
+            ? `🎤 [رسالة صوتية: ${voice.duration || 0}ث]\n${caption}`
+            : `🎤 [رسالة صوتية: ${voice.duration || 0}ث]`;
+          await db.message.create({
+            data: {
+              userId, role: 'user', content: userContent,
+              modelUsed: 'voice-analyze', status: 'pending', chatId,
+              imageUrl: voice.file_id,
+            },
+          });
+          console.log(`[Bot] 🎤 Voice saved as pending. fileId=${voice.file_id}`);
+          return { ok: true, mode: 'voice-pending' };
+        }
+
+        // === ملف صوتي ===
+        if (hasAudio) {
+          const audio = message.audio!;
+          const userContent = caption
+            ? `🎵 [صوت: ${audio.title || 'ملف صوتي'} - ${audio.duration || 0}ث]\n${caption}`
+            : `🎵 [صوت: ${audio.title || 'ملف صوتي'} - ${audio.duration || 0}ث]`;
+          await db.message.create({
+            data: {
+              userId, role: 'user', content: userContent,
+              modelUsed: 'audio-analyze', status: 'pending', chatId,
+              imageUrl: audio.file_id,
+            },
+          });
+          console.log(`[Bot] 🎵 Audio saved as pending. fileId=${audio.file_id}`);
+          return { ok: true, mode: 'audio-pending' };
+        }
+
+        // === فيديو ===
+        if (hasVideo) {
+          const vid = message.video || message.video_note!;
+          const userContent = caption
+            ? `🎬 [فيديو: ${vid.duration || 0}ث]\n${caption}`
+            : `🎬 [فيديو: ${vid.duration || 0}ث]`;
+          await db.message.create({
+            data: {
+              userId, role: 'user', content: userContent,
+              modelUsed: 'video-analyze', status: 'pending', chatId,
+              imageUrl: vid.file_id,
+            },
+          });
+          console.log(`[Bot] 🎬 Video saved as pending. fileId=${vid.file_id}`);
+          return { ok: true, mode: 'video-pending' };
+        }
+
+        // === ملصق (Sticker) ===
+        if (hasSticker) {
+          const sticker = message.sticker!;
+          const userContent = `🏷️ [ملصق: ${sticker.emoji || 'sticker'}]`;
+          await db.message.create({
+            data: {
+              userId, role: 'user', content: userContent,
+              modelUsed: 'vlm', status: 'pending', chatId,
+              imageUrl: sticker.file_id,
+            },
+          });
+          console.log(`[Bot] 🏷️ Sticker saved as pending. fileId=${sticker.file_id}`);
+          return { ok: true, mode: 'sticker-pending' };
+        }
+
+      } catch (fileErr: any) {
+        console.error('[Bot] File save error:', fileErr?.message);
         try {
-          await sendMessage(chatId, '📸 حدث خطأ أثناء حفظ الصورة. حاول مرة أخرى.');
+          await sendMessage(chatId, '❌ حدث خطأ أثناء حفظ الملف. حاول مرة أخرى.');
         } catch {}
-        return { ok: true, mode: 'image-error' };
+        return { ok: true, mode: 'file-error' };
       }
     }
 
-    if (!hasText) return { ok: true, info: 'photo-processed-or-no-text' };
+    if (!hasText) return { ok: true, info: 'file-processed-or-no-text' };
 
     // ==========================================
     // الأدمن - صلاحيات كاملة
@@ -431,7 +527,7 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
         return { ok: true };
       }
       if (text === '/help') {
@@ -526,7 +622,7 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nلتفعيل حسابك والمحادثة مع الذكاء الاصطناعي، أرسل كلمة المرور:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
         } else {
           await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
-          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
+          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         }
         return { ok: true };
       }
@@ -565,7 +661,7 @@ export async function handleTelegramUpdate(update: {
     // ==========================================
     if (user.isApproved && !isAdm) {
       if (text === '/start') {
-        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
+        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         return { ok: true };
       }
       if (text === '/help') {
