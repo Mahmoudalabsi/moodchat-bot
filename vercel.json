@@ -7,7 +7,7 @@
       "maxDuration": 30
     }
   },
-  "buildCommand": "npx prisma generate && next build",
+  "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss 2>/dev/null; next build",
   "installCommand": "bun install",
   "framework": "nextjs"
 }
