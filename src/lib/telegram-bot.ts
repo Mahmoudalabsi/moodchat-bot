@@ -256,7 +256,137 @@ async function downloadTelegramFile(fileId: string): Promise<{ base64: string; m
   }
 }
 
-/** تحليل صورة باستخدام VLM عبر Z-AI SDK */
+/** تحليل صورة باستخدام Pollinations Vision API (مجاني - بدون مفتاح API) */
+async function analyzeImageWithPollinationsVision(
+  imageBase64: string,
+  mimeType: string,
+  userPrompt: string,
+  conversationHistory: Array<{ role: string; content: string }>,
+  lang: string
+): Promise<string> {
+  const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
+
+  // نحاول عدة نماذج - بعضها يدعم الرؤية
+  const models = ['openai', 'mistral', 'llama'];
+
+  for (const model of models) {
+    try {
+      console.log(`[VLM-Pollinations] Trying model: ${model}...`);
+
+      const messages = [
+        { role: 'system' as const, content: SYSTEM_PROMPT },
+        ...conversationHistory.slice(-6).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+        {
+          role: 'user' as const,
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        },
+      ];
+
+      const response = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(30000),
+        body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
+      });
+
+      if (!response.ok) {
+        console.log(`[VLM-Pollinations] Model ${model}: HTTP ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const reply = data?.choices?.[0]?.message?.content;
+
+      if (reply?.trim() && reply.trim().length > 20) {
+        // تحقق أن الرد فعلاً يحلل الصورة وليس "لا أستطيع رؤية الصور"
+        const lowerReply = reply.toLowerCase();
+        if (lowerReply.includes("can't see") || lowerReply.includes("cannot see") ||
+            lowerReply.includes("cannot view") || lowerReply.includes("can't view") ||
+            lowerReply.includes("لا أستطيع رؤية") || lowerReply.includes("لا أرى")) {
+          console.log(`[VLM-Pollinations] Model ${model}: says it can't see images, skipping`);
+          continue;
+        }
+        console.log(`[VLM-Pollinations] ✅ Model ${model} OK (${reply.length} chars)`);
+        return reply.trim();
+      }
+    } catch (err: any) {
+      console.log(`[VLM-Pollinations] Model ${model} error: ${err?.message?.substring(0, 60)}`);
+      continue;
+    }
+  }
+
+  throw new Error('Pollinations Vision: no model could analyze the image');
+}
+
+/** تحليل صورة باستخدام HuggingFace Inference API (مجاني - بدون مفتاح API) */
+async function analyzeImageWithHuggingFace(
+  imageBase64: string,
+  mimeType: string,
+  lang: string
+): Promise<string> {
+  try {
+    console.log('[VLM-HuggingFace] Starting BLIP image captioning...');
+
+    // تحويل base64 إلى Buffer ثم إرسال كـ binary
+    const imageBuffer = Buffer.from(imageBase64, 'base64');
+
+    const response = await fetch(
+      'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': mimeType },
+        signal: AbortSignal.timeout(20000),
+        body: new Uint8Array(imageBuffer),
+      }
+    );
+
+    if (!response.ok) {
+      // إذا النموذج بارد (cold start)، ننتظر وأعد المحاولة
+      if (response.status === 503) {
+        const data = await response.json().catch(() => ({}));
+        const waitTime = data?.estimated_time || 20;
+        console.log(`[VLM-HuggingFace] Model loading, waiting ${waitTime}s...`);
+        await new Promise(resolve => setTimeout(resolve, Math.min(waitTime * 1000, 30000)));
+
+        // إعادة المحاولة
+        const retryResponse = await fetch(
+          'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': mimeType },
+            signal: AbortSignal.timeout(25000),
+            body: new Uint8Array(imageBuffer),
+          }
+        );
+
+        if (!retryResponse.ok) throw new Error(`HuggingFace retry ${retryResponse.status}`);
+        const retryData = await retryResponse.json();
+        const caption = retryData?.[0]?.generated_text;
+        if (caption?.trim()) {
+          console.log(`[VLM-HuggingFace] ✅ BLIP caption (retry): ${caption.substring(0, 80)}`);
+          return caption.trim();
+        }
+        throw new Error('Empty HuggingFace retry response');
+      }
+      throw new Error(`HuggingFace ${response.status}`);
+    }
+
+    const data = await response.json();
+    const caption = data?.[0]?.generated_text;
+    if (caption?.trim()) {
+      console.log(`[VLM-HuggingFace] ✅ BLIP caption: ${caption.substring(0, 80)}`);
+      return caption.trim();
+    }
+    throw new Error('Empty HuggingFace response');
+  } catch (err: any) {
+    throw new Error(`HuggingFace: ${err?.message?.substring(0, 60)}`);
+  }
+}
+
+/** تحليل صورة باستخدام VLM عبر Z-AI SDK (يعمل فقط داخل شبكة Z.ai) */
 async function analyzeImageWithVLM(
   imageBase64: string,
   mimeType: string,
@@ -269,7 +399,6 @@ async function analyzeImageWithVLM(
     const ZAIClass = ZAIModule.default;
     const zai = new ZAIClass(ZAI_CONFIG);
 
-    // بناء الرسالة مع الصورة
     const imageContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
       {
         type: 'text',
@@ -283,7 +412,6 @@ async function analyzeImageWithVLM(
       },
     ];
 
-    // بناء رسائل المحادثة
     const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
@@ -298,17 +426,17 @@ async function analyzeImageWithVLM(
 
     const reply = completion?.choices?.[0]?.message?.content;
     if (reply?.trim()) {
-      console.log('[VLM] Image analysis OK');
+      console.log('[VLM] Z-AI SDK OK');
       return reply.trim();
     }
     throw new Error('Empty VLM response');
   } catch (err: any) {
-    console.error('[VLM] Analysis error:', err?.message?.substring(0, 100));
+    console.error('[VLM] Z-AI SDK error:', err?.message?.substring(0, 100));
     throw new Error(`VLM: ${err?.message?.substring(0, 80)}`);
   }
 }
 
-/** تحليل صورة باستخدام Gemini (fallback) */
+/** تحليل صورة باستخدام Gemini Vision API */
 async function analyzeImageWithGemini(
   imageBase64: string,
   mimeType: string,
@@ -365,7 +493,46 @@ async function analyzeImageWithGemini(
   }
 }
 
-/** تحليل صورة - Gemini أولاً (يعمل على Vercel) ثم Z-AI SDK كـ fallback */
+/** توسيع وصف الصورة البسيط باستخدام Pollinations text API */
+async function elaborateImageCaption(
+  caption: string,
+  userPrompt: string,
+  conversationHistory: Array<{ role: string; content: string }>,
+  lang: string
+): Promise<string> {
+  try {
+    const systemMsg = lang === 'ar'
+      ? `${SYSTEM_PROMPT}\n\nمعلومات إضافية: تم تحليل الصورة بواسطة نموذج الرؤية ووصفها كالتالي: "${caption}". استخدم هذا الوصف كأساس ووسّعه وأضف تفاصيل وتحليلاً أكثر عمقاً بناءً على طلب المستخدم.`
+      : `${SYSTEM_PROMPT}\n\nAdditional info: The image was analyzed by a vision model and described as: "${caption}". Use this description as a base and expand it with more details and deeper analysis based on the user's request.`;
+
+    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل' : 'Analyze this image in detail');
+
+    const messages = [
+      { role: 'system' as const, content: systemMsg },
+      ...conversationHistory.slice(-6).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      { role: 'user' as const, content: prompt },
+    ];
+
+    const response = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(20000),
+      body: JSON.stringify({ model: 'openai', messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
+    });
+
+    if (!response.ok) throw new Error(`Pollinations ${response.status}`);
+    const data = await response.json();
+    const reply = data?.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty Pollinations response');
+  } catch (err: any) {
+    // إذا فشل التوسيع، أعد الوصف الأساسي على الأقل
+    console.log(`[VLM-Elaborate] Failed: ${err?.message?.substring(0, 60)}, returning basic caption`);
+    return caption;
+  }
+}
+
+/** تحليل صورة - سلسلة متعددة المزودين */
 async function analyzeImage(
   imageBase64: string | null,
   mimeType: string,
@@ -376,32 +543,64 @@ async function analyzeImage(
 ): Promise<{ reply: string; provider: string }> {
   const errors: string[] = [];
 
-  // المحاولة 1: Gemini Vision (الأولوية - يعمل على Vercel)
-  if (imageBase64) {
-    try {
-      console.log('[VLM] Attempting Gemini Vision analysis...');
-      const reply = await analyzeImageWithGemini(imageBase64, mimeType, userPrompt, lang);
-      console.log('[VLM] ✅ Gemini Vision OK (provider: vlm-gemini)');
-      return { reply, provider: 'vlm-gemini' };
-    } catch (err: any) {
-      const errMsg = err?.message?.substring(0, 80) || String(err);
-      console.error(`[VLM] ❌ Gemini Vision failed: ${errMsg}`);
-      errors.push(`Gemini: ${errMsg}`);
-    }
+  if (!imageBase64) {
+    return {
+      reply: lang === 'ar'
+        ? '📸 للأسف لم أتمكن من تحميل الصورة. يرجى المحاولة مرة أخرى.'
+        : '📸 Could not download the image. Please try again.',
+      provider: 'vlm-no-image',
+    };
   }
 
-  // المحاولة 2: Z-AI SDK VLM مع base64 (يعمل فقط محلياً داخل شبكة Z.ai)
-  if (imageBase64) {
-    try {
-      console.log('[VLM] Attempting Z-AI SDK VLM analysis...');
-      const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
-      console.log('[VLM] ✅ Z-AI VLM OK (provider: vlm-zsdk)');
-      return { reply, provider: 'vlm-zsdk' };
-    } catch (err: any) {
-      const errMsg = err?.message?.substring(0, 80) || String(err);
-      console.error(`[VLM] ❌ Z-AI VLM failed: ${errMsg}`);
-      errors.push(`Z-AI VLM: ${errMsg}`);
-    }
+  // المحاولة 1: Pollinations Vision (مجاني - بدون مفتاح - يعمل من Vercel)
+  try {
+    console.log('[VLM] Attempting Pollinations Vision...');
+    const reply = await analyzeImageWithPollinationsVision(imageBase64, mimeType, userPrompt, conversationHistory, lang);
+    console.log('[VLM] ✅ Pollinations Vision OK');
+    return { reply, provider: 'vlm-pollinations' };
+  } catch (err: any) {
+    const errMsg = err?.message?.substring(0, 80) || String(err);
+    console.error(`[VLM] ❌ Pollinations Vision failed: ${errMsg}`);
+    errors.push(`Pollinations: ${errMsg}`);
+  }
+
+  // المحاولة 2: HuggingFace BLIP + Pollinations (مجاني - بدون مفتاح)
+  try {
+    console.log('[VLM] Attempting HuggingFace BLIP...');
+    const caption = await analyzeImageWithHuggingFace(imageBase64, mimeType, lang);
+    console.log(`[VLM] BLIP caption: "${caption.substring(0, 60)}" - elaborating...`);
+    // توسيع الوصف باستخدام Pollinations text
+    const reply = await elaborateImageCaption(caption, userPrompt, conversationHistory, lang);
+    console.log('[VLM] ✅ HuggingFace+Pollinations OK');
+    return { reply, provider: 'vlm-hf+pollinations' };
+  } catch (err: any) {
+    const errMsg = err?.message?.substring(0, 80) || String(err);
+    console.error(`[VLM] ❌ HuggingFace failed: ${errMsg}`);
+    errors.push(`HuggingFace: ${errMsg}`);
+  }
+
+  // المحاولة 3: Gemini Vision (يحتاج مفتاح API صالح)
+  try {
+    console.log('[VLM] Attempting Gemini Vision...');
+    const reply = await analyzeImageWithGemini(imageBase64, mimeType, userPrompt, lang);
+    console.log('[VLM] ✅ Gemini Vision OK');
+    return { reply, provider: 'vlm-gemini' };
+  } catch (err: any) {
+    const errMsg = err?.message?.substring(0, 80) || String(err);
+    console.error(`[VLM] ❌ Gemini Vision failed: ${errMsg}`);
+    errors.push(`Gemini: ${errMsg}`);
+  }
+
+  // المحاولة 4: Z-AI SDK VLM (يعمل فقط محلياً داخل شبكة Z.ai)
+  try {
+    console.log('[VLM] Attempting Z-AI SDK VLM...');
+    const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
+    console.log('[VLM] ✅ Z-AI VLM OK');
+    return { reply, provider: 'vlm-zsdk' };
+  } catch (err: any) {
+    const errMsg = err?.message?.substring(0, 80) || String(err);
+    console.error(`[VLM] ❌ Z-AI VLM failed: ${errMsg}`);
+    errors.push(`Z-AI VLM: ${errMsg}`);
   }
 
   console.error(`[VLM] ❌ All vision providers failed: ${errors.join(' | ')}`);
