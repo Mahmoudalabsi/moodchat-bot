@@ -879,19 +879,42 @@ async function processPendingMessages() {
   isProcessing = true;
 
   try {
-    const pendingMessages = await db.message.findMany({
+    // استخدام atomic claim: تحديث الرسائل من pending إلى processing مباشرة
+    // هذا يمنع أي معالج آخر من التقاط نفس الرسائل
+    const claimed = await db.message.updateMany({
       where: { status: 'pending', role: 'user' },
+      data: { status: 'processing' },
+    });
+
+    if (claimed.count === 0) return;
+
+    // الآن جلب الرسائل التي حجزناها فقط
+    const pendingMessages = await db.message.findMany({
+      where: { status: 'processing', role: 'user' },
       orderBy: { timestamp: 'asc' },
       take: BATCH_SIZE,
     });
 
     if (pendingMessages.length === 0) return;
-    console.log(`[Worker] Found ${pendingMessages.length} pending messages`);
+    console.log(`[Worker] Claimed ${pendingMessages.length} pending messages`);
 
     for (const msg of pendingMessages) {
       try {
-        // تحديث الحالة إلى "processing"
-        await db.message.update({ where: { id: msg.id }, data: { status: 'processing' } });
+        // التحقق الإضافي: هل يوجد رد مساعد لهذه الرسالة بالفعل؟
+        const existingReply = await db.message.findFirst({
+          where: {
+            userId: msg.userId,
+            role: 'assistant',
+            status: 'done',
+            timestamp: { gte: msg.timestamp },
+          },
+          take: 1,
+        });
+        if (existingReply) {
+          console.log(`[Worker] Skipping msg ${msg.id} - already has reply`);
+          await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+          continue;
+        }
 
         // فحص حالة المستخدم
         const user = await db.telegramUser.findUnique({ where: { userId: msg.userId } });
@@ -1258,7 +1281,8 @@ async function processPendingMessages() {
 
       } catch (err: any) {
         console.error(`[Worker] Error processing msg ${msg.id}:`, err?.message?.substring(0, 100));
-        try { await db.message.update({ where: { id: msg.id }, data: { status: 'pending' } }); } catch {}
+        // لا نعيد الرسالة إلى pending - نضعها failed لمنع التكرار اللانهائي
+        try { await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } }); } catch {}
         totalFailed++;
       }
     }
@@ -1293,11 +1317,42 @@ async function sendHeartbeat() {
 async function cleanStuckMessages() {
   try {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const result = await db.message.updateMany({
-      where: { status: 'processing', timestamp: { lt: fiveMinutesAgo } },
-      data: { status: 'pending' },
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+
+    // البحث عن الرسائل العالقة في حالة processing
+    const stuckMessages = await db.message.findMany({
+      where: { status: 'processing', role: 'user', timestamp: { lt: fiveMinutesAgo } },
+      select: { id: true, userId: true, timestamp: true },
     });
-    if (result.count > 0) console.log(`[Worker] Recovered ${result.count} stuck messages`);
+
+    if (stuckMessages.length === 0) return;
+
+    for (const stuck of stuckMessages) {
+      // التحقق: هل يوجد رد مساعد تم إنشاؤه بعد هذه الرسالة لنفس المستخدم؟
+      const existingReply = await db.message.findFirst({
+        where: {
+          userId: stuck.userId,
+          role: 'assistant',
+          status: 'done',
+          timestamp: { gte: stuck.timestamp },
+        },
+        take: 1,
+      });
+
+      if (existingReply) {
+        // يوجد رد بالفعل - ضع الرسالة كـ done لمنع التكرار
+        await db.message.update({ where: { id: stuck.id }, data: { status: 'done' } });
+        console.log(`[Worker] Stuck msg ${stuck.id} already has reply, marked as done`);
+      } else if (stuck.timestamp < tenMinutesAgo) {
+        // عالقة أكثر من 10 دقائق بدون رد - ضعها failed لمنع التكرار اللانهائي
+        await db.message.update({ where: { id: stuck.id }, data: { status: 'failed' } });
+        console.log(`[Worker] Stuck msg ${stuck.id} too old, marked as failed`);
+      } else {
+        // عالقة بين 5-10 دقائق بدون رد - أعد للمعالجة
+        await db.message.update({ where: { id: stuck.id }, data: { status: 'pending' } });
+        console.log(`[Worker] Recovered stuck msg ${stuck.id} (no reply found)`);
+      }
+    }
   } catch (err: any) {
     console.error('[Worker] Clean error:', err?.message?.substring(0, 60));
   }
