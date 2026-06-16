@@ -435,7 +435,7 @@ export async function handleTelegramUpdate(update: {
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 ملفات Word: /doc [الموضوع]\n💻 ملفات كود: /code [اللغة] [المطلوب]\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -487,6 +487,32 @@ export async function handleTelegramUpdate(update: {
         await db.message.deleteMany({ where: { userId } });
         await sendMessage(chatId, "تم مسح سجل محادثتك.");
         return { ok: true };
+      }
+      // أمر /doc - إنشاء ملف Word
+      if (text.startsWith('/doc ')) {
+        const docTopic = text.replace('/doc ', '').trim();
+        if (docTopic.length < 3) {
+          await sendMessage(chatId, "📄 اكتب الموضوع بعد الأمر، مثال:\n`/doc تقرير عن الذكاء الاصطناعي`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
+        return { ok: true, mode: 'file-pending' };
+      }
+      // أمر /code - إنشاء ملف كود
+      if (text.startsWith('/code ')) {
+        const codeRequest = text.replace('/code ', '').trim();
+        if (codeRequest.length < 3) {
+          await sendMessage(chatId, "💻 اكتب المطلوب بعد الأمر، مثال:\n`/code python لعبة ثعبان`\n`/code js صفحة ويب`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
+        return { ok: true, mode: 'file-pending' };
       }
     }
 
@@ -543,7 +569,7 @@ export async function handleTelegramUpdate(update: {
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI SDK\n📸 فهم الصور: أرسل صورة وسأحللها!\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI SDK\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 ملفات Word: /doc [الموضوع]\n💻 ملفات كود: /code [اللغة] [المطلوب]\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
         return { ok: true };
       }
       if (text === '/clear') {
@@ -556,6 +582,32 @@ export async function handleTelegramUpdate(update: {
         const uLang = await getUserLang(userId);
         await sendMessage(chatId, "⚙️ **الإعدادات**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(false, pwEnabled, uLang)) });
         return { ok: true };
+      }
+      // أمر /doc - إنشاء ملف Word
+      if (text.startsWith('/doc ')) {
+        const docTopic = text.replace('/doc ', '').trim();
+        if (docTopic.length < 3) {
+          await sendMessage(chatId, "📄 اكتب الموضوع بعد الأمر، مثال:\n`/doc تقرير عن الذكاء الاصطناعي`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
+        return { ok: true, mode: 'file-pending' };
+      }
+      // أمر /code - إنشاء ملف كود
+      if (text.startsWith('/code ')) {
+        const codeRequest = text.replace('/code ', '').trim();
+        if (codeRequest.length < 3) {
+          await sendMessage(chatId, "💻 اكتب المطلوب بعد الأمر، مثال:\n`/code python لعبة ثعبان`\n`/code js صفحة ويب`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
+        return { ok: true, mode: 'file-pending' };
       }
     }
 
