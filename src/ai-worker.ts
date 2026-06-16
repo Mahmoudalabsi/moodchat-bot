@@ -873,54 +873,71 @@ function filterDuplicateReplies(messages: Array<{ role: string; content: string 
 let totalProcessed = 0;
 let totalFailed = 0;
 let isProcessing = false;
+// مجموعة لتتبع الرسائل التي تمت معالجتها في هذه الجلسة (لمنع التكرار)
+const processedInSession = new Set<string>();
 
 async function processPendingMessages() {
   if (isProcessing) return;
   isProcessing = true;
 
   try {
-    // استخدام atomic claim: تحديث الرسائل من pending إلى processing مباشرة
-    // هذا يمنع أي معالج آخر من التقاط نفس الرسائل
-    const claimed = await db.message.updateMany({
+    // فحص: هل الـ Worker متوقف؟
+    const pauseFlag = await db.botConfig.findUnique({ where: { key: 'worker_paused' } });
+    if (pauseFlag?.value === 'true') {
+      return; // الـ Worker متوقف - لا تعالج
+    }
+
+    // جلب رسالة واحدة فقط في كل مرة (لمنع التكرار والتكدس)
+    const pendingMessage = await db.message.findFirst({
       where: { status: 'pending', role: 'user' },
+      orderBy: { timestamp: 'asc' },
+    });
+
+    if (!pendingMessage) return;
+
+    // حجز الرسالة: تحديث من pending إلى processing (atomic)
+    const claimResult = await db.message.updateMany({
+      where: { id: pendingMessage.id, status: 'pending' },  // تحقق إضافي أن الحالة لم تتغير
       data: { status: 'processing' },
     });
 
-    if (claimed.count === 0) return;
+    // إذا لم يتم حجز الرسالة (معالج آخر أخذها)، تخطى
+    if (claimResult.count === 0) {
+      console.log(`[Worker] Message ${pendingMessage.id} already claimed, skipping`);
+      return;
+    }
 
-    // الآن جلب الرسائل التي حجزناها فقط
-    const pendingMessages = await db.message.findMany({
-      where: { status: 'processing', role: 'user' },
-      orderBy: { timestamp: 'asc' },
-      take: BATCH_SIZE,
-    });
+    const msg = pendingMessage;
 
-    if (pendingMessages.length === 0) return;
-    console.log(`[Worker] Claimed ${pendingMessages.length} pending messages`);
+    // حماية: هل تمت معالجة هذه الرسالة في هذه الجلسة؟
+    if (processedInSession.has(msg.id)) {
+      console.log(`[Worker] Message ${msg.id} already processed in this session, marking done`);
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      return;
+    }
 
-    for (const msg of pendingMessages) {
-      try {
-        // التحقق الإضافي: هل يوجد رد مساعد لهذه الرسالة بالفعل؟
-        const existingReply = await db.message.findFirst({
-          where: {
-            userId: msg.userId,
-            role: 'assistant',
-            status: 'done',
-            timestamp: { gte: msg.timestamp },
-          },
-          take: 1,
-        });
-        if (existingReply) {
-          console.log(`[Worker] Skipping msg ${msg.id} - already has reply`);
-          await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-          continue;
-        }
+    try {
+      // حماية: هل يوجد رد مساعد لهذه الرسالة بالفعل؟
+      const existingReply = await db.message.findFirst({
+        where: {
+          userId: msg.userId,
+          role: 'assistant',
+          status: 'done',
+          timestamp: { gte: msg.timestamp },
+        },
+        take: 1,
+      });
+      if (existingReply) {
+        console.log(`[Worker] Skipping msg ${msg.id} - already has reply`);
+        await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+        return;
+      }
 
         // فحص حالة المستخدم
         const user = await db.telegramUser.findUnique({ where: { userId: msg.userId } });
         if (!user || user.isBlocked || (!user.isApproved && !ADMIN_IDS.includes(msg.userId))) {
           await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-          continue;
+          return;
         }
 
         const chatId = msg.chatId || msg.userId;
@@ -939,25 +956,19 @@ async function processPendingMessages() {
           const topic = msg.content.replace('📄 إنشاء ملف Word عن: ', '').trim();
 
           try {
-            // توليد محتوى الملف
             const docMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
               { role: 'system', content: DOCX_SYSTEM_PROMPT },
               { role: 'user', content: `اكتب محتوى مفصل ومنظم عن: ${topic}` },
             ];
 
-            // طلب محتوى أطول للملفات
             const docContent = await callZaiSDK(docMessages, 4000);
-
-            // إنشاء ملف Word
             const docTitle = topic.length > 60 ? topic.substring(0, 60) : topic;
             const docBuffer = await generateDocxFile(docTitle, docContent);
             const filename = `مود_شات_${topic.substring(0, 30).replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '_')}.docx`;
 
-            // إرسال الملف
             const sendResult = await sendDocument(chatId, docBuffer, filename, `📄 ${topic}`);
             
             if (sendResult?.ok) {
-              // حفظ رد في قاعدة البيانات
               await db.message.create({
                 data: {
                   userId: msg.userId, role: 'assistant',
@@ -966,6 +977,7 @@ async function processPendingMessages() {
                 },
               });
               await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              processedInSession.add(msg.id);
               totalProcessed++;
               console.log(`[Worker] ✅ Word doc sent for user ${msg.userId}: ${filename}`);
             } else {
@@ -974,10 +986,11 @@ async function processPendingMessages() {
           } catch (docErr: any) {
             console.error(`[Worker] Word generation error: ${docErr?.message?.substring(0, 100)}`);
             await sendMessage(chatId, `❌ حدث خطأ أثناء إنشاء ملف Word. حاول مرة أخرى.`);
-            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+            processedInSession.add(msg.id);
             totalFailed++;
           }
-          continue;
+          return;
         }
 
         // ============================
@@ -988,12 +1001,10 @@ async function processPendingMessages() {
           const codeRequest = msg.content.replace('💻 إنشاء كود: ', '').trim();
 
           try {
-            // استخراج لغة البرمجة
             const parts = codeRequest.split(/\s+/);
             let lang = 'python';
             let task = codeRequest;
 
-            // فحص إذا كانت الكلمة الأولى هي لغة برمجة
             const knownLangs = ['python', 'py', 'javascript', 'js', 'typescript', 'ts', 'html', 'css', 'java', 'c', 'cpp', 'c++', 'csharp', 'c#', 'go', 'rust', 'ruby', 'php', 'swift', 'kotlin', 'sql', 'bash', 'shell', 'r', 'dart', 'lua', 'vue', 'react', 'json', 'yaml', 'بايثون', 'جافاسكريبت', 'جافا', 'سي', 'كوتلن', 'روست', 'روبي', 'دارت', 'سي شارب'];
             if (parts.length > 1 && knownLangs.includes(parts[0].toLowerCase())) {
               lang = parts[0].toLowerCase();
@@ -1002,7 +1013,6 @@ async function processPendingMessages() {
 
             const ext = getCodeExtension(lang);
 
-            // توليد الكود
             const codeMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
               { role: 'system', content: CODE_SYSTEM_PROMPT },
               { role: 'user', content: `اكتب كود ${lang} لـ: ${task}` },
@@ -1011,16 +1021,13 @@ async function processPendingMessages() {
             const codeContent = await callZaiSDK(codeMessages, 4000);
             const cleanedCode = cleanCodeContent(codeContent);
 
-            // إنشاء ملف الكود
             const codeBuffer = Buffer.from(cleanedCode, 'utf-8');
             const safeName = task.substring(0, 30).replace(/[^\u0600-\u06FFa-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '_');
             const filename = `${safeName || 'code'}.${ext}`;
 
-            // إرسال الملف
             const sendResult = await sendDocument(chatId, codeBuffer, filename, `💻 ${task} (${lang})`);
 
             if (sendResult?.ok) {
-              // حفظ رد في قاعدة البيانات
               await db.message.create({
                 data: {
                   userId: msg.userId, role: 'assistant',
@@ -1029,6 +1036,7 @@ async function processPendingMessages() {
                 },
               });
               await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              processedInSession.add(msg.id);
               totalProcessed++;
               console.log(`[Worker] ✅ Code file sent for user ${msg.userId}: ${filename}`);
             } else {
@@ -1037,10 +1045,11 @@ async function processPendingMessages() {
           } catch (codeErr: any) {
             console.error(`[Worker] Code generation error: ${codeErr?.message?.substring(0, 100)}`);
             await sendMessage(chatId, `❌ حدث خطأ أثناء إنشاء ملف الكود. حاول مرة أخرى.`);
-            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+            processedInSession.add(msg.id);
             totalFailed++;
           }
-          continue;
+          return;
         }
 
         // ============================
@@ -1053,12 +1062,12 @@ async function processPendingMessages() {
             const fileData = await downloadTelegramFileBuffer(msg.imageUrl!);
             if (!fileData) {
               await sendMessage(chatId, '❌ لم أتمكن من تحميل الملف. حاول مرة أخرى.');
-              await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+              processedInSession.add(msg.id);
               totalFailed++;
-              continue;
+              return;
             }
 
-            // استخراج اسم الملف و mimeType من قاعدة البيانات أولاً، ثم من المحتوى كـ fallback
             const contentMatch = msg.content.match(/📎 \[ملف: (.+?)\] (.+)/);
             const fileName = msg.fileName || contentMatch?.[1] || fileData.fileName;
             const mimeType = msg.mimeType || contentMatch?.[2] || fileData.mimeType;
@@ -1082,8 +1091,9 @@ async function processPendingMessages() {
               });
               await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
               await sendLongMessage(chatId, sanitizeMarkdown(reply));
+              processedInSession.add(msg.id);
               totalProcessed++;
-              continue;
+              return;
             }
 
             // ملف صوتي مرسل كمستند - استخدم ASR
@@ -1101,22 +1111,20 @@ async function processPendingMessages() {
               });
               await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
               await sendLongMessage(chatId, sanitizeMarkdown(reply));
+              processedInSession.add(msg.id);
               totalProcessed++;
-              continue;
+              return;
             }
 
             // ملف نصي/مستند - أرسل المحتوى للـ AI للتحليل
             const fileContent = extracted.text;
-            // حد أقصى أكبر للملفات الطويلة (كتب، تقارير)
             const MAX_FILE_TEXT = 30000;
             const truncatedContent = fileContent.length > MAX_FILE_TEXT
               ? fileContent.substring(0, MAX_FILE_TEXT) + `\n\n[... تم اقتطاع ${Math.round((fileContent.length - MAX_FILE_TEXT) / 1000)}K حرف من المحتوى ...]`
               : fileContent;
 
-            // بناء طلب التحليل حسب طلب المستخدم
             const analyzePrompt = userCaption || 'حلل هذا الملف بالتفصيل';
             
-            // تحسين الـ prompt للتحليل الشامل
             const fileAnalysisSystemPrompt = `${SYSTEM_PROMPT}
 
 أنت الآن محلل محتوى متخصص. قم بتحليل المحتوى المرفق بشكل شامل ومفصل:
@@ -1138,16 +1146,18 @@ async function processPendingMessages() {
             });
             await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
             await sendLongMessage(chatId, sanitizeMarkdown(reply));
+            processedInSession.add(msg.id);
             totalProcessed++;
             console.log(`[Worker] ✅ File analyzed for user ${msg.userId}: ${fileName}`);
 
           } catch (fileErr: any) {
             console.error(`[Worker] File analysis error: ${fileErr?.message?.substring(0, 100)}`);
             await sendMessage(chatId, '❌ حدث خطأ أثناء تحليل الملف. حاول مرة أخرى.');
-            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+            processedInSession.add(msg.id);
             totalFailed++;
           }
-          continue;
+          return;
         }
 
         // ============================
@@ -1160,9 +1170,10 @@ async function processPendingMessages() {
             const fileData = await downloadTelegramFileBuffer(msg.imageUrl!);
             if (!fileData) {
               await sendMessage(chatId, '❌ لم أتمكن من تحميل الملف الصوتي. حاول مرة أخرى.');
-              await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+              await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+              processedInSession.add(msg.id);
               totalFailed++;
-              continue;
+              return;
             }
 
             const transcription = await transcribeAudio(fileData.buffer, fileData.fileName, fileData.mimeType, 'ar');
@@ -1181,16 +1192,18 @@ async function processPendingMessages() {
             });
             await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
             await sendLongMessage(chatId, sanitizeMarkdown(reply));
+            processedInSession.add(msg.id);
             totalProcessed++;
             console.log(`[Worker] ✅ Audio analyzed for user ${msg.userId}`);
 
           } catch (audioErr: any) {
             console.error(`[Worker] Audio analysis error: ${audioErr?.message?.substring(0, 100)}`);
             await sendMessage(chatId, '❌ حدث خطأ أثناء تحليل الصوت. حاول مرة أخرى.');
-            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+            processedInSession.add(msg.id);
             totalFailed++;
           }
-          continue;
+          return;
         }
 
         // ============================
@@ -1210,15 +1223,21 @@ async function processPendingMessages() {
             });
             await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
             await sendLongMessage(chatId, sanitizeMarkdown(reply));
+            processedInSession.add(msg.id);
             totalProcessed++;
           } catch (videoErr: any) {
             console.error(`[Worker] Video analysis error: ${videoErr?.message?.substring(0, 100)}`);
             await sendMessage(chatId, '🎬 استلمت الفيديو. لا أستطيع تحليل الفيديو مباشرة حالياً، لكن صف لي محتواه وسأساعدك.');
-            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+            processedInSession.add(msg.id);
             totalFailed++;
           }
-          continue;
+          return;
         }
+
+        // ============================
+        // معالجة الصور والنص العادي
+        // ============================
         const hasImage = !!msg.imageUrl;
         let reply: string;
         let provider: string;
@@ -1230,9 +1249,10 @@ async function processPendingMessages() {
           if (!imageData) {
             console.error('[Worker] Image download failed');
             await sendMessage(chatId, '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.');
-            await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+            await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } });
+            processedInSession.add(msg.id);
             totalFailed++;
-            continue;
+            return;
           }
 
           const allImgHistory = await db.message.findMany({
@@ -1251,7 +1271,7 @@ async function processPendingMessages() {
           // معالجة النص العادي
           // ============================
           const allHistory = await db.message.findMany({
-            where: { userId: msg.userId, status: { in: ['done', 'processing'] } },
+            where: { userId: msg.userId, status: { in: ['done'] } },
             orderBy: { timestamp: 'asc' }, take: MAX_HISTORY * 2,
             select: { role: true, content: true },
           });
@@ -1266,26 +1286,29 @@ async function processPendingMessages() {
           provider = 'zai-sdk';
         }
 
-        // حفظ رد الـ AI
+        // حفظ رد الـ AI في قاعدة البيانات أولاً (قبل الإرسال لتجنب التكرار)
         await db.message.create({
           data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId: msg.chatId },
         });
 
-        // تحديث الرسالة الأصلية
+        // تحديث الرسالة الأصلية إلى done
         await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
 
-        // إرسال الرد
+        // تسجيل في الجلسة لمنع التكرار
+        processedInSession.add(msg.id);
+
+        // إرسال الرد (آخر خطوة - حتى لو فشل الإرسال، الرسالة مُعالجة)
         await sendLongMessage(chatId, sanitizeMarkdown(reply));
         totalProcessed++;
         console.log(`[Worker] ✅ Processed msg ${msg.id} for user ${msg.userId} via ${provider} (total: ${totalProcessed})`);
 
       } catch (err: any) {
         console.error(`[Worker] Error processing msg ${msg.id}:`, err?.message?.substring(0, 100));
-        // لا نعيد الرسالة إلى pending - نضعها failed لمنع التكرار اللانهائي
+        // لا نعيد الرسالة إلى pending أبداً - نضعها failed لمنع التكرار اللانهائي
         try { await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } }); } catch {}
+        processedInSession.add(msg.id);
         totalFailed++;
       }
-    }
   } catch (err: any) {
     console.error('[Worker] Error:', err?.message?.substring(0, 100));
   } finally {
