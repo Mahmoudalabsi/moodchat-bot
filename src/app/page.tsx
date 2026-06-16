@@ -187,6 +187,12 @@ export default function Dashboard() {
   const [refreshingPhotos, setRefreshingPhotos] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
+  // Pending messages state
+  const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
+  const [processingMessages, setProcessingMessages] = useState<Message[]>([]);
+  const [messageStats, setMessageStats] = useState<Array<{ status: string; count: number }>>([]);
+  const [showPending, setShowPending] = useState(false);
+
   // Config form state
   const [cfgProvider, setCfgProvider] = useState('zsdk');
   const [cfgApiUrl, setCfgApiUrl] = useState('');
@@ -296,6 +302,19 @@ export default function Dashboard() {
         setUserMessages(d.messages || []);
         setUserMessagesTotal(d.total || 0);
         setUserMessagesHasMore(false); // No pagination - all loaded
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  // Fetch pending/processing messages
+  const fetchPendingMessages = useCallback(async () => {
+    try {
+      const r = await fetch('/api/pending-messages');
+      if (r.ok) {
+        const d = await r.json();
+        setPendingMessages(d.pending || []);
+        setProcessingMessages(d.processing || []);
+        setMessageStats(d.stats || []);
       }
     } catch { /* ignore */ }
   }, []);
@@ -1049,6 +1068,97 @@ export default function Dashboard() {
 
           {/* ========== MESSAGES TAB ========== */}
           <TabsContent value="messages" className="animate-fade-in mt-6">
+            {/* Pending Messages Alert */}
+            <div className="mb-4">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { fetchPendingMessages(); setShowPending(!showPending); }}
+                className="gap-2 border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
+              >
+                <Clock size={14} />
+                {lang === 'ar' ? 'الرسائل المعلّقة والواردة' : 'Pending & Incoming Messages'}
+                {(pendingMessages.length + processingMessages.length) > 0 && (
+                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0 ml-1">
+                    {pendingMessages.length + processingMessages.length}
+                  </Badge>
+                )}
+              </Button>
+            </div>
+
+            {/* Pending Messages Panel */}
+            {showPending && (
+              <Card className="border-amber-500/30 mb-4">
+                <CardHeader className="p-4 pb-2">
+                  <CardTitle className="text-sm font-bold flex items-center gap-2 text-amber-500">
+                    <Clock size={16} />
+                    {lang === 'ar' ? 'الرسائل المعلّقة والقيد المعالجة' : 'Pending & Processing Messages'}
+                    <Button variant="ghost" size="sm" onClick={fetchPendingMessages} className="ml-auto h-6 px-2">
+                      <RefreshCw size={12} />
+                    </Button>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-4 pt-0">
+                  {(() => {
+                    const all = [...processingMessages.map(m => ({ ...m, _status: 'processing' })), ...pendingMessages.map(m => ({ ...m, _status: 'pending' }))];
+                    if (all.length === 0) {
+                      return (
+                        <div className="text-center py-6 text-muted-foreground">
+                          <CheckCircle size={32} className="mx-auto mb-2 opacity-30" />
+                          <p className="text-sm">{lang === 'ar' ? 'لا توجد رسائل معلّقة 🎉' : 'No pending messages 🎉'}</p>
+                        </div>
+                      );
+                    }
+                    return (
+                      <ScrollArea className="max-h-[300px]">
+                        <div className="space-y-2">
+                          {all.map(m => (
+                            <div key={m.id} className={`flex items-center gap-3 p-2.5 rounded-lg border ${
+                              m._status === 'processing' ? 'border-blue-500/30 bg-blue-500/5' : 'border-amber-500/30 bg-amber-500/5'
+                            }`}>
+                              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                                m._status === 'processing' ? 'bg-blue-500 animate-pulse' : 'bg-amber-500'
+                              }`} />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-medium">{m.user?.firstName || `User ${m.userId}`}</span>
+                                  <Badge variant="secondary" className="text-[9px] px-1 py-0">{m.modelUsed || 'chat'}</Badge>
+                                  <Badge className={`text-[9px] px-1 py-0 ${
+                                    m._status === 'processing' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'
+                                  }`}>
+                                    {m._status === 'processing' ? (lang === 'ar' ? 'قيد المعالجة' : 'Processing') : (lang === 'ar' ? 'معلّق' : 'Pending')}
+                                  </Badge>
+                                </div>
+                                <p className="text-xs text-muted-foreground truncate mt-0.5">{m.content.substring(0, 100)}</p>
+                              </div>
+                              <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                                {formatDateTime(m.timestamp, lang)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </ScrollArea>
+                    );
+                  })()}
+                  {/* Message Stats */}
+                  {messageStats.length > 0 && (
+                    <div className="flex gap-3 mt-3 pt-3 border-t border-border/30">
+                      {messageStats.map(s => (
+                        <div key={s.status} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                          <div className={`w-1.5 h-1.5 rounded-full ${
+                            s.status === 'done' ? 'bg-emerald-500' :
+                            s.status === 'pending' ? 'bg-amber-500' :
+                            s.status === 'processing' ? 'bg-blue-500' : 'bg-gray-400'
+                          }`} />
+                          <span>{s.status}: {s.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             <div className={`grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4 min-w-0`}>
               {/* Users List - ALL users */}
               <Card className="border-border/50 overflow-hidden">
