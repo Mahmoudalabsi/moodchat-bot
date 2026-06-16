@@ -1,11 +1,10 @@
 /**
  * Telegram Bot Library - MoodChat (مود شات)
  * 
- * نظام هجين ذكي:
- * - Vercel Webhook: يستقبل الرسائل ويعالجها
+ * نظام Worker فقط:
+ * - Vercel Webhook: يستقبل الرسائل ويحفظها كـ pending
  * - Z.ai Worker: يعالج الرسائل باستخدام Z-AI SDK (الأساسي)
- * - إذا Worker غير متاح: Vercel يعالج مباشرة بـ Gemini/Pollinations
- * - لا ضياع للرسائل أبداً!
+ * - لا APIs خارجية - Z-AI SDK فقط!
  */
 
 import { db } from './db';
@@ -14,12 +13,10 @@ import { db } from './db';
 // الإعدادات
 // ============================
 
-// Hardcoded token - Vercel env sometimes returns wrong/empty value causing 401 errors
 const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
-const WORKER_TIMEOUT = 30000;
 
 // Z-AI SDK Config
 const ZAI_CONFIG = {
@@ -30,21 +27,12 @@ const ZAI_CONFIG = {
   token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
 };
 
-// Google Gemini API Config
-const GEMINI_CONFIG = {
-  apiKey: process.env.GEMINI_API_KEY || '',
-  model: 'gemini-2.0-flash',
-};
-
-// Default Gemini API key for Vercel deployment (free tier)
-const DEFAULT_GEMINI_API_KEY = 'AIzaSyA8nEh5LOPIaKh3m3mh5oXzR3g3BkSGi5I';
-
 const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
 
 قواعد أساسية:
 1- أنت خبير مطلق - لا تقول أبداً "لا أستطيع" أو "لا أقدر" أو "لا أعرف". بدلاً من ذلك قدّم أفضل إجابة ممكنة واشرح من زاوية خبير.
 2- إذا سُئلت عن شيء خارج تخصصك المعتاد، تصرف كخبير فيه وابحث عن أفضل إجابة منطقية ومفيدة.
-3- تجيب بوضوح ودقة وبأسلوب ودي ومحترم وخبير.
+3- تجيب بوضوح ودقة وبأسلوب ودي ومحترف وخبير.
 4- تتحدث بأي لغة يطلبها المستخدم.
 5- تتذكر كل شيء قاله المستخدم في المحادثة السابقة وتستخدمه في إجاباتك.
 6- كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.
@@ -112,14 +100,11 @@ async function setConfigValue(key: string, value: string): Promise<void> {
   });
 }
 
-/** هل كلمة المرور مفعلة؟ افتراضياً: نعم */
 async function isPasswordEnabled(): Promise<boolean> {
   const val = await getConfigValue('password_enabled');
-  // إذا لم يكن موجود = مفعّل افتراضياً
   return val !== 'false';
 }
 
-/** لغة البوت للمستخدم (af = عربي، en = إنجليزي) - الافتراضي عربي */
 async function getUserLang(userId: number): Promise<string> {
   try {
     const val = await getConfigValue(`user_lang_${userId}`);
@@ -177,16 +162,11 @@ async function getUserProfilePhotoUrl(userId: number): Promise<string | null> {
     const res = await telegramAPI('getUserProfilePhotos', { user_id: userId, limit: 1 });
     const photos = res?.result?.photos;
     if (!photos || photos.length === 0) return null;
-
-    // اختيار أكبر صورة (آخر عنصر)
     const photoSizes = photos[0];
     const biggest = photoSizes[photoSizes.length - 1];
-
-    // الحصول على رابط الملف
     const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${biggest.file_id}`);
     const fileData = await fileRes.json();
     if (!fileData?.ok || !fileData?.result?.file_path) return null;
-
     return `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
   } catch (err: any) {
     console.error('[Profile Photo] Error:', err?.message?.substring(0, 80));
@@ -195,7 +175,7 @@ async function getUserProfilePhotoUrl(userId: number): Promise<string | null> {
 }
 
 // ============================
-// Image Processing (VLM - Vision Language Model)
+// Image Processing - VLM via Z-AI SDK
 // ============================
 
 interface TelegramPhoto {
@@ -209,46 +189,27 @@ interface TelegramPhoto {
 /** تحميل ملف من تيليجرام وتحويله إلى base64 */
 async function downloadTelegramFile(fileId: string): Promise<{ base64: string; mimeType: string } | null> {
   try {
-    // الخطوة 1: الحصول على رابط الملف
     const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`, {
       signal: AbortSignal.timeout(10000),
     });
     const fileData = await fileRes.json();
-
     if (!fileData?.ok || !fileData?.result?.file_path) {
       console.error('[Image] Failed to get file path:', JSON.stringify(fileData).substring(0, 200));
       return null;
     }
-
     const filePath = fileData.result.file_path;
-    console.log(`[Image] Got file path: ${filePath}, size: ${fileData.result.file_size}`);
-
-    // الخطوة 2: تحميل الملف الفعلي
     const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-    console.log(`[Image] Downloading from: ${downloadUrl.substring(0, 80)}...`);
-
-    const downloadRes = await fetch(downloadUrl, {
-      signal: AbortSignal.timeout(20000),
-    });
-
-    if (!downloadRes.ok) {
-      console.error('[Image] Download failed:', downloadRes.status, downloadRes.statusText);
-      return null;
-    }
-
+    const downloadRes = await fetch(downloadUrl, { signal: AbortSignal.timeout(20000) });
+    if (!downloadRes.ok) return null;
     const arrayBuffer = await downloadRes.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     const base64 = buffer.toString('base64');
-
-    // تحديد نوع الملف
     const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg';
     const mimeTypeMap: Record<string, string> = {
       jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
       gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
     };
     const mimeType = mimeTypeMap[ext] || 'image/jpeg';
-
-    console.log(`[Image] Downloaded: ${filePath} (${buffer.length} bytes, ${mimeType})`);
     return { base64, mimeType };
   } catch (err: any) {
     console.error('[Image] Download error:', err?.message?.substring(0, 100));
@@ -256,203 +217,7 @@ async function downloadTelegramFile(fileId: string): Promise<{ base64: string; m
   }
 }
 
-/** تحليل صورة باستخدام Pollinations Vision API (مجاني - بدون مفتاح API) */
-async function analyzeImageWithPollinationsVision(
-  imageBase64: string,
-  mimeType: string,
-  userPrompt: string,
-  conversationHistory: Array<{ role: string; content: string }>,
-  lang: string
-): Promise<string> {
-  const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
-
-  // نحاول عدة نماذج مع إعادة المحاولة عند 429
-  const models = ['openai', 'mistral', 'llama'];
-  const maxRetries = 2;
-
-  for (const model of models) {
-    for (let retry = 0; retry < maxRetries; retry++) {
-      try {
-        // انتظر قبل إعادة المحاولة (لتجنب rate limit)
-        if (retry > 0) {
-          const delay = retry * 3000; // 3s, 6s
-          console.log(`[VLM-Pollinations] Waiting ${delay}ms before retry ${retry}...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-
-        console.log(`[VLM-Pollinations] Trying model: ${model} (attempt ${retry + 1})...`);
-
-        const messages = [
-          { role: 'system' as const, content: SYSTEM_PROMPT },
-          ...conversationHistory.slice(-6).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-          {
-            role: 'user' as const,
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-            ],
-          },
-        ];
-
-        const response = await fetch('https://text.pollinations.ai/openai', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(30000),
-          body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
-        });
-
-        if (response.status === 429) {
-          console.log(`[VLM-Pollinations] Model ${model}: rate limited (429), will retry...`);
-          continue; // أعد المحاولة
-        }
-
-        if (response.status === 502 || response.status === 503) {
-          console.log(`[VLM-Pollinations] Model ${model}: server error (${response.status}), will retry...`);
-          continue;
-        }
-
-        if (!response.ok) {
-          console.log(`[VLM-Pollinations] Model ${model}: HTTP ${response.status}, skipping`);
-          break; // لا تعد المحاولة مع هذا النموذج
-        }
-
-        const data = await response.json();
-        const reply = data?.choices?.[0]?.message?.content;
-
-        if (reply?.trim() && reply.trim().length > 20) {
-          // تحقق أن الرد فعلاً يحلل الصورة وليس "لا أستطيع رؤية الصور"
-          const lowerReply = reply.toLowerCase();
-          if (lowerReply.includes("can't see") || lowerReply.includes("cannot see") ||
-              lowerReply.includes("cannot view") || lowerReply.includes("can't view") ||
-              lowerReply.includes("لا أستطيع رؤية") || lowerReply.includes("لا أرى")) {
-            console.log(`[VLM-Pollinations] Model ${model}: says it can't see images, skipping`);
-            break; // هذا النموذج لا يدعم الرؤية، جرب النموذج التالي
-          }
-          console.log(`[VLM-Pollinations] ✅ Model ${model} OK (${reply.length} chars)`);
-          return reply.trim();
-        }
-      } catch (err: any) {
-        console.log(`[VLM-Pollinations] Model ${model} error: ${err?.message?.substring(0, 60)}`);
-        if (retry < maxRetries - 1) continue;
-      }
-    }
-  }
-
-  throw new Error('Pollinations Vision: no model could analyze the image');
-}
-
-/** تحليل صورة باستخدام HuggingFace Inference API */
-async function analyzeImageWithHuggingFace(
-  imageBase64: string,
-  mimeType: string,
-  lang: string
-): Promise<string> {
-  // تحويل base64 إلى Buffer
-  const imageBuffer = Buffer.from(imageBase64, 'base64');
-  const binaryData = new Uint8Array(imageBuffer);
-
-  // الحصول على HuggingFace token من قاعدة البيانات (إن وجد)
-  let hfToken = '';
-  try {
-    const cfg = await db.botConfig.findUnique({ where: { key: 'hf_api_token' } });
-    hfToken = cfg?.value || '';
-  } catch {}
-
-  // نحاول عدة نقاط نهاية (endpoints) لـ HuggingFace
-  const endpoints = [
-    {
-      url: 'https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large',
-      needsAuth: false,
-    },
-    {
-      url: 'https://router.huggingface.co/hf-inference/models/Salesforce/blip-image-captioning-large',
-      needsAuth: true,
-    },
-  ];
-
-  for (const endpoint of endpoints) {
-    // تخطي الـ endpoint إذا كان يحتاج مصادقة وليس لدينا token
-    if (endpoint.needsAuth && !hfToken) {
-      console.log(`[VLM-HuggingFace] Skipping ${endpoint.url.substring(0, 50)}... (needs HF token)`);
-      continue;
-    }
-
-    try {
-      console.log(`[VLM-HuggingFace] Trying: ${endpoint.url.substring(0, 60)}...`);
-
-      const headers: Record<string, string> = { 'Content-Type': mimeType };
-      if (hfToken && endpoint.needsAuth) {
-        headers['Authorization'] = `Bearer ${hfToken}`;
-      }
-
-      const response = await fetch(endpoint.url, {
-        method: 'POST',
-        headers,
-        signal: AbortSignal.timeout(25000),
-        body: binaryData,
-      });
-
-      // إذا النموذج بارد (cold start)، ننتظر وأعد المحاولة
-      if (response.status === 503) {
-        const data = await response.json().catch(() => ({}));
-        const waitTime = data?.estimated_time || 15;
-        console.log(`[VLM-HuggingFace] Model loading (cold start), waiting ${waitTime}s...`);
-        await new Promise(resolve => setTimeout(resolve, Math.min(waitTime * 1000, 20000)));
-
-        const retryHeaders: Record<string, string> = { 'Content-Type': mimeType };
-        if (hfToken && endpoint.needsAuth) {
-          retryHeaders['Authorization'] = `Bearer ${hfToken}`;
-        }
-
-        const retryResponse = await fetch(endpoint.url, {
-          method: 'POST',
-          headers: retryHeaders,
-          signal: AbortSignal.timeout(25000),
-          body: binaryData,
-        });
-
-        if (!retryResponse.ok) {
-          console.log(`[VLM-HuggingFace] Retry failed: ${retryResponse.status}`);
-          continue;
-        }
-
-        const retryData = await retryResponse.json();
-        const caption = retryData?.[0]?.generated_text;
-        if (caption?.trim()) {
-          console.log(`[VLM-HuggingFace] ✅ BLIP caption (retry): ${caption.substring(0, 80)}`);
-          return caption.trim();
-        }
-        continue;
-      }
-
-      if (response.status === 401) {
-        console.log(`[VLM-HuggingFace] Auth required, trying next endpoint...`);
-        continue;
-      }
-
-      if (!response.ok) {
-        console.log(`[VLM-HuggingFace] Failed: ${response.status}`);
-        continue;
-      }
-
-      const data = await response.json();
-      const caption = data?.[0]?.generated_text;
-      if (caption?.trim()) {
-        console.log(`[VLM-HuggingFace] ✅ BLIP caption: ${caption.substring(0, 80)}`);
-        return caption.trim();
-      }
-      console.log(`[VLM-HuggingFace] Empty response: ${JSON.stringify(data).substring(0, 100)}`);
-      continue;
-    } catch (err: any) {
-      console.log(`[VLM-HuggingFace] Error: ${err?.message?.substring(0, 80)}`);
-      continue;
-    }
-  }
-
-  throw new Error('HuggingFace: all endpoints failed');
-}
-
-/** تحليل صورة باستخدام VLM عبر Z-AI SDK (يعمل فقط داخل شبكة Z.ai) */
+/** تحليل صورة باستخدام Z-AI SDK VLM */
 async function analyzeImageWithVLM(
   imageBase64: string,
   mimeType: string,
@@ -465,17 +230,11 @@ async function analyzeImageWithVLM(
     const ZAIClass = ZAIModule.default;
     const zai = new ZAIClass(ZAI_CONFIG);
 
+    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
+
     const imageContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-      {
-        type: 'text',
-        text: userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see'),
-      },
-      {
-        type: 'image_url',
-        image_url: {
-          url: `data:${mimeType};base64,${imageBase64}`,
-        },
-      },
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
     ];
 
     const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [
@@ -484,215 +243,32 @@ async function analyzeImageWithVLM(
       { role: 'user', content: imageContent },
     ];
 
-    const completion = await zai.chat.completions.createVision({
-      model: 'glm-4v-plus',
-      messages: messages as any,
-      thinking: { type: 'disabled' },
-    });
-
-    const reply = completion?.choices?.[0]?.message?.content;
-    if (reply?.trim()) {
-      console.log('[VLM] Z-AI SDK OK');
-      return reply.trim();
+    // إعادة المحاولة 3 مرات
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const completion = await zai.chat.completions.createVision({
+          model: 'glm-4v-plus',
+          messages: messages as any,
+          thinking: { type: 'disabled' },
+        });
+        const reply = completion?.choices?.[0]?.message?.content;
+        if (reply?.trim()) {
+          console.log('[VLM] Z-AI SDK OK');
+          return reply.trim();
+        }
+      } catch (err: any) {
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
     }
     throw new Error('Empty VLM response');
   } catch (err: any) {
     console.error('[VLM] Z-AI SDK error:', err?.message?.substring(0, 100));
     throw new Error(`VLM: ${err?.message?.substring(0, 80)}`);
   }
-}
-
-/** تحليل صورة باستخدام Gemini Vision API (يدعم عدة نماذج) */
-async function analyzeImageWithGemini(
-  imageBase64: string,
-  mimeType: string,
-  userPrompt: string,
-  lang: string
-): Promise<string> {
-  // Priority: env variable > database config > default key
-  let apiKey = GEMINI_CONFIG.apiKey;
-  if (!apiKey) {
-    try {
-      const cfg = await db.botConfig.findUnique({ where: { key: 'gemini_api_key' } });
-      apiKey = cfg?.value || '';
-    } catch {}
-  }
-  if (!apiKey) {
-    apiKey = DEFAULT_GEMINI_API_KEY;
-  }
-  if (!apiKey) throw new Error('No Gemini API key for vision');
-
-  // تجربة عدة نماذج Gemini - بعضها قد يكون له حصة مختلفة
-  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite'];
-
-  for (const model of models) {
-    try {
-      console.log(`[VLM-Gemini] Trying model: ${model}...`);
-      const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
-      const body = {
-        contents: [{
-          role: 'user',
-          parts: [
-            { text: prompt },
-            { inlineData: { mimeType, data: imageBase64 } },
-          ],
-        }],
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1500 },
-      };
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(30000),
-          body: JSON.stringify(body),
-        }
-      );
-
-      if (response.status === 429) {
-        console.log(`[VLM-Gemini] Model ${model}: quota exceeded (429), trying next...`);
-        continue; // حاول النموذج التالي
-      }
-
-      if (!response.ok) {
-        console.log(`[VLM-Gemini] Model ${model}: HTTP ${response.status}`);
-        continue;
-      }
-
-      const data = await response.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (reply?.trim()) {
-        console.log(`[VLM-Gemini] ✅ ${model} OK`);
-        return reply.trim();
-      }
-    } catch (err: any) {
-      console.log(`[VLM-Gemini] Model ${model} error: ${err?.message?.substring(0, 60)}`);
-      continue;
-    }
-  }
-
-  throw new Error('All Gemini models failed (quota or error)');
-}
-
-/** توسيع وصف الصورة البسيط باستخدام Pollinations text API */
-async function elaborateImageCaption(
-  caption: string,
-  userPrompt: string,
-  conversationHistory: Array<{ role: string; content: string }>,
-  lang: string
-): Promise<string> {
-  try {
-    const systemMsg = lang === 'ar'
-      ? `${SYSTEM_PROMPT}\n\nمعلومات إضافية: تم تحليل الصورة بواسطة نموذج الرؤية ووصفها كالتالي: "${caption}". استخدم هذا الوصف كأساس ووسّعه وأضف تفاصيل وتحليلاً أكثر عمقاً بناءً على طلب المستخدم.`
-      : `${SYSTEM_PROMPT}\n\nAdditional info: The image was analyzed by a vision model and described as: "${caption}". Use this description as a base and expand it with more details and deeper analysis based on the user's request.`;
-
-    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل' : 'Analyze this image in detail');
-
-    const messages = [
-      { role: 'system' as const, content: systemMsg },
-      ...conversationHistory.slice(-6).map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      { role: 'user' as const, content: prompt },
-    ];
-
-    const response = await fetch('https://text.pollinations.ai/openai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(20000),
-      body: JSON.stringify({ model: 'openai', messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
-    });
-
-    if (!response.ok) throw new Error(`Pollinations ${response.status}`);
-    const data = await response.json();
-    const reply = data?.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty Pollinations response');
-  } catch (err: any) {
-    // إذا فشل التوسيع، أعد الوصف الأساسي على الأقل
-    console.log(`[VLM-Elaborate] Failed: ${err?.message?.substring(0, 60)}, returning basic caption`);
-    return caption;
-  }
-}
-
-/** تحليل صورة - سلسلة متعددة المزودين */
-async function analyzeImage(
-  imageBase64: string | null,
-  mimeType: string,
-  userPrompt: string,
-  conversationHistory: Array<{ role: string; content: string }>,
-  lang: string,
-  imageUrl?: string | null
-): Promise<{ reply: string; provider: string }> {
-  const errors: string[] = [];
-
-  if (!imageBase64) {
-    return {
-      reply: lang === 'ar'
-        ? '📸 للأسف لم أتمكن من تحميل الصورة. يرجى المحاولة مرة أخرى.'
-        : '📸 Could not download the image. Please try again.',
-      provider: 'vlm-no-image',
-    };
-  }
-
-  // المحاولة 1: Pollinations Vision (مجاني - بدون مفتاح - يعمل من Vercel)
-  try {
-    console.log('[VLM] Attempting Pollinations Vision...');
-    const reply = await analyzeImageWithPollinationsVision(imageBase64, mimeType, userPrompt, conversationHistory, lang);
-    console.log('[VLM] ✅ Pollinations Vision OK');
-    return { reply, provider: 'vlm-pollinations' };
-  } catch (err: any) {
-    const errMsg = err?.message?.substring(0, 80) || String(err);
-    console.error(`[VLM] ❌ Pollinations Vision failed: ${errMsg}`);
-    errors.push(`Pollinations: ${errMsg}`);
-  }
-
-  // المحاولة 2: HuggingFace BLIP + Pollinations (مجاني - بدون مفتاح)
-  try {
-    console.log('[VLM] Attempting HuggingFace BLIP...');
-    const caption = await analyzeImageWithHuggingFace(imageBase64, mimeType, lang);
-    console.log(`[VLM] BLIP caption: "${caption.substring(0, 60)}" - elaborating...`);
-    // توسيع الوصف باستخدام Pollinations text
-    const reply = await elaborateImageCaption(caption, userPrompt, conversationHistory, lang);
-    console.log('[VLM] ✅ HuggingFace+Pollinations OK');
-    return { reply, provider: 'vlm-hf+pollinations' };
-  } catch (err: any) {
-    const errMsg = err?.message?.substring(0, 80) || String(err);
-    console.error(`[VLM] ❌ HuggingFace failed: ${errMsg}`);
-    errors.push(`HuggingFace: ${errMsg}`);
-  }
-
-  // المحاولة 3: Gemini Vision (يحتاج مفتاح API صالح)
-  try {
-    console.log('[VLM] Attempting Gemini Vision...');
-    const reply = await analyzeImageWithGemini(imageBase64, mimeType, userPrompt, lang);
-    console.log('[VLM] ✅ Gemini Vision OK');
-    return { reply, provider: 'vlm-gemini' };
-  } catch (err: any) {
-    const errMsg = err?.message?.substring(0, 80) || String(err);
-    console.error(`[VLM] ❌ Gemini Vision failed: ${errMsg}`);
-    errors.push(`Gemini: ${errMsg}`);
-  }
-
-  // المحاولة 4: Z-AI SDK VLM (يعمل فقط محلياً داخل شبكة Z.ai)
-  try {
-    console.log('[VLM] Attempting Z-AI SDK VLM...');
-    const reply = await analyzeImageWithVLM(imageBase64, mimeType, userPrompt, conversationHistory, lang);
-    console.log('[VLM] ✅ Z-AI VLM OK');
-    return { reply, provider: 'vlm-zsdk' };
-  } catch (err: any) {
-    const errMsg = err?.message?.substring(0, 80) || String(err);
-    console.error(`[VLM] ❌ Z-AI VLM failed: ${errMsg}`);
-    errors.push(`Z-AI VLM: ${errMsg}`);
-  }
-
-  console.error(`[VLM] ❌ All vision providers failed: ${errors.join(' | ')}`);
-  return {
-    reply: lang === 'ar'
-      ? '📸 للأسف لم أتمكن من تحليل الصورة حالياً.\n\n💡 نصيحة للمدير: أرسل الأمر:\n`/setgeminikey مفتح_الـAPI`\n\nاحصل على مفتح مجاني من Google AI Studio:\nhttps://aistudio.google.com/apikey'
-      : '📸 Sorry, I could not analyze the image right now.\n\n💡 Admin tip: Send the command:\n`/setgeminikey YOUR_API_KEY`\n\nGet a free key from Google AI Studio:\nhttps://aistudio.google.com/apikey',
-    provider: 'vlm-fallback',
-  };
 }
 
 // ============================
@@ -706,14 +282,11 @@ function settingsKeyboard(isAdminUser: boolean, passwordEnabled: boolean, userLa
       { text: userLang === 'ar' ? '🌍 اللغة' : '🌍 Language', callback_data: 'settings:lang' },
     ],
   ];
-
-  // أزرار الأدمن فقط
   if (isAdminUser) {
     buttons.push([
       { text: passwordEnabled ? '🔓 إلغاء كلمة المرور' : '🔒 تفعيل كلمة المرور', callback_data: `settings:toggle_password` },
     ]);
   }
-
   return { inline_keyboard: buttons };
 }
 
@@ -729,185 +302,6 @@ function langKeyboard() {
 }
 
 // ============================
-// AI Providers (Vercel fallback)
-// ============================
-
-async function callZaiSDK(messages: Array<{ role: string; content: string }>): Promise<string> {
-  try {
-    const ZAIModule = await import('z-ai-web-dev-sdk');
-    const ZAIClass = ZAIModule.default;
-    const zai = new ZAIClass(ZAI_CONFIG);
-    const completion = await zai.chat.completions.create({
-      messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-      model: 'glm-4-plus',
-      temperature: 0.7,
-      max_tokens: 800,
-      thinking: { type: 'disabled' },
-    });
-    const reply = completion?.choices?.[0]?.message?.content;
-    if (reply?.trim()) {
-      console.log('[AI] Z-AI SDK OK');
-      return reply.trim();
-    }
-    throw new Error('Empty Z-AI response');
-  } catch (err: any) {
-    throw new Error(`ZAI SDK: ${err?.message?.substring(0, 80)}`);
-  }
-}
-
-async function callGeminiDirect(messages: Array<{ role: string; content: string }>): Promise<string> {
-  let apiKey = GEMINI_CONFIG.apiKey;
-  if (!apiKey) {
-    try {
-      const cfg = await db.botConfig.findUnique({ where: { key: 'gemini_api_key' } });
-      apiKey = cfg?.value || '';
-    } catch {}
-  }
-  if (!apiKey) {
-    apiKey = DEFAULT_GEMINI_API_KEY;
-  }
-  if (!apiKey) throw new Error('No Gemini API key');
-
-  // تجربة عدة نماذج - بعضها قد يكون له حصة مختلفة
-  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite'];
-
-  for (const model of models) {
-    try {
-      const contents = messages
-        .filter(m => m.role !== 'system')
-        .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
-      const systemInstruction = messages.find(m => m.role === 'system');
-      const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 800 } };
-      if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
-
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000), body: JSON.stringify(body) }
-      );
-
-      if (response.status === 429) {
-        console.log(`[AI] Gemini ${model}: quota exceeded (429), trying next model...`);
-        continue; // حاول النموذج التالي
-      }
-
-      if (!response.ok) {
-        console.log(`[AI] Gemini ${model}: HTTP ${response.status}`);
-        continue;
-      }
-
-      const data = await response.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (reply?.trim()) { console.log(`[AI] Gemini ${model} OK`); return reply.trim(); }
-    } catch (err: any) {
-      console.log(`[AI] Gemini ${model} error: ${err?.message?.substring(0, 40)}`);
-      continue;
-    }
-  }
-  throw new Error('All Gemini models failed');
-}
-
-async function callPollinationsOpenAI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const models = ['openai', 'mistral', 'llama'];
-  
-  for (const model of models) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        // انتظر قبل إعادة المحاولة
-        if (attempt > 0) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 2000));
-        }
-        
-        const response = await fetch('https://text.pollinations.ai/openai', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(20000),
-          body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
-        });
-        if (response.status === 429) {
-          console.log(`[AI] Pollinations ${model}: 429 rate limit, retry ${attempt + 1}...`);
-          continue; // أعد المحاولة مع نفس النموذج
-        }
-        if (response.status === 502 || response.status === 503) {
-          console.log(`[AI] Pollinations ${model}: ${response.status}, retry ${attempt + 1}...`);
-          continue;
-        }
-        if (!response.ok) {
-          console.log(`[AI] Pollinations ${model}: HTTP ${response.status}`);
-          break; // خطأ مختلف - جرب النموذج التالي
-        }
-        const data = await response.json();
-        const reply = data.choices?.[0]?.message?.content;
-        if (reply?.trim()) { console.log(`[AI] Pollinations ${model} OK`); return reply.trim(); }
-      } catch (err: any) {
-        console.log(`[AI] Pollinations ${model} error: ${err?.message?.substring(0, 40)}`);
-        if (attempt < 2) continue;
-      }
-    }
-  }
-  throw new Error('Pollinations failed');
-}
-
-async function callCustomAPI(messages: Array<{ role: string; content: string }>, config: { baseUrl: string; apiKey: string; model: string }): Promise<string> {
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
-    signal: AbortSignal.timeout(15000),
-    body: JSON.stringify({ model: config.model, messages, temperature: 0.7, max_tokens: 800 }),
-  });
-  if (!response.ok) throw new Error(`Custom ${response.status}`);
-  const data = await response.json();
-  const reply = data.choices?.[0]?.message?.content;
-  if (reply?.trim()) return reply.trim();
-  throw new Error('Empty custom');
-}
-
-// Vercel Fallback
-async function getAIResponseFallback(
-  messages: Array<{ role: string; content: string }>,
-  config: { provider: string; baseUrl?: string; apiKey?: string; model?: string }
-): Promise<{ reply: string; provider: string }> {
-  const errors: string[] = [];
-
-  const providers: Array<{ name: string; fn: () => Promise<string> }> = [
-    { name: 'zai-sdk', fn: () => callZaiSDK(messages) },
-    { name: 'gemini', fn: () => callGeminiDirect(messages) },
-    { name: 'pollinations', fn: () => callPollinationsOpenAI(messages) },
-  ];
-
-  if (config.provider === 'api' && config.baseUrl && config.apiKey) {
-    providers.push({ name: 'custom-api', fn: () => callCustomAPI(messages, { baseUrl: config.baseUrl!, apiKey: config.apiKey!, model: config.model || 'gpt-4' }) });
-  }
-
-  for (const provider of providers) {
-    try {
-      const reply = await provider.fn();
-      return { reply, provider: provider.name };
-    } catch (err: any) {
-      errors.push(`${provider.name}: ${err?.message?.substring(0, 40)}`);
-    }
-  }
-
-  console.log('[AI Fallback] All failed:', errors.join(' | '));
-  const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
-  return { reply: generateSmartFallback(lastUserMsg), provider: 'fallback' };
-}
-
-function generateSmartFallback(userMessage: string): string {
-  const msg = userMessage.toLowerCase().trim();
-  if (/^(مرحبا|سلام|هلا|اهلا|السلام|أهلا|مرحباً|هاي|صباح|مساء)/.test(msg))
-    return "وعليكم السلام ورحمة الله وبركاته!\n\nأهلاً وسهلاً بك في مود شات. كيف يمكنني مساعدتك اليوم؟";
-  if (/^(كيف|شلون|شخبار|عامل|كيفك)/.test(msg))
-    return "الحمد لله بخير! كيف حالك أنت؟ أتمنى أن تكون بخير وعافية.";
-  if (/^(شكرا|شكراً|مشكور|تسلم|الله يجزاك)/.test(msg))
-    return "العفو! لا شكر على واجب. أنا هنا لمساعدتك دائماً.";
-  if (/^(من أنت|مين أنت|اسمك|عرف نفسك)/.test(msg))
-    return "أنا مود شات، مساعدك الذكي! يمكنني مساعدتك في الإجابة على أسئلتك والمحادثة بأي لغة تريدها.";
-  if (/^(ساعدني|محتاج مساعدة|help|مساعدة)/.test(msg))
-    return "بالطبع! أنا هنا لمساعدتك. أخبرني بما تحتاج وسأبذل قصارى جهدي لمساعدتك.";
-  return "عذراً، الخوادم مشغولة حالياً. جرب مرة أخرى خلال دقيقة.\n\n/clear - مسح الذاكرة\n/help - المساعدة\n\n💡 **للمدير:** إذا استمرت المشكلة، أرسل:\n`/setgeminikey مفتح_الـAPI`\nمن https://aistudio.google.com/apikey";
-}
-
-// ============================
 // User Management
 // ============================
 
@@ -915,35 +309,20 @@ async function getOrCreateUser(u: { id: number; username?: string; first_name?: 
   const result = await db.telegramUser.upsert({
     where: { userId: u.id },
     create: {
-      userId: u.id,
-      username: u.username || null,
-      firstName: u.first_name || null,
-      lastName: u.last_name || null,
-      languageCode: u.language_code || null,
-      isBot: u.is_bot || false,
-      totalMessages: 1,
-      isApproved: isAdmin(u.id),
-      approvedAt: isAdmin(u.id) ? new Date() : null,
-      waitingForPassword: false,
+      userId: u.id, username: u.username || null, firstName: u.first_name || null,
+      lastName: u.last_name || null, languageCode: u.language_code || null,
+      isBot: u.is_bot || false, totalMessages: 1, isApproved: isAdmin(u.id),
+      approvedAt: isAdmin(u.id) ? new Date() : null, waitingForPassword: false,
     },
     update: { username: u.username || null, firstName: u.first_name || null, lastName: u.last_name || null, totalMessages: { increment: 1 } },
   });
-
-  // جلب صورة البروفايل إذا لم تكن محفوظة (بشكل غير متزامن)
   if (!result.photoUrl) {
     getUserProfilePhotoUrl(u.id).then(async (photoUrl) => {
       if (photoUrl) {
-        try {
-          await db.telegramUser.update({
-            where: { userId: u.id },
-            data: { photoUrl },
-          });
-          console.log(`[Bot] Saved profile photo for user ${u.id}`);
-        } catch {}
+        try { await db.telegramUser.update({ where: { userId: u.id }, data: { photoUrl } }); } catch {}
       }
-    }).catch(() => {}); // تجاهل الأخطاء
+    }).catch(() => {});
   }
-
   return result;
 }
 
@@ -967,7 +346,7 @@ export async function handleTelegramUpdate(update: {
 }) {
   try {
     // ============================
-    // معالجة الأزرار التفاعلية (Callback Query)
+    // معالجة الأزرار التفاعلية
     // ============================
     if (update.callback_query) {
       await handleCallbackQuery(update.callback_query);
@@ -977,41 +356,30 @@ export async function handleTelegramUpdate(update: {
     const message = update.message;
     if (!message?.from) return { ok: true };
 
-    // تحديد نوع الرسالة: نص أو صورة
     const hasPhoto = !!(message.photo && message.photo.length > 0);
     const hasText = !!(message.text?.trim());
     const hasCaption = !!(message.caption?.trim());
-
-    // إذا لا يوجد نص ولا صورة - تجاهل
     if (!hasText && !hasPhoto) return { ok: true };
 
     const userId = message.from.id;
     const chatId = message.chat.id;
     const text = (message.text || message.caption || '').trim();
     const isAdm = isAdmin(userId);
-    const isCommand = hasText && message.text!.startsWith('/'); // الأوامر فقط من الرسائل النصية
-
-    // جلب إعداد كلمة المرور
     const passwordEnabled = await isPasswordEnabled();
-
-    // إنشاء أو تحديث المستخدم
     const user = await getOrCreateUser(message.from);
 
-    // إذا كلمة المرور معطلة والمستخدم غير مفعل وغير محظور => فعّله تلقائياً
     if (!passwordEnabled && !user.isApproved && !user.isBlocked && !isAdm) {
       await db.telegramUser.update({
-        where: { userId },
-        data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false },
+        where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false },
       });
       user.isApproved = true;
       user.waitingForPassword = false;
-      console.log(`[Bot] User ${userId} auto-approved (password disabled)`);
     }
 
-    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} waiting:${user.waitingForPassword} admin:${isAdm} pwEnabled:${passwordEnabled} | ${hasPhoto ? '📸 IMAGE' : 'msg'}: "${text.substring(0, 40)}"`);
+    console.log(`[Bot] User ${userId} (${user.firstName}) | approved:${user.isApproved} blocked:${user.isBlocked} admin:${isAdm} | ${hasPhoto ? '📸 IMAGE' : 'msg'}: "${text.substring(0, 40)}"`);
 
     // ==========================================
-    // 1) المستخدم المحظور - لا يمكنه فعل أي شيء
+    // المستخدم المحظور
     // ==========================================
     if (user.isBlocked) {
       await sendMessage(chatId, "🚫 تم حظرك من استخدام هذا البوت.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
@@ -1019,113 +387,55 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // 2) معالجة الصور - أولوية قصوى للمستخدم المفعل
+    // معالجة الصور - حفظ كـ pending للـ Worker
     // ==========================================
     if (hasPhoto && !user.isBlocked && (user.isApproved || isAdm)) {
       try {
-        console.log(`[Bot] 📸 IMAGE received from user ${userId} - processing...`);
         const userLang = await getUserLang(userId);
         const photoArray = message.photo!;
         const bestPhoto = photoArray[photoArray.length - 1];
         const caption = message.caption?.trim() || '';
 
-        console.log(`[Bot] Image: fileId=${bestPhoto.file_id}, size=${bestPhoto.file_size}, caption="${caption.substring(0, 50)}"`);
-
         await sendChatAction(chatId);
 
-        // الخطوة 1: تحميل الصورة كـ base64 (الطريقة الأكثر موثوقية مع VLM)
-        // VLM API لا يقرأ روابط Telegram المباشرة لأنها ترجع Content-Disposition: attachment
-        let imageData: { base64: string; mimeType: string } | null = null;
-        const imageSize = bestPhoto.file_size || 0;
-        const SMALL_IMAGE_LIMIT = 5 * 1024 * 1024; // 5MB - Vercel serverless limit
-
-        // نحاول تحميل الصورة كـ base64 دائماً (هذه الطريقة الوحيدة المضمونة مع VLM)
-        console.log('[Bot] Downloading image as base64 for VLM analysis...');
-        imageData = await downloadTelegramFile(bestPhoto.file_id);
-        if (imageData) {
-          console.log(`[Bot] ✅ Image downloaded as base64: ${imageData.base64.length} chars, ${imageData.mimeType}`);
-        } else {
-          console.warn('[Bot] ⚠️ Base64 download failed');
-        }
-
-        // إذا فشل التحميل - أرسل رسالة خطأ
-        if (!imageData) {
-          console.error('[Bot] ❌ Image download failed');
-          await sendMessage(chatId, userLang === 'ar'
-            ? '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.'
-            : '❌ Could not download the image. Please try again.');
-          return { ok: true, mode: 'image-download-failed' };
-        }
-
-        // حفظ رسالة المستخدم في السجل
+        // حفظ رسالة المستخدم كـ pending مع بيانات الصورة
         const userContent = caption || (userLang === 'ar' ? '📷 [صورة]' : '📷 [Image]');
-        // لا نحفظ imageUrl المباشر من Telegram لأنه لا يعمل في المتصفح
         await db.message.create({
-          data: { userId, role: 'user', content: userContent, modelUsed: 'vlm', status: 'done', chatId },
+          data: {
+            userId, role: 'user', content: userContent,
+            modelUsed: 'vlm', status: 'pending', chatId,
+            // حفظ file_id في حقل imageUrl لكي يعالجها الـ Worker
+            imageUrl: bestPhoto.file_id,
+          },
         });
 
-        // جلب سجل المحادثة السابقة
-        const dbMessages = await db.message.findMany({
-          where: { userId, status: 'done' },
-          orderBy: { timestamp: 'asc' },
-          take: MAX_HISTORY,
-          select: { role: true, content: true },
-        });
-
-        const conversationHistory = dbMessages.map(m => ({ role: m.role, content: m.content }));
-
-        console.log(`[Bot] Starting VLM analysis... (base64=${!!imageData?.base64})`);
-
-        // تحليل الصورة باستخدام VLM - base64 فقط (URL المباشر من Telegram لا يعمل مع VLM API)
-        const { reply, provider } = await analyzeImage(
-          imageData?.base64 || null,
-          imageData?.mimeType || 'image/jpeg',
-          caption,
-          conversationHistory,
-          userLang,
-          null // لا نمرر URL المباشر - VLM API لا يستطيع قراءة ملفات Telegram
-        );
-
-        console.log(`[Bot] ✅ VLM analysis complete: provider=${provider}, reply length=${reply.length}`);
-
-        // حفظ رد البوت
-        await db.message.create({
-          data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
-        });
-
-        await sendMessage(chatId, sanitizeMarkdown(reply));
-        return { ok: true, mode: 'image-analysis', provider };
+        console.log(`[Bot] 📸 Image saved as pending for Worker. fileId=${bestPhoto.file_id}`);
+        return { ok: true, mode: 'image-pending' };
       } catch (imgErr: any) {
-        console.error('[Bot] ❌ Image processing error:', imgErr?.message || String(imgErr), imgErr?.stack?.substring(0, 200));
-        // في حالة فشل معالجة الصورة، أرسل رسالة خطأ للمستخدم
+        console.error('[Bot] Image save error:', imgErr?.message);
         try {
-          const userLang = await getUserLang(userId);
-          await sendMessage(chatId, userLang === 'ar'
-            ? '📸 حدث خطأ أثناء تحليل الصورة. حاول مرة أخرى.'
-            : '📸 An error occurred while analyzing the image. Please try again.');
+          await sendMessage(chatId, '📸 حدث خطأ أثناء حفظ الصورة. حاول مرة أخرى.');
         } catch {}
-        return { ok: true, mode: 'image-error', error: imgErr?.message };
+        return { ok: true, mode: 'image-error' };
       }
     }
 
-    // إذا ما فيه نص - لا شيء بعد الآن (الصورة عُولجت أو لا يوجد صورة)
     if (!hasText) return { ok: true, info: 'photo-processed-or-no-text' };
 
     // ==========================================
-    // 3) الأدمن - صلاحيات كاملة بدون كلمة مرور
+    // الأدمن - صلاحيات كاملة
     // ==========================================
     if (isAdm) {
-      // التأكد أن الأدمن مفعل دائماً
       if (!user.isApproved) {
         await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/setgeminikey [key] - تعيين مفتح Gemini API للصور\n/sethfkey [token] - تعيين HuggingFace token للصور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -1142,16 +452,10 @@ export async function handleTelegramUpdate(update: {
         const tid = parseInt(text.split(' ')[1]);
         if (tid) {
           const unblockData: Record<string, unknown> = { isBlocked: false, isApproved: false, joinAttempts: 0 };
-          // إذا كلمة المرور معطلة، فعّله مباشرة
-          if (!passwordEnabled) {
-            unblockData.isApproved = true;
-            unblockData.approvedAt = new Date();
-            unblockData.waitingForPassword = false;
-          } else {
-            unblockData.waitingForPassword = true;
-          }
+          if (!passwordEnabled) { unblockData.isApproved = true; unblockData.approvedAt = new Date(); unblockData.waitingForPassword = false; }
+          else { unblockData.waitingForPassword = true; }
           await db.telegramUser.update({ where: { userId: tid }, data: unblockData });
-          await sendMessage(chatId, `تم إلغاء حظر \`${tid}\`${!passwordEnabled ? ' - مفعل تلقائياً (كلمة المرور معطلة)' : ' - يجب عليه إدخال كلمة المرور مجدداً'}`);
+          await sendMessage(chatId, `تم إلغاء حظر \`${tid}\``);
         }
         return { ok: true };
       }
@@ -1173,140 +477,73 @@ export async function handleTelegramUpdate(update: {
         else await sendMessage(chatId, "كلمة المرور يجب أن تكون 3 أحرف على الأقل");
         return { ok: true };
       }
-      // أمر /setgeminikey - تعيين مفتح Gemini API جديد
-      if (text.startsWith('/setgeminikey ')) {
-        const newKey = text.replace('/setgeminikey ', '').trim();
-        if (newKey.length >= 20) {
-          await db.botConfig.upsert({ where: { key: 'gemini_api_key' }, update: { value: newKey }, create: { key: 'gemini_api_key', value: newKey } });
-          clearAIConfigCache(); // تحديث الكاش
-          await sendMessage(chatId, `✅ تم تعيين مفتح Gemini API الجديد بنجاح!\n\nالآن تحليل الصور سيعمل باستخدام Gemini Vision.`);
-        } else {
-          await sendMessage(chatId, "❌ مفتح API غير صالح. يجب أن يكون 20 حرف على الأقل.\n\nاحصل على مفتح مجاني من: https://aistudio.google.com/apikey");
-        }
-        return { ok: true };
-      }
-      // أمر /sethfkey - تعيين HuggingFace API token
-      if (text.startsWith('/sethfkey ')) {
-        const newToken = text.replace('/sethfkey ', '').trim();
-        if (newToken.length >= 20) {
-          await db.botConfig.upsert({ where: { key: 'hf_api_token' }, update: { value: newToken }, create: { key: 'hf_api_token', value: newToken } });
-          await sendMessage(chatId, `✅ تم تعيين HuggingFace token الجديد!\n\nالآن تحليل الصور سيعمل باستخدام HuggingFace BLIP.`);
-        } else {
-          await sendMessage(chatId, "❌ Token غير صالح. يجب أن يكون 20 حرف على الأقل.\n\nاحصل على token مجاني من: https://huggingface.co/settings/tokens");
-        }
-        return { ok: true };
-      }
-      // أمر /settings للأدمن
       if (text === '/settings') {
         const pwEnabled = await isPasswordEnabled();
         const uLang = await getUserLang(userId);
         await sendMessage(chatId, "⚙️ **إعدادات البوت**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(true, pwEnabled, uLang)) });
         return { ok: true };
       }
-      // أمر /clear للأدمن أيضاً
       if (text === '/clear') {
         await db.message.deleteMany({ where: { userId } });
         await sendMessage(chatId, "تم مسح سجل محادثتك.");
         return { ok: true };
       }
-      // الأدمن يقدر يتكلم مع AI مباشرة
-      // (يقع في قسم المحادثة أدناه)
     }
 
     // ==========================================
-    // 3) المستخدم غير المفعل (غير الأدمن) - نظام كلمة المرور
+    // المستخدم غير المفعل (غير الأدمن) - نظام كلمة المرور
     // ==========================================
     if (!user.isApproved && !isAdm) {
-      // أمر /start
       if (text === '/start') {
         if (passwordEnabled) {
-          if (!user.waitingForPassword) {
-            await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } });
-          }
+          if (!user.waitingForPassword) { await db.telegramUser.update({ where: { userId }, data: { waitingForPassword: true } }); }
           await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nلتفعيل حسابك والمحادثة مع الذكاء الاصطناعي، أرسل كلمة المرور:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
         } else {
-          // كلمة المرور معطلة - فعّل تلقائياً
-          await db.telegramUser.update({
-            where: { userId },
-            data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false }
-          });
-          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات\n\n📸 **أرسل أي صورة وسأحللها لك!**");
+          await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
+          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         }
         return { ok: true };
       }
-
-      // أمر /settings حتى قبل التفعيل (إذا كلمة المرور معطلة)
-      if (text === '/settings' && !passwordEnabled) {
-        const uLang = await getUserLang(userId);
-        await sendMessage(chatId, "⚙️ **الإعدادات**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(false, passwordEnabled, uLang)) });
-        return { ok: true };
-      }
-
-      // أي أمر ثاني - اطلب كلمة المرور (فقط إذا مفعلة)
       if (text.startsWith('/')) {
-        if (passwordEnabled) {
-          await sendMessage(chatId, "🔒 أرسل كلمة المرور أولاً لتفعيل حسابك!");
-        } else {
-          await sendMessage(chatId, "أرسل /start للبدء.");
-        }
+        await sendMessage(chatId, passwordEnabled ? "🔒 أرسل كلمة المرور أولاً لتفعيل حسابك!" : "أرسل /start للبدء.");
         return { ok: true };
       }
-
-      // تحقق من كلمة المرور (فقط إذا مفعلة)
       if (passwordEnabled) {
         const pw = await getJoinPassword();
         if (text === pw) {
-          // ✅ كلمة المرور صحيحة - فعّل الحساب
-          await db.telegramUser.update({
-            where: { userId },
-            data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false, joinAttempts: 0 }
-          });
+          await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false, joinAttempts: 0 } });
           await db.joinLog.create({ data: { userId, action: 'success' } });
-          console.log(`[Bot] User ${userId} activated successfully!`);
-          await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية - أتذكر كل محادثاتنا\n🌍 متعدد اللغات - أتحدث أي لغة\n🤖 يعمل بـ Z-AI (GLM-4 Plus)\n\nابدأ محادثتك الآن! اكتب أي شيء 🎉");
+          await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\nابدأ محادثتك الآن! 🎉");
           return { ok: true };
         } else {
-          // ❌ كلمة المرور خاطئة
           const newAttempts = (user.joinAttempts || 0) + 1;
-          await db.telegramUser.update({
-            where: { userId },
-            data: { joinAttempts: newAttempts }
-          });
+          await db.telegramUser.update({ where: { userId }, data: { joinAttempts: newAttempts } });
           await db.joinLog.create({ data: { userId, action: 'fail', passwordTried: text.substring(0, 50) } });
-
           if (newAttempts >= 5) {
-            await db.telegramUser.update({
-              where: { userId },
-              data: { isBlocked: true, waitingForPassword: false }
-            });
-            console.log(`[Bot] User ${userId} blocked after 5 failed attempts`);
-            await sendMessage(chatId, "🚫 تم حظرك بسبب 5 محاولات خاطئة متتالية.\nتواصل مع المدير إذا كنت تعتقد أن هذا خطأ.");
+            await db.telegramUser.update({ where: { userId }, data: { isBlocked: true, waitingForPassword: false } });
+            await sendMessage(chatId, "🚫 تم حظرك بسبب 5 محاولات خاطئة متتالية.");
           } else {
-            await sendMessage(chatId, `❌ كلمة المرور خاطئة!\n\nالمحاولات المتبقية: ${5 - newAttempts}/5\n\nحاول مرة أخرى:`);
+            await sendMessage(chatId, `❌ كلمة المرور خاطئة!\n\nالمحاولات المتبقية: ${5 - newAttempts}/5`);
           }
           return { ok: true };
         }
       } else {
-        // كلمة المرور معطلة لكن المستخدم غير مفعل (حالة نادرة) - فعّله
-        await db.telegramUser.update({
-          where: { userId },
-          data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false }
-        });
+        await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
         await sendMessage(chatId, "✅ تم تفعيل حسابك! ابدأ محادثتك الآن 🎉");
         return { ok: true };
       }
     }
 
     // ==========================================
-    // 4) المستخدم المفعل (غير الأدمن) - أوامر عامة
+    // المستخدم المفعل - أوامر عامة
     // ==========================================
     if (user.isApproved && !isAdm) {
       if (text === '/start') {
-        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات\n\n📸 **أرسل أي صورة وسأحللها لك!**");
+        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK | 📸 فهم الصور\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها بالتفصيل!\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات\n\nاكتب أي شيء وسأرد عليك! 🎉\nأو أرسل صورة وسأصفها لك! 📸`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI SDK\n📸 فهم الصور: أرسل صورة وسأحللها!\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
         return { ok: true };
       }
       if (text === '/clear') {
@@ -1320,58 +557,21 @@ export async function handleTelegramUpdate(update: {
         await sendMessage(chatId, "⚙️ **الإعدادات**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(false, pwEnabled, uLang)) });
         return { ok: true };
       }
-      // المحادثة مع AI تقع في القسم أدناه
     }
 
     // ==========================================
-    // 5) المحادثة مع الذكاء الاصطناعي (المستخدم المفعل + الأدمن) - نص فقط
+    // المحادثة مع الذكاء الاصطناعي - حفظ كـ pending للـ Worker
     // ==========================================
     if ((user.isApproved || isAdm) && !user.isBlocked) {
-      await sendChatAction(chatId);
-
-      // ============================
-      // معالجة الرسائل النصية العادية
-      // ============================
-      const workerAlive = await isWorkerAlive();
-
-      if (workerAlive) {
-        // ✅ الوضع الهجين: احفظ كـ "pending" والـ Worker سيعالجها بـ Z-AI SDK
-        await db.message.create({
-          data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
-        });
-        console.log(`[Webhook] Message saved as pending (worker alive). User: ${userId}`);
-        return { ok: true, mode: 'hybrid-pending' };
-      }
-
-      // ❌ Worker غير متاح: عالج مباشرة باستخدام AI fallback
-      console.log(`[Webhook] Worker offline, processing inline. User: ${userId}`);
-
+      // حفظ الرسالة كـ pending - الـ Worker سيعالجها باستخدام Z-AI SDK
       await db.message.create({
-        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
+        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
       });
-
-      const [dbMessages, config] = await Promise.all([
-        db.message.findMany({ where: { userId, status: 'done' }, orderBy: { timestamp: 'asc' }, take: MAX_HISTORY, select: { role: true, content: true } }),
-        getAIConfig(),
-      ]);
-
-      const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      ];
-
-      const { reply, provider } = await getAIResponseFallback(aiMessages, config);
-
-      await db.message.create({
-        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
-      });
-
-      await sendMessage(chatId, sanitizeMarkdown(reply));
-      return { ok: true, mode: 'inline-fallback', provider };
+      console.log(`[Bot] Message saved as pending. User: ${userId}, Worker will process with Z-AI SDK`);
+      return { ok: true, mode: 'pending' };
     }
 
-    // إذا وصلنا هنا - شيء غير متوقع
-    console.log(`[Bot] Unhandled state for user ${userId}: approved=${user.isApproved} blocked=${user.isBlocked} admin=${isAdm}`);
+    console.log(`[Bot] Unhandled state for user ${userId}`);
     await sendMessage(chatId, "أرسل /start للبدء.");
     return { ok: true };
 
@@ -1387,7 +587,7 @@ export async function handleTelegramUpdate(update: {
 }
 
 // ============================
-// معالجة الأزرار التفاعلية (Callback Queries)
+// معالجة الأزرار التفاعلية
 // ============================
 
 async function handleCallbackQuery(cb: { id: string; from: { id: number; username?: string; first_name?: string; }; data?: string; message?: { chat: { id: number }; message_id: number }; }) {
@@ -1404,9 +604,6 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
   const isAdm = isAdmin(userId);
   const uLang = await getUserLang(userId);
 
-  // ============================
-  // أزرار الإعدادات
-  // ============================
   if (data === 'settings:clear') {
     await db.message.deleteMany({ where: { userId } });
     const msg = uLang === 'ar' ? '✅ تم مسح سجل محادثتك!\n\nابدأ محادثة جديدة 🎉' : '✅ Chat history cleared!\n\nStart a new conversation 🎉';
@@ -1430,7 +627,6 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
     const current = await isPasswordEnabled();
     const newVal = !current;
     await setConfigValue('password_enabled', String(newVal));
-
     const pwEnabled = await isPasswordEnabled();
     const statusText = newVal ? '🔒 تم تفعيل كلمة المرور' : '🔓 تم إلغاء كلمة المرور';
     const settingsMsg = `✅ ${statusText}\n\n⚙️ **إعدادات البوت**\n\nاختر من القائمة:`;
@@ -1439,13 +635,9 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
     return;
   }
 
-  // ============================
-  // أزرار اللغة
-  // ============================
   if (data === 'lang:ar' || data === 'lang:en') {
     const selectedLang = data === 'lang:ar' ? 'ar' : 'en';
     await setUserLang(userId, selectedLang);
-
     const pwEnabled = await isPasswordEnabled();
     const confirmMsg = selectedLang === 'ar' ? '✅ تم تغيير اللغة إلى العربية' : '✅ Language changed to English';
     const settingsMsg = `${confirmMsg}\n\n⚙️ ${selectedLang === 'ar' ? '**إعدادات البوت**\n\nاختر من القائمة:' : '**Bot Settings**\n\nChoose from the menu:'}`;
@@ -1454,7 +646,6 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
     return;
   }
 
-  // زر غير معروف
   await telegramAPI('answerCallbackQuery', { callback_query_id: cb.id, text: 'OK' });
 }
 
@@ -1463,15 +654,26 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
 // ============================
 
 async function handleAIStatusCommand(chatId: number) {
-  let status = "**حالة مزودي AI:**\n\n";
-  const msgs = [{ role: 'user' as const, content: 'say ok' }];
-
-  try { const s = Date.now(); await callZaiSDK(msgs); status += `Z-AI SDK: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Z-AI SDK: غير متاح (يعمل من Z.ai فقط)\n`; }
-  try { const s = Date.now(); await callGeminiDirect(msgs); status += `Gemini: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Gemini: غير متاح\n`; }
-  try { const s = Date.now(); await callPollinationsOpenAI(msgs); status += `Pollinations: يعمل (${Date.now()-s}ms)\n`; } catch { status += `Pollinations: غير متاح\n`; }
-
+  let status = "**حالة Z-AI SDK:**\n\n";
+  try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = new ZAIClass(ZAI_CONFIG);
+    const s = Date.now();
+    const completion = await zai.chat.completions.create({
+      messages: [{ role: 'user', content: 'say ok' }],
+      model: 'glm-4-plus',
+      temperature: 0.7,
+      max_tokens: 50,
+      thinking: { type: 'disabled' },
+    });
+    const reply = completion?.choices?.[0]?.message?.content;
+    status += `Z-AI SDK: يعمل ✅ (${Date.now() - s}ms)\nالرد: ${reply?.substring(0, 30) || 'فارغ'}\n`;
+  } catch (err: any) {
+    status += `Z-AI SDK: غير متاح ❌ (${err?.message?.substring(0, 40)})\n`;
+  }
   const workerAlive = await isWorkerAlive();
-  status += `\nWorker: ${workerAlive ? 'يعمل ✅ (Z-AI SDK)' : 'متوقف ❌ (fallback mode)'}\nالنظام: Z-AI SDK أساسي + Gemini/Pollinations احتياطي`;
+  status += `\nWorker: ${workerAlive ? 'يعمل ✅' : 'متوقف ❌'}\nالنظام: Z-AI SDK فقط`;
   await sendMessage(chatId, status);
 }
 
@@ -1486,10 +688,7 @@ async function handleWorkerStatusCommand(chatId: number) {
     } else {
       status += 'لا توجد نبضة - Worker لم يعمل بعد';
     }
-  } catch {
-    status += 'خطأ في قراءة الحالة';
-  }
-
+  } catch { status += 'خطأ في قراءة الحالة'; }
   const pendingCount = await db.message.count({ where: { status: 'pending' } });
   status += `\n\nرسائل معلقة: ${pendingCount}`;
   await sendMessage(chatId, status);
