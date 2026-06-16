@@ -1280,6 +1280,8 @@ async function processPendingMessages() {
           const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
             { role: 'system', content: SYSTEM_PROMPT },
             ...recentHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+            // إضافة رسالة المستخدم الحالية - هذا ضروري لكي يفهم الـ AI ما الذي يُسأل عنه
+            { role: 'user', content: msg.content },
           ];
 
           reply = await callZaiSDK(aiMessages);
