@@ -416,6 +416,9 @@ export async function handleTelegramUpdate(update: {
               userId, role: 'user', content: userContent,
               modelUsed: 'vlm', status: 'pending', chatId,
               imageUrl: bestPhoto.file_id,
+              fileName: `photo_${bestPhoto.file_id.substring(0, 10)}.jpg`,
+              fileType: 'image',
+              mimeType: 'image/jpeg',
             },
           });
           console.log(`[Bot] 📸 Image saved as pending. fileId=${bestPhoto.file_id}`);
@@ -435,6 +438,9 @@ export async function handleTelegramUpdate(update: {
               userId, role: 'user', content: userContent,
               modelUsed: 'file-analyze', status: 'pending', chatId,
               imageUrl: doc.file_id,
+              fileName,
+              fileType: 'document',
+              mimeType,
             },
           });
           console.log(`[Bot] 📎 Document saved as pending. fileId=${doc.file_id} name=${fileName} mime=${mimeType}`);
@@ -452,6 +458,9 @@ export async function handleTelegramUpdate(update: {
               userId, role: 'user', content: userContent,
               modelUsed: 'voice-analyze', status: 'pending', chatId,
               imageUrl: voice.file_id,
+              fileName: `voice_${voice.file_id.substring(0, 10)}.ogg`,
+              fileType: 'voice',
+              mimeType: voice.mime_type || 'audio/ogg',
             },
           });
           console.log(`[Bot] 🎤 Voice saved as pending. fileId=${voice.file_id}`);
@@ -469,6 +478,9 @@ export async function handleTelegramUpdate(update: {
               userId, role: 'user', content: userContent,
               modelUsed: 'audio-analyze', status: 'pending', chatId,
               imageUrl: audio.file_id,
+              fileName: audio.title ? `${audio.title}.mp3` : `audio_${audio.file_id.substring(0, 10)}.mp3`,
+              fileType: 'audio',
+              mimeType: audio.mime_type || 'audio/mpeg',
             },
           });
           console.log(`[Bot] 🎵 Audio saved as pending. fileId=${audio.file_id}`);
@@ -486,6 +498,9 @@ export async function handleTelegramUpdate(update: {
               userId, role: 'user', content: userContent,
               modelUsed: 'video-analyze', status: 'pending', chatId,
               imageUrl: vid.file_id,
+              fileName: `video_${vid.file_id.substring(0, 10)}.mp4`,
+              fileType: 'video',
+              mimeType: (vid as any).mime_type || 'video/mp4',
             },
           });
           console.log(`[Bot] 🎬 Video saved as pending. fileId=${vid.file_id}`);
@@ -501,6 +516,9 @@ export async function handleTelegramUpdate(update: {
               userId, role: 'user', content: userContent,
               modelUsed: 'vlm', status: 'pending', chatId,
               imageUrl: sticker.file_id,
+              fileName: `sticker_${sticker.emoji || 'sticker'}.webp`,
+              fileType: 'sticker',
+              mimeType: sticker.is_animated ? 'application/x-tgsticker' : 'image/webp',
             },
           });
           console.log(`[Bot] 🏷️ Sticker saved as pending. fileId=${sticker.file_id}`);

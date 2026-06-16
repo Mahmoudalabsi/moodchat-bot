@@ -10,7 +10,8 @@ import {
   MessageCircle, TrendingUp, UserPlus, AlertTriangle,
   ChevronDown, ArrowLeft, Languages, Image as ImageIcon,
   Camera, X, ZoomIn, File as FileIcon, Mic, Music,
-  Video, FileText, Code as CodeIcon, Sticker as StickerIcon
+  Video, FileText, Code as CodeIcon, Sticker as StickerIcon,
+  Download, Play, Pause, FileSpreadsheet, FileType, Paperclip
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -31,15 +32,46 @@ import { useLanguage } from '@/hooks/use-language';
 import { Lang } from '@/lib/i18n';
 
 // Proxy Telegram photo URLs through our API to avoid Content-Disposition: attachment
+// Also handles Telegram file_ids (non-URL strings) by routing through /api/file-proxy
 function proxyPhotoUrl(url: string | null): string | null {
   if (!url) return null;
-  // Extract file path from Telegram file URL
-  // Format: https://api.telegram.org/file/bot<TOKEN>/<file_path>
+  // If it's already a full Telegram file URL, extract the path and use photo-proxy
   const match = url.match(/\/file\/bot[^/]+\/(.+)$/);
   if (match) {
     return `/api/photo-proxy?path=${encodeURIComponent(match[1])}`;
   }
-  return url;
+  // If it starts with http, it's already a valid URL
+  if (url.startsWith('http')) return url;
+  // Otherwise it's a Telegram file_id — route through file-proxy
+  return `/api/file-proxy?file_id=${encodeURIComponent(url)}`;
+}
+
+// Build a download URL for any file type using the file-proxy API
+function fileDownloadUrl(fileId: string): string {
+  return `/api/file-proxy?file_id=${encodeURIComponent(fileId)}&download=1`;
+}
+
+// Build a preview/display URL for any file type
+function filePreviewUrl(fileId: string | null): string | null {
+  if (!fileId) return null;
+  if (fileId.startsWith('http')) return fileId;
+  return `/api/file-proxy?file_id=${encodeURIComponent(fileId)}`;
+}
+
+// Get file type icon color based on type
+function getFileTypeColor(fileType: string | null, mimeType: string | null): string {
+  if (fileType === 'image' || fileType === 'sticker') return 'text-blue-400';
+  if (fileType === 'document') {
+    if (mimeType?.includes('pdf')) return 'text-red-400';
+    if (mimeType?.includes('word') || mimeType?.includes('docx')) return 'text-blue-500';
+    if (mimeType?.includes('sheet') || mimeType?.includes('excel') || mimeType?.includes('xlsx')) return 'text-green-500';
+    if (mimeType?.includes('text')) return 'text-gray-400';
+    return 'text-orange-400';
+  }
+  if (fileType === 'voice') return 'text-purple-400';
+  if (fileType === 'audio') return 'text-pink-400';
+  if (fileType === 'video') return 'text-red-400';
+  return 'text-muted-foreground';
 }
 
 // Types
@@ -61,6 +93,7 @@ interface User {
 interface Message {
   id: string; userId: number; role: string; content: string;
   modelUsed: string | null; timestamp: string; imageUrl: string | null;
+  fileName: string | null; fileType: string | null; mimeType: string | null;
   user?: { firstName: string | null; username: string | null; userId: number; photoUrl: string | null } | null;
 }
 
@@ -1198,14 +1231,14 @@ export default function Dashboard() {
                                 )}
                               </div>
 
-                              {/* صورة الرسالة */}
-                              {m.imageUrl && (
+                              {/* صورة الرسالة - عرض الصور والملصقات */}
+                              {m.imageUrl && (m.fileType === 'image' || m.fileType === 'sticker' || !m.fileType) && (
                                 <div className="mb-2 relative group">
                                   <img
-                                    src={m.imageUrl}
+                                    src={proxyPhotoUrl(m.imageUrl) || m.imageUrl}
                                     alt="Image"
-                                    className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity"
-                                    onClick={() => setLightboxImage(m.imageUrl!)}
+                                    className="max-w-full max-h-64 rounded-lg border border-border/50 cursor-pointer hover:opacity-90 transition-opacity object-cover"
+                                    onClick={() => setLightboxImage(proxyPhotoUrl(m.imageUrl) || m.imageUrl)}
                                     onError={(e) => {
                                       const img = e.target as HTMLImageElement;
                                       img.style.display = 'none';
@@ -1222,8 +1255,16 @@ export default function Dashboard() {
                                       </p>
                                     </div>
                                   </div>
-                                  {/* Zoom overlay on hover */}
-                                  <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  {/* Action overlay on hover */}
+                                  <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                                    <a
+                                      href={fileDownloadUrl(m.imageUrl)}
+                                      download
+                                      className="bg-black/60 rounded-full p-1.5 hover:bg-black/80 transition-colors"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <Download size={12} className="text-white" />
+                                    </a>
                                     <div className="bg-black/60 rounded-full p-1.5">
                                       <ZoomIn size={12} className="text-white" />
                                     </div>
@@ -1231,7 +1272,101 @@ export default function Dashboard() {
                                 </div>
                               )}
 
-                              {/* مؤشر صورة بدون رابط */}
+                              {/* ملف مستند (PDF, DOCX, TXT, Excel, كود, إلخ) */}
+                              {m.imageUrl && m.fileType === 'document' && (
+                                <div className="mb-2 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
+                                  <div className="flex items-center gap-3 p-3">
+                                    {/* File icon based on type */}
+                                    <div className={`flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center ${
+                                      m.mimeType?.includes('pdf') ? 'bg-red-500/15' :
+                                      m.mimeType?.includes('word') || m.mimeType?.includes('docx') ? 'bg-blue-500/15' :
+                                      m.mimeType?.includes('sheet') || m.mimeType?.includes('excel') || m.mimeType?.includes('xlsx') ? 'bg-green-500/15' :
+                                      m.mimeType?.includes('text') ? 'bg-gray-500/15' :
+                                      'bg-orange-500/15'
+                                    }`}>
+                                      {m.mimeType?.includes('pdf') ? <FileText size={20} className="text-red-400" /> :
+                                       m.mimeType?.includes('sheet') || m.mimeType?.includes('excel') || m.mimeType?.includes('xlsx') ? <FileSpreadsheet size={20} className="text-green-400" /> :
+                                       m.mimeType?.includes('word') || m.mimeType?.includes('docx') ? <FileType size={20} className="text-blue-400" /> :
+                                       m.mimeType?.includes('text') || m.mimeType?.includes('json') || m.mimeType?.includes('javascript') || m.mimeType?.includes('python') ? <CodeIcon size={20} className="text-gray-400" /> :
+                                       <FileIcon size={20} className="text-orange-400" />}
+                                    </div>
+                                    {/* File info */}
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium truncate">{m.fileName || (lang === 'ar' ? 'ملف' : 'File')}</p>
+                                      <p className="text-[10px] text-muted-foreground truncate">{m.mimeType || 'application/octet-stream'}</p>
+                                    </div>
+                                    {/* Download button */}
+                                    <a
+                                      href={fileDownloadUrl(m.imageUrl)}
+                                      download={m.fileName || undefined}
+                                      className="flex-shrink-0 p-2 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors"
+                                      title={lang === 'ar' ? 'تنزيل الملف' : 'Download file'}
+                                    >
+                                      <Download size={16} className="text-primary" />
+                                    </a>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* رسالة صوتية / ملف صوتي */}
+                              {m.imageUrl && (m.fileType === 'voice' || m.fileType === 'audio') && (
+                                <div className="mb-2 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
+                                  <div className="flex items-center gap-3 p-3">
+                                    <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
+                                      m.fileType === 'voice' ? 'bg-purple-500/15' : 'bg-pink-500/15'
+                                    }`}>
+                                      {m.fileType === 'voice' ? <Mic size={18} className="text-purple-400" /> : <Music size={18} className="text-pink-400" />}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium truncate">{m.fileName || (m.fileType === 'voice' ? (lang === 'ar' ? 'رسالة صوتية' : 'Voice message') : (lang === 'ar' ? 'ملف صوتي' : 'Audio file'))}</p>
+                                      <p className="text-[10px] text-muted-foreground">{m.mimeType || 'audio/ogg'}</p>
+                                    </div>
+                                    <a
+                                      href={fileDownloadUrl(m.imageUrl)}
+                                      download={m.fileName || undefined}
+                                      className="flex-shrink-0 p-2 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors"
+                                      title={lang === 'ar' ? 'تنزيل' : 'Download'}
+                                    >
+                                      <Download size={16} className="text-primary" />
+                                    </a>
+                                  </div>
+                                  {/* Audio player */}
+                                  <div className="px-3 pb-2">
+                                    <audio
+                                      controls
+                                      className="w-full h-8"
+                                      preload="none"
+                                    >
+                                      <source src={filePreviewUrl(m.imageUrl) || ''} type={m.mimeType || 'audio/ogg'} />
+                                    </audio>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* فيديو */}
+                              {m.imageUrl && m.fileType === 'video' && (
+                                <div className="mb-2 rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
+                                  <div className="flex items-center gap-3 p-3">
+                                    <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-red-500/15 flex items-center justify-center">
+                                      <Video size={20} className="text-red-400" />
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium truncate">{m.fileName || (lang === 'ar' ? 'فيديو' : 'Video')}</p>
+                                      <p className="text-[10px] text-muted-foreground">{m.mimeType || 'video/mp4'}</p>
+                                    </div>
+                                    <a
+                                      href={fileDownloadUrl(m.imageUrl)}
+                                      download={m.fileName || undefined}
+                                      className="flex-shrink-0 p-2 rounded-lg bg-primary/10 hover:bg-primary/20 transition-colors"
+                                      title={lang === 'ar' ? 'تنزيل الفيديو' : 'Download video'}
+                                    >
+                                      <Download size={16} className="text-primary" />
+                                    </a>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* مؤشر صورة بدون رابط (رسائل قديمة بدون imageUrl) */}
                               {!m.imageUrl && m.content.includes('📷') && (
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/30 rounded-lg px-2.5 py-1.5">
                                   <ImageIcon size={12} />
@@ -1239,40 +1374,40 @@ export default function Dashboard() {
                                 </div>
                               )}
 
-                              {/* مؤشر ملف مرفق */}
-                              {m.content.includes('📎') && (
+                              {/* مؤشر ملف مرفق قديم */}
+                              {!m.imageUrl && m.content.includes('📎') && (
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-blue-500 bg-blue-500/10 rounded-lg px-2.5 py-1.5">
                                   <FileIcon size={12} />
                                   <span>{lang === 'ar' ? 'ملف مرفق' : 'Attached file'}</span>
                                 </div>
                               )}
 
-                              {/* مؤشر رسالة صوتية */}
-                              {m.content.includes('🎤') && (
+                              {/* مؤشر رسالة صوتية قديمة */}
+                              {!m.imageUrl && m.content.includes('🎤') && (
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-purple-500 bg-purple-500/10 rounded-lg px-2.5 py-1.5">
                                   <Mic size={12} />
                                   <span>{lang === 'ar' ? 'رسالة صوتية' : 'Voice message'}</span>
                                 </div>
                               )}
 
-                              {/* مؤشر ملف صوتي */}
-                              {m.content.includes('🎵') && (
+                              {/* مؤشر ملف صوتي قديم */}
+                              {!m.imageUrl && m.content.includes('🎵') && (
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-pink-500 bg-pink-500/10 rounded-lg px-2.5 py-1.5">
                                   <Music size={12} />
                                   <span>{lang === 'ar' ? 'ملف صوتي' : 'Audio file'}</span>
                                 </div>
                               )}
 
-                              {/* مؤشر فيديو */}
-                              {m.content.includes('🎬') && (
+                              {/* مؤشر فيديو قديم */}
+                              {!m.imageUrl && m.content.includes('🎬') && (
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-red-500 bg-red-500/10 rounded-lg px-2.5 py-1.5">
                                   <Video size={12} />
                                   <span>{lang === 'ar' ? 'فيديو' : 'Video'}</span>
                                 </div>
                               )}
 
-                              {/* مؤشر ملصق */}
-                              {m.content.includes('🏷️') && (
+                              {/* مؤشر ملصق قديم */}
+                              {!m.imageUrl && m.content.includes('🏷️') && (
                                 <div className="mb-1.5 flex items-center gap-1.5 text-xs text-orange-500 bg-orange-500/10 rounded-lg px-2.5 py-1.5">
                                   <StickerIcon size={12} />
                                   <span>{lang === 'ar' ? 'ملصق' : 'Sticker'}</span>
@@ -1778,14 +1913,25 @@ export default function Dashboard() {
           onClick={() => setLightboxImage(null)}
         >
           <div className="relative max-w-4xl max-h-[90vh]">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setLightboxImage(null)}
-              className="absolute -top-10 right-0 text-white hover:text-white/80"
-            >
-              <X size={20} />
-            </Button>
+            <div className="absolute -top-10 right-0 flex gap-2">
+              <a
+                href={lightboxImage.includes('file_id=') ? lightboxImage.replace('file_id=', 'file_id=').replace(/(file_id=[^&]+)/, '$1') + '&download=1' : lightboxImage}
+                download
+                className="text-white hover:text-white/80 p-1.5 rounded-full bg-black/40 hover:bg-black/60 transition-colors"
+                onClick={(e) => e.stopPropagation()}
+                title={lang === 'ar' ? 'تنزيل الصورة' : 'Download image'}
+              >
+                <Download size={18} />
+              </a>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setLightboxImage(null)}
+                className="text-white hover:text-white/80"
+              >
+                <X size={20} />
+              </Button>
+            </div>
             <img
               src={lightboxImage}
               alt="Full size"

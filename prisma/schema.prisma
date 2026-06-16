@@ -37,7 +37,10 @@ model Message {
   timestamp  DateTime     @default(now())
   status     String       @default("done")  // "pending" = يحتاج رد AI, "done" = تم الرد
   chatId     Int?                             // معرف المحادثة لإرسال الرد
-  imageUrl   String?                         // رابط الصورة إذا كانت الرسالة تحتوي صورة
+  imageUrl   String?                         // رابط الصورة أو file_id من تيليجرام
+  fileName   String?                         // اسم الملف الأصلي (للمستندات والملفات)
+  fileType   String?                         // نوع الملف: image, document, voice, audio, video, sticker
+  mimeType   String?                         // MIME type للملف
   user       TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
