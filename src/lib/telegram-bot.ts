@@ -436,7 +436,7 @@ async function analyzeImageWithVLM(
   }
 }
 
-/** تحليل صورة باستخدام Gemini Vision API */
+/** تحليل صورة باستخدام Gemini Vision API (يدعم عدة نماذج) */
 async function analyzeImageWithGemini(
   imageBase64: string,
   mimeType: string,
@@ -456,41 +456,58 @@ async function analyzeImageWithGemini(
   }
   if (!apiKey) throw new Error('No Gemini API key for vision');
 
-  try {
-    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
-    const body = {
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: prompt },
-          { inlineData: { mimeType, data: imageBase64 } },
-        ],
-      }],
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      generationConfig: { temperature: 0.7, maxOutputTokens: 1500 },
-    };
+  // تجربة عدة نماذج Gemini - بعضها قد يكون له حصة مختلفة
+  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite'];
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(30000),
-        body: JSON.stringify(body),
+  for (const model of models) {
+    try {
+      console.log(`[VLM-Gemini] Trying model: ${model}...`);
+      const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
+      const body = {
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType, data: imageBase64 } },
+          ],
+        }],
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        generationConfig: { temperature: 0.7, maxOutputTokens: 1500 },
+      };
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(30000),
+          body: JSON.stringify(body),
+        }
+      );
+
+      if (response.status === 429) {
+        console.log(`[VLM-Gemini] Model ${model}: quota exceeded (429), trying next...`);
+        continue; // حاول النموذج التالي
       }
-    );
 
-    if (!response.ok) throw new Error(`Gemini Vision ${response.status}`);
-    const data = await response.json();
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (reply?.trim()) {
-      console.log('[VLM] Gemini Vision OK');
-      return reply.trim();
+      if (!response.ok) {
+        console.log(`[VLM-Gemini] Model ${model}: HTTP ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (reply?.trim()) {
+        console.log(`[VLM-Gemini] ✅ ${model} OK`);
+        return reply.trim();
+      }
+    } catch (err: any) {
+      console.log(`[VLM-Gemini] Model ${model} error: ${err?.message?.substring(0, 60)}`);
+      continue;
     }
-    throw new Error('Empty Gemini Vision response');
-  } catch (err: any) {
-    throw new Error(`Gemini Vision: ${err?.message?.substring(0, 60)}`);
   }
+
+  throw new Error('All Gemini models failed (quota or error)');
 }
 
 /** توسيع وصف الصورة البسيط باستخدام Pollinations text API */
@@ -606,8 +623,8 @@ async function analyzeImage(
   console.error(`[VLM] ❌ All vision providers failed: ${errors.join(' | ')}`);
   return {
     reply: lang === 'ar'
-      ? '📸 للأسف لم أتمكن من تحليل الصورة حالياً. يرجى المحاولة مرة أخرى لاحقاً.'
-      : '📸 Sorry, I could not analyze the image right now. Please try again later.',
+      ? '📸 للأسف لم أتمكن من تحليل الصورة حالياً.\n\n💡 نصيحة للمدير: أرسل الأمر:\n`/setgeminikey مفتح_الـAPI`\n\nاحصل على مفتح مجاني من Google AI Studio:\nhttps://aistudio.google.com/apikey'
+      : '📸 Sorry, I could not analyze the image right now.\n\n💡 Admin tip: Send the command:\n`/setgeminikey YOUR_API_KEY`\n\nGet a free key from Google AI Studio:\nhttps://aistudio.google.com/apikey',
     provider: 'vlm-fallback',
   };
 }
@@ -1000,7 +1017,7 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI (GLM-4 Plus) | 📸 فهم الصور\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/setgeminikey [key] - تعيين مفتح Gemini API للصور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n\n📸 **أرسل أي صورة وسأحللها لك!**");
         return { ok: true };
       }
       if (text === '/help') {
@@ -1050,6 +1067,18 @@ export async function handleTelegramUpdate(update: {
         const np = text.replace('/setpass ', '').trim();
         if (np.length >= 3) { await db.botConfig.upsert({ where: { key: 'join_password' }, update: { value: np }, create: { key: 'join_password', value: np } }); await sendMessage(chatId, `✅ تم تغيير كلمة المرور إلى: \`${np}\``); }
         else await sendMessage(chatId, "كلمة المرور يجب أن تكون 3 أحرف على الأقل");
+        return { ok: true };
+      }
+      // أمر /setgeminikey - تعيين مفتح Gemini API جديد
+      if (text.startsWith('/setgeminikey ')) {
+        const newKey = text.replace('/setgeminikey ', '').trim();
+        if (newKey.length >= 20) {
+          await db.botConfig.upsert({ where: { key: 'gemini_api_key' }, update: { value: newKey }, create: { key: 'gemini_api_key', value: newKey } });
+          clearAIConfigCache(); // تحديث الكاش
+          await sendMessage(chatId, `✅ تم تعيين مفتح Gemini API الجديد بنجاح!\n\nالآن تحليل الصور سيعمل باستخدام Gemini Vision.`);
+        } else {
+          await sendMessage(chatId, "❌ مفتح API غير صالح. يجب أن يكون 20 حرف على الأقل.\n\nاحصل على مفتح مجاني من: https://aistudio.google.com/apikey");
+        }
         return { ok: true };
       }
       // أمر /settings للأدمن
