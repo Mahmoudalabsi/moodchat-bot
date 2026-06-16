@@ -303,30 +303,78 @@ async function downloadTelegramFileBuffer(fileId: string): Promise<{ buffer: Buf
   }
 }
 
-/** استخراج النص من ملف PDF باستخدام pdfjs-dist مباشرة */
+/** استخراج النص من ملف PDF - محرك متعدد الطرق */
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
+  let bestText = '';
+  
+  // الطريقة 1: pdfjs-dist مع ترتيب النص المحسن
   try {
     const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.mjs');
-    const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const doc = await pdfjsLib.getDocument({ 
+      data: new Uint8Array(buffer),
+      useSystemFonts: true,
+      disableFontFace: false,
+    }).promise;
     const numPages = doc.numPages;
     let fullText = '';
 
     for (let i = 1; i <= numPages; i++) {
       const page = await doc.getPage(i);
       const textContent = await page.getTextContent();
-      const pageText = textContent.items
-        .map((item: any) => item.str || '')
-        .join(' ');
+      
+      // ترتيب العناصر حسب الموقع لتحسين قراءة النص العربي والإنجليزي
+      const items: any[] = textContent.items
+        .filter((item: any) => item.str && item.str.trim())
+        .sort((a: any, b: any) => {
+          // ترتيب من أعلى لأسفل، ثم من اليمين لليسار/اليسار لليمين
+          const yDiff = Math.abs(a.transform[5] - b.transform[5]);
+          if (yDiff > 5) return b.transform[5] - a.transform[5]; // صفوف مختلفة
+          return a.transform[4] - b.transform[4]; // نفس الصف: يسار لليمين
+        });
+      
+      // تجميع النص في سطور
+      let currentY = -1;
+      let lineText = '';
+      let pageText = '';
+      
+      for (const item of items) {
+        const itemY = Math.round(item.transform[5]);
+        if (currentY !== -1 && Math.abs(itemY - currentY) > 5) {
+          // سطر جديد
+          pageText += lineText.trim() + '\n';
+          lineText = '';
+        }
+        lineText += item.str + ' ';
+        currentY = itemY;
+      }
+      if (lineText.trim()) pageText += lineText.trim();
+      
       fullText += `\n--- صفحة ${i}/${numPages} ---\n${pageText}\n`;
     }
 
-    const text = fullText.trim();
-    if (text.length > 50) return text;
-    return '[PDF لا يحتوي على نص قابل للقراءة - قد يكون صورة ممسوحة ضوئياً]';
+    bestText = fullText.trim();
+    if (bestText.length > 100) {
+      console.log(`[Worker] PDF extracted (pdfjs-dist): ${bestText.length} chars, ${numPages} pages`);
+      return bestText;
+    }
   } catch (err: any) {
-    console.error('[Worker] PDF parse error:', err?.message?.substring(0, 80));
-    return '[خطأ في قراءة ملف PDF]';
+    console.error(`[Worker] PDF pdfjs-dist error: ${err?.message?.substring(0, 80)}`);
   }
+
+  // الطريقة 2: pdf-parse كـ fallback
+  try {
+    const pdfParse = require('pdf-parse');
+    const data = await pdfParse(buffer);
+    if (data.text && data.text.trim().length > bestText.length) {
+      bestText = data.text.trim();
+      console.log(`[Worker] PDF extracted (pdf-parse): ${bestText.length} chars, ${data.numpages} pages`);
+    }
+  } catch (err: any) {
+    console.error(`[Worker] PDF pdf-parse error: ${err?.message?.substring(0, 80)}`);
+  }
+
+  if (bestText.length > 50) return bestText;
+  return '[PDF لا يحتوي على نص قابل للقراءة - قد يكون صورة ممسوحة ضوئياً. حاول إرسال صور من صفحات الكتاب لتحليلها بالذكاء الاصطناعي]';
 }
 
 /** استخراج النص من ملف DOCX */
@@ -904,10 +952,10 @@ async function processPendingMessages() {
               continue;
             }
 
-            // استخراج اسم الملف و mimeType من المحتوى
+            // استخراج اسم الملف و mimeType من قاعدة البيانات أولاً، ثم من المحتوى كـ fallback
             const contentMatch = msg.content.match(/📎 \[ملف: (.+?)\] (.+)/);
-            const fileName = contentMatch?.[1] || fileData.fileName;
-            const mimeType = contentMatch?.[2] || fileData.mimeType;
+            const fileName = msg.fileName || contentMatch?.[1] || fileData.fileName;
+            const mimeType = msg.mimeType || contentMatch?.[2] || fileData.mimeType;
             const userCaption = msg.content.includes('\n') ? msg.content.split('\n').slice(1).join('\n').trim() : '';
 
             const extracted = await extractTextFromFile(fileData.buffer, fileName, mimeType);
@@ -953,19 +1001,31 @@ async function processPendingMessages() {
 
             // ملف نصي/مستند - أرسل المحتوى للـ AI للتحليل
             const fileContent = extracted.text;
-            const MAX_FILE_TEXT = 8000; // حد أقصى لعدد الأحرف
+            // حد أقصى أكبر للملفات الطويلة (كتب، تقارير)
+            const MAX_FILE_TEXT = 30000;
             const truncatedContent = fileContent.length > MAX_FILE_TEXT
-              ? fileContent.substring(0, MAX_FILE_TEXT) + '\n\n[... تم اقتطاع المحتوى لأنه طويل جداً ...]'
+              ? fileContent.substring(0, MAX_FILE_TEXT) + `\n\n[... تم اقتطاع ${Math.round((fileContent.length - MAX_FILE_TEXT) / 1000)}K حرف من المحتوى ...]`
               : fileContent;
 
+            // بناء طلب التحليل حسب طلب المستخدم
             const analyzePrompt = userCaption || 'حلل هذا الملف بالتفصيل';
             
+            // تحسين الـ prompt للتحليل الشامل
+            const fileAnalysisSystemPrompt = `${SYSTEM_PROMPT}
+
+أنت الآن محلل محتوى متخصص. قم بتحليل المحتوى المرفق بشكل شامل ومفصل:
+- إذا كان كتاباً: اشرح الأفكار الرئيسية، الفصول، الحجج، الاستنتاجات
+- إذا كان تقريراً: لخّص النتائج والتوصيات
+- إذا كان كوداً: اشرح الوظائف والبنية
+- أجب بلغة المستخدم (العربية إذا كان الطلب بالعربية)
+- كن شاملاً ومفصلاً في التحليل`;
+
             const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-              { role: 'system', content: SYSTEM_PROMPT },
-              { role: 'user', content: `📎 ملف: ${fileName}\nالنوع: ${mimeType}\n\nمحتوى الملف:\n${truncatedContent}\n\nطلب المستخدم: ${analyzePrompt}` },
+              { role: 'system', content: fileAnalysisSystemPrompt },
+              { role: 'user', content: `📎 ملف: ${fileName}\nالنوع: ${mimeType}\nعدد الأحرف: ${fileContent.length.toLocaleString()}\n\nمحتوى الملف:\n${truncatedContent}\n\nطلب المستخدم: ${analyzePrompt}` },
             ];
 
-            const reply = await callZaiSDK(aiMessages, 3000);
+            const reply = await callZaiSDK(aiMessages, 4000);
 
             await db.message.create({
               data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-file', status: 'done', chatId: msg.chatId },
