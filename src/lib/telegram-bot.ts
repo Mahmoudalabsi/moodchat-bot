@@ -768,43 +768,81 @@ async function callGeminiDirect(messages: Array<{ role: string; content: string 
   }
   if (!apiKey) throw new Error('No Gemini API key');
 
-  try {
-    const contents = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
-    const systemInstruction = messages.find(m => m.role === 'system');
-    const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 800 } };
-    if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
+  // تجربة عدة نماذج - بعضها قد يكون له حصة مختلفة
+  const models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-lite'];
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CONFIG.model}:generateContent?key=${apiKey}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000), body: JSON.stringify(body) }
-    );
-    if (!response.ok) throw new Error(`Gemini ${response.status}`);
-    const data = await response.json();
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (reply?.trim()) { console.log('[AI] Gemini OK'); return reply.trim(); }
-    throw new Error('Empty Gemini');
-  } catch (err: any) {
-    throw new Error(`Gemini: ${err?.message?.substring(0, 60)}`);
+  for (const model of models) {
+    try {
+      const contents = messages
+        .filter(m => m.role !== 'system')
+        .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+      const systemInstruction = messages.find(m => m.role === 'system');
+      const body: Record<string, unknown> = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 800 } };
+      if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(20000), body: JSON.stringify(body) }
+      );
+
+      if (response.status === 429) {
+        console.log(`[AI] Gemini ${model}: quota exceeded (429), trying next model...`);
+        continue; // حاول النموذج التالي
+      }
+
+      if (!response.ok) {
+        console.log(`[AI] Gemini ${model}: HTTP ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (reply?.trim()) { console.log(`[AI] Gemini ${model} OK`); return reply.trim(); }
+    } catch (err: any) {
+      console.log(`[AI] Gemini ${model} error: ${err?.message?.substring(0, 40)}`);
+      continue;
+    }
   }
+  throw new Error('All Gemini models failed');
 }
 
 async function callPollinationsOpenAI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  for (const model of ['mistral', 'openai', 'llama']) {
-    try {
-      const response = await fetch('https://text.pollinations.ai/openai', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(15000),
-        body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
-      });
-      if (response.status === 429) continue;
-      if (!response.ok) continue;
-      const data = await response.json();
-      const reply = data.choices?.[0]?.message?.content;
-      if (reply?.trim()) { console.log(`[AI] Pollinations ${model} OK`); return reply.trim(); }
-    } catch { continue; }
+  const models = ['openai', 'mistral', 'llama'];
+  
+  for (const model of models) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        // انتظر قبل إعادة المحاولة
+        if (attempt > 0) {
+          await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+        }
+        
+        const response = await fetch('https://text.pollinations.ai/openai', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(20000),
+          body: JSON.stringify({ model, messages, temperature: 0.7, seed: Math.floor(Math.random() * 100000) }),
+        });
+        if (response.status === 429) {
+          console.log(`[AI] Pollinations ${model}: 429 rate limit, retry ${attempt + 1}...`);
+          continue; // أعد المحاولة مع نفس النموذج
+        }
+        if (response.status === 502 || response.status === 503) {
+          console.log(`[AI] Pollinations ${model}: ${response.status}, retry ${attempt + 1}...`);
+          continue;
+        }
+        if (!response.ok) {
+          console.log(`[AI] Pollinations ${model}: HTTP ${response.status}`);
+          break; // خطأ مختلف - جرب النموذج التالي
+        }
+        const data = await response.json();
+        const reply = data.choices?.[0]?.message?.content;
+        if (reply?.trim()) { console.log(`[AI] Pollinations ${model} OK`); return reply.trim(); }
+      } catch (err: any) {
+        console.log(`[AI] Pollinations ${model} error: ${err?.message?.substring(0, 40)}`);
+        if (attempt < 2) continue;
+      }
+    }
   }
   throw new Error('Pollinations failed');
 }
@@ -866,7 +904,7 @@ function generateSmartFallback(userMessage: string): string {
     return "أنا مود شات، مساعدك الذكي! يمكنني مساعدتك في الإجابة على أسئلتك والمحادثة بأي لغة تريدها.";
   if (/^(ساعدني|محتاج مساعدة|help|مساعدة)/.test(msg))
     return "بالطبع! أنا هنا لمساعدتك. أخبرني بما تحتاج وسأبذل قصارى جهدي لمساعدتك.";
-  return "شكراً لرسالتك! حالياً أواجه ضغطاً على الخوادم، لكن يمكنك المحاولة مرة أخرى بعد قليل.\n\n/clear - مسح الذاكرة\n/help - المساعدة";
+  return "عذراً، الخوادم مشغولة حالياً. جرب مرة أخرى خلال دقيقة.\n\n/clear - مسح الذاكرة\n/help - المساعدة\n\n💡 **للمدير:** إذا استمرت المشكلة، أرسل:\n`/setgeminikey مفتح_الـAPI`\nمن https://aistudio.google.com/apikey";
 }
 
 // ============================
