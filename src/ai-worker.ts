@@ -121,8 +121,82 @@ async function telegramAPI(method: string, params: Record<string, unknown>) {
   return res.json();
 }
 
+/** إرسال رسالة عادية (قصيرة) عبر Telegram */
 async function sendMessage(chatId: number, text: string) {
   return telegramAPI('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+}
+
+/** إرسال رسالة قد تكون طويلة - تقسم تلقائياً إلى أجزاء */
+const MAX_MSG_LEN = 3800;
+
+async function sendLongMessage(chatId: number, text: string) {
+  // إذا كانت الرسالة قصيرة، أرسلها مباشرة
+  if (text.length <= MAX_MSG_LEN) {
+    const result = await sendMessageSafe(chatId, text);
+    return [result];
+  }
+
+  // تقسيم الرسالة على أساس الأسطر الفارغة أو الأسطر
+  const lines = text.split('\n');
+  const chunks: string[] = [];
+  let currentChunk = '';
+
+  for (const line of lines) {
+    // إذا السطر نفسه أطول من الحد، قسّمه
+    if (line.length > MAX_MSG_LEN) {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+        currentChunk = '';
+      }
+      // تقسيم السطر الطويل إلى أجزاء
+      for (let i = 0; i < line.length; i += MAX_MSG_LEN) {
+        chunks.push(line.substring(i, i + MAX_MSG_LEN));
+      }
+    } else if (currentChunk.length + line.length + 1 > MAX_MSG_LEN) {
+      // إضافة السطر الحالي سيتجاوز الحد
+      chunks.push(currentChunk);
+      currentChunk = line;
+    } else {
+      currentChunk = currentChunk ? currentChunk + '\n' + line : line;
+    }
+  }
+  if (currentChunk) chunks.push(currentChunk);
+
+  // إرسال كل جزء
+  const results = [];
+  for (let i = 0; i < chunks.length; i++) {
+    // إضافة مؤشر الجزء إذا كانت الرسالة مقسمة
+    let chunkText = chunks[i];
+    if (chunks.length > 1) {
+      chunkText = `[${i + 1}/${chunks.length}]\n${chunkText}`;
+    }
+    const result = await sendMessageSafe(chatId, chunkText);
+    results.push(result);
+    // تأخير صغير بين الأجزاء لتجنب rate limiting
+    if (i < chunks.length - 1) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  return results;
+}
+
+/** إرسال رسالة مع معالجة أخطاء Markdown - إعادة محاولة بدون Markdown عند الفشل */
+async function sendMessageSafe(chatId: number, text: string) {
+  // محاولة أولى: مع Markdown
+  const result = await telegramAPI('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+  if (result?.ok) return result;
+
+  // إذا فشل Markdown، جرب بدون parse_mode
+  console.log(`[Worker] Markdown failed, retrying without formatting...`);
+  const plainResult = await telegramAPI('sendMessage', { chat_id: chatId, text });
+  if (plainResult?.ok) return plainResult;
+
+  // إذا فشل أيضاً، جرب تنظيف إضافي
+  const cleanedText = text
+    .replace(/[*_`\[\]()~>#+\-=|{}.!]/g, '') // إزالة جميع رموز Markdown
+    .substring(0, MAX_MSG_LEN);
+  console.log(`[Worker] Plain text also failed, sending cleaned text...`);
+  return telegramAPI('sendMessage', { chat_id: chatId, text: cleanedText });
 }
 
 /** إرسال ملف (مستند) عبر Telegram */
@@ -154,7 +228,7 @@ function sanitizeMarkdown(text: string): string {
 // Z-AI SDK - النص
 // ============================
 
-async function callZaiSDK(messages: Array<{ role: string; content: string }>, maxTokens: number = 800): Promise<string> {
+async function callZaiSDK(messages: Array<{ role: string; content: string }>, maxTokens: number = 4000): Promise<string> {
   const ZAIModule = await import('z-ai-web-dev-sdk');
   const ZAIClass = ZAIModule.default;
   const zai = new ZAIClass(ZAI_CONFIG);
@@ -984,7 +1058,7 @@ async function processPendingMessages() {
                 data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-vlm', status: 'done', chatId: msg.chatId },
               });
               await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-              await sendMessage(chatId, sanitizeMarkdown(reply));
+              await sendLongMessage(chatId, sanitizeMarkdown(reply));
               totalProcessed++;
               continue;
             }
@@ -1003,7 +1077,7 @@ async function processPendingMessages() {
                 data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-asr', status: 'done', chatId: msg.chatId },
               });
               await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-              await sendMessage(chatId, sanitizeMarkdown(reply));
+              await sendLongMessage(chatId, sanitizeMarkdown(reply));
               totalProcessed++;
               continue;
             }
@@ -1040,7 +1114,7 @@ async function processPendingMessages() {
               data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-file', status: 'done', chatId: msg.chatId },
             });
             await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-            await sendMessage(chatId, sanitizeMarkdown(reply));
+            await sendLongMessage(chatId, sanitizeMarkdown(reply));
             totalProcessed++;
             console.log(`[Worker] ✅ File analyzed for user ${msg.userId}: ${fileName}`);
 
@@ -1083,7 +1157,7 @@ async function processPendingMessages() {
               data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-asr', status: 'done', chatId: msg.chatId },
             });
             await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-            await sendMessage(chatId, sanitizeMarkdown(reply));
+            await sendLongMessage(chatId, sanitizeMarkdown(reply));
             totalProcessed++;
             console.log(`[Worker] ✅ Audio analyzed for user ${msg.userId}`);
 
@@ -1107,12 +1181,12 @@ async function processPendingMessages() {
             { role: 'user', content: `🎬 استلمت ملف فيديو منك.\n${videoInfo ? `طلب: ${videoInfo}` : ''}\n\nملاحظة: لا أستطيع حالياً تحليل محتوى الفيديو مباشرة، لكن يمكنني مساعدتك في أي سؤال يتعلق به. يمكنك وصف محتوى الفيديو وسأحلله لك.` },
           ];
           try {
-            const reply = await callZaiSDK(aiMessages, 800);
+            const reply = await callZaiSDK(aiMessages, 2000);
             await db.message.create({
               data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-video', status: 'done', chatId: msg.chatId },
             });
             await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
-            await sendMessage(chatId, sanitizeMarkdown(reply));
+            await sendLongMessage(chatId, sanitizeMarkdown(reply));
             totalProcessed++;
           } catch (videoErr: any) {
             console.error(`[Worker] Video analysis error: ${videoErr?.message?.substring(0, 100)}`);
@@ -1178,7 +1252,7 @@ async function processPendingMessages() {
         await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
 
         // إرسال الرد
-        await sendMessage(chatId, sanitizeMarkdown(reply));
+        await sendLongMessage(chatId, sanitizeMarkdown(reply));
         totalProcessed++;
         console.log(`[Worker] ✅ Processed msg ${msg.id} for user ${msg.userId} via ${provider} (total: ${totalProcessed})`);
 
