@@ -11,7 +11,7 @@ import {
   ChevronDown, ArrowLeft, Languages, Image as ImageIcon,
   Camera, X, ZoomIn, File as FileIcon, Mic, Music,
   Video, FileText, Code as CodeIcon, Sticker as StickerIcon,
-  Download, Play, Pause, FileSpreadsheet, FileType, Paperclip
+  Download, Play, Pause, FileSpreadsheet, FileType, Paperclip, RotateCcw
 } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -190,8 +190,10 @@ export default function Dashboard() {
   // Pending messages state
   const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
   const [processingMessages, setProcessingMessages] = useState<Message[]>([]);
+  const [failedMessages, setFailedMessages] = useState<Message[]>([]);
   const [messageStats, setMessageStats] = useState<Array<{ status: string; count: number }>>([]);
   const [showPending, setShowPending] = useState(false);
+  const [workerInfo, setWorkerInfo] = useState<{ alive: boolean; paused: boolean; totalProcessed: number; totalFailed: number; secondsSinceHeartbeat: number | null; lastActivity: string | null }>({ alive: false, paused: false, totalProcessed: 0, totalFailed: 0, secondsSinceHeartbeat: null, lastActivity: null });
 
   // Config form state
   const [cfgProvider, setCfgProvider] = useState('zsdk');
@@ -306,7 +308,7 @@ export default function Dashboard() {
     } catch { /* ignore */ }
   }, []);
 
-  // Fetch pending/processing messages
+  // Fetch pending/processing/failed messages + worker status
   const fetchPendingMessages = useCallback(async () => {
     try {
       const r = await fetch('/api/pending-messages');
@@ -314,7 +316,11 @@ export default function Dashboard() {
         const d = await r.json();
         setPendingMessages(d.pending || []);
         setProcessingMessages(d.processing || []);
+        setFailedMessages(d.failed || []);
         setMessageStats(d.stats || []);
+        if (d.worker) {
+          setWorkerInfo(d.worker);
+        }
       }
     } catch { /* ignore */ }
   }, []);
@@ -513,6 +519,50 @@ export default function Dashboard() {
   // Refresh all data
   const refreshAll = () => {
     fetchDashboard();
+  };
+
+  // Auto-refresh pending messages when panel is open
+  useEffect(() => {
+    if (!showPending || !isLoggedIn) return;
+    fetchPendingMessages();
+    const interval = setInterval(fetchPendingMessages, 5000);
+    return () => clearInterval(interval);
+  }, [showPending, isLoggedIn, fetchPendingMessages]);
+
+  // Retry failed message (set status back to pending)
+  const retryFailedMessage = async (msgId: string) => {
+    try {
+      await fetch('/api/pending-messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retry', messageId: msgId }),
+      });
+      fetchPendingMessages();
+    } catch { /* ignore */ }
+  };
+
+  // Delete failed message
+  const deleteFailedMessage = async (msgId: string) => {
+    try {
+      await fetch('/api/pending-messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', messageId: msgId }),
+      });
+      fetchPendingMessages();
+    } catch { /* ignore */ }
+  };
+
+  // Retry all failed messages
+  const retryAllFailed = async () => {
+    try {
+      await fetch('/api/pending-messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retryAll' }),
+      });
+      fetchPendingMessages();
+    } catch { /* ignore */ }
   };
 
   // Get unique users from messages
@@ -1069,7 +1119,7 @@ export default function Dashboard() {
           {/* ========== MESSAGES TAB ========== */}
           <TabsContent value="messages" className="animate-fade-in mt-6">
             {/* Pending Messages Alert */}
-            <div className="mb-4">
+            <div className="mb-4 flex items-center gap-3 flex-wrap">
               <Button
                 variant="outline"
                 size="sm"
@@ -1078,12 +1128,26 @@ export default function Dashboard() {
               >
                 <Clock size={14} />
                 {lang === 'ar' ? 'الرسائل المعلّقة والواردة' : 'Pending & Incoming Messages'}
-                {(pendingMessages.length + processingMessages.length) > 0 && (
+                {(pendingMessages.length + processingMessages.length + failedMessages.length) > 0 && (
                   <Badge variant="destructive" className="text-[10px] px-1.5 py-0 ml-1">
-                    {pendingMessages.length + processingMessages.length}
+                    {pendingMessages.length + processingMessages.length + failedMessages.length}
                   </Badge>
                 )}
               </Button>
+              {/* Worker Status Badge */}
+              <div className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full ${
+                workerInfo.paused ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/30' :
+                workerInfo.alive ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/30' :
+                'bg-red-500/10 text-red-500 border border-red-500/30'
+              }`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${
+                  workerInfo.paused ? 'bg-yellow-500' :
+                  workerInfo.alive ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
+                }`} />
+                {workerInfo.paused ? (lang === 'ar' ? 'الـ Worker متوقف' : 'Worker Paused') :
+                 workerInfo.alive ? (lang === 'ar' ? 'الـ Worker يعمل' : 'Worker Active') :
+                 (lang === 'ar' ? 'الـ Worker غير متصل' : 'Worker Offline')}
+              </div>
             </div>
 
             {/* Pending Messages Panel */}
@@ -1092,63 +1156,140 @@ export default function Dashboard() {
                 <CardHeader className="p-4 pb-2">
                   <CardTitle className="text-sm font-bold flex items-center gap-2 text-amber-500">
                     <Clock size={16} />
-                    {lang === 'ar' ? 'الرسائل المعلّقة والقيد المعالجة' : 'Pending & Processing Messages'}
+                    {lang === 'ar' ? 'الرسائل المعلّقة والواردة' : 'Pending & Incoming Messages'}
                     <Button variant="ghost" size="sm" onClick={fetchPendingMessages} className="ml-auto h-6 px-2">
-                      <RefreshCw size={12} />
+                      <RefreshCw size={12} className={pendingMessages.length > 0 || processingMessages.length > 0 ? 'animate-spin' : ''} />
                     </Button>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="p-4 pt-0">
-                  {(() => {
-                    const all = [...processingMessages.map(m => ({ ...m, _status: 'processing' })), ...pendingMessages.map(m => ({ ...m, _status: 'pending' }))];
-                    if (all.length === 0) {
-                      return (
-                        <div className="text-center py-6 text-muted-foreground">
-                          <CheckCircle size={32} className="mx-auto mb-2 opacity-30" />
-                          <p className="text-sm">{lang === 'ar' ? 'لا توجد رسائل معلّقة 🎉' : 'No pending messages 🎉'}</p>
-                        </div>
-                      );
-                    }
-                    return (
-                      <ScrollArea className="max-h-[300px]">
-                        <div className="space-y-2">
-                          {all.map(m => (
-                            <div key={m.id} className={`flex items-center gap-3 p-2.5 rounded-lg border ${
-                              m._status === 'processing' ? 'border-blue-500/30 bg-blue-500/5' : 'border-amber-500/30 bg-amber-500/5'
-                            }`}>
-                              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                                m._status === 'processing' ? 'bg-blue-500 animate-pulse' : 'bg-amber-500'
-                              }`} />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-medium">{m.user?.firstName || `User ${m.userId}`}</span>
-                                  <Badge variant="secondary" className="text-[9px] px-1 py-0">{m.modelUsed || 'chat'}</Badge>
-                                  <Badge className={`text-[9px] px-1 py-0 ${
-                                    m._status === 'processing' ? 'bg-blue-500/20 text-blue-400' : 'bg-amber-500/20 text-amber-400'
-                                  }`}>
-                                    {m._status === 'processing' ? (lang === 'ar' ? 'قيد المعالجة' : 'Processing') : (lang === 'ar' ? 'معلّق' : 'Pending')}
-                                  </Badge>
-                                </div>
-                                <p className="text-xs text-muted-foreground truncate mt-0.5">{m.content.substring(0, 100)}</p>
+                  {/* Worker Stats */}
+                  <div className="flex gap-4 mb-3 p-2.5 rounded-lg bg-muted/30 border border-border/30">
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <Activity size={12} className="text-primary" />
+                      <span className="text-muted-foreground">{lang === 'ar' ? 'معالجة:' : 'Processed:'}</span>
+                      <span className="font-bold">{workerInfo.totalProcessed}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <AlertTriangle size={12} className="text-red-500" />
+                      <span className="text-muted-foreground">{lang === 'ar' ? 'فشل:' : 'Failed:'}</span>
+                      <span className="font-bold text-red-500">{workerInfo.totalFailed}</span>
+                    </div>
+                    {workerInfo.secondsSinceHeartbeat !== null && (
+                      <div className="flex items-center gap-1.5 text-xs">
+                        <span className="text-muted-foreground">{lang === 'ar' ? 'نبضة:' : 'HB:'}</span>
+                        <span className="font-bold">{workerInfo.secondsSinceHeartbeat}s</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Processing Messages */}
+                  {processingMessages.length > 0 && (
+                    <div className="mb-2">
+                      <p className="text-xs font-medium text-blue-500 mb-1.5 flex items-center gap-1">
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+                        {lang === 'ar' ? `قيد المعالجة (${processingMessages.length})` : `Processing (${processingMessages.length})`}
+                      </p>
+                      <div className="space-y-1.5">
+                        {processingMessages.map(m => (
+                          <div key={m.id} className="flex items-center gap-3 p-2 rounded-lg border border-blue-500/30 bg-blue-500/5">
+                            <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-medium">{m.user?.firstName || `User ${m.userId}`}</span>
+                                <Badge variant="secondary" className="text-[9px] px-1 py-0">{m.modelUsed || 'chat'}</Badge>
                               </div>
-                              <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                                {formatDateTime(m.timestamp, lang)}
-                              </span>
+                              <p className="text-xs text-muted-foreground truncate mt-0.5">{m.content.substring(0, 100)}</p>
                             </div>
-                          ))}
-                        </div>
-                      </ScrollArea>
-                    );
-                  })()}
+                            <span className="text-[10px] text-muted-foreground flex-shrink-0">{formatDateTime(m.timestamp, lang)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Pending Messages */}
+                  {pendingMessages.length > 0 && (
+                    <div className="mb-2">
+                      <p className="text-xs font-medium text-amber-500 mb-1.5 flex items-center gap-1">
+                        <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                        {lang === 'ar' ? `في الانتظار (${pendingMessages.length})` : `Pending (${pendingMessages.length})`}
+                      </p>
+                      <div className="space-y-1.5">
+                        {pendingMessages.map(m => (
+                          <div key={m.id} className="flex items-center gap-3 p-2 rounded-lg border border-amber-500/30 bg-amber-500/5">
+                            <div className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-medium">{m.user?.firstName || `User ${m.userId}`}</span>
+                                <Badge variant="secondary" className="text-[9px] px-1 py-0">{m.modelUsed || 'chat'}</Badge>
+                              </div>
+                              <p className="text-xs text-muted-foreground truncate mt-0.5">{m.content.substring(0, 100)}</p>
+                            </div>
+                            <span className="text-[10px] text-muted-foreground flex-shrink-0">{formatDateTime(m.timestamp, lang)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Failed Messages */}
+                  {failedMessages.length > 0 && (
+                    <div className="mb-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <p className="text-xs font-medium text-red-500 flex items-center gap-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                          {lang === 'ar' ? `فشلت (${failedMessages.length})` : `Failed (${failedMessages.length})`}
+                        </p>
+                        <Button variant="ghost" size="sm" onClick={retryAllFailed} className="h-5 px-2 text-[10px] text-red-400 hover:text-red-300">
+                          <RotateCcw size={10} className="mr-1" />
+                          {lang === 'ar' ? 'إعادة محاولة الكل' : 'Retry All'}
+                        </Button>
+                      </div>
+                      <div className="space-y-1.5">
+                        {failedMessages.map(m => (
+                          <div key={m.id} className="flex items-center gap-3 p-2 rounded-lg border border-red-500/30 bg-red-500/5">
+                            <div className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-medium">{m.user?.firstName || `User ${m.userId}`}</span>
+                                <Badge variant="secondary" className="text-[9px] px-1 py-0">{m.modelUsed || 'chat'}</Badge>
+                              </div>
+                              <p className="text-xs text-muted-foreground truncate mt-0.5">{m.content.substring(0, 80)}</p>
+                            </div>
+                            <span className="text-[10px] text-muted-foreground flex-shrink-0">{formatDateTime(m.timestamp, lang)}</span>
+                            <div className="flex gap-1 flex-shrink-0">
+                              <Button variant="ghost" size="sm" onClick={() => retryFailedMessage(m.id)} className="h-5 w-5 p-0 text-emerald-500 hover:text-emerald-400" title={lang === 'ar' ? 'إعادة محاولة' : 'Retry'}>
+                                <RotateCcw size={10} />
+                              </Button>
+                              <Button variant="ghost" size="sm" onClick={() => deleteFailedMessage(m.id)} className="h-5 w-5 p-0 text-red-500 hover:text-red-400" title={lang === 'ar' ? 'حذف' : 'Delete'}>
+                                <Trash2 size={10} />
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* No messages */}
+                  {pendingMessages.length === 0 && processingMessages.length === 0 && failedMessages.length === 0 && (
+                    <div className="text-center py-6 text-muted-foreground">
+                      <CheckCircle size={32} className="mx-auto mb-2 opacity-30" />
+                      <p className="text-sm">{lang === 'ar' ? 'لا توجد رسائل معلّقة 🎉' : 'No pending messages 🎉'}</p>
+                    </div>
+                  )}
+
                   {/* Message Stats */}
                   {messageStats.length > 0 && (
-                    <div className="flex gap-3 mt-3 pt-3 border-t border-border/30">
+                    <div className="flex gap-3 mt-3 pt-3 border-t border-border/30 flex-wrap">
                       {messageStats.map(s => (
                         <div key={s.status} className="flex items-center gap-1.5 text-xs text-muted-foreground">
                           <div className={`w-1.5 h-1.5 rounded-full ${
                             s.status === 'done' ? 'bg-emerald-500' :
                             s.status === 'pending' ? 'bg-amber-500' :
-                            s.status === 'processing' ? 'bg-blue-500' : 'bg-gray-400'
+                            s.status === 'processing' ? 'bg-blue-500' :
+                            s.status === 'failed' ? 'bg-red-500' : 'bg-gray-400'
                           }`} />
                           <span>{s.status}: {s.count}</span>
                         </div>
