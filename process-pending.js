@@ -1,9 +1,30 @@
 /**
  * One-shot message processor - runs once and exits
- * Called by cron every minute
+ * Called by worker-cron.sh in a loop every 3 seconds.
+ * Includes retry logic for Neon scale-to-zero cold starts.
  */
 const { PrismaClient } = require('@prisma/client');
-const db = new PrismaClient();
+
+// Build PrismaClient with retry — Neon DB sometimes refuses first connection after idle
+let _db = null;
+async function getDb(retries = 5, delayMs = 1500) {
+  if (_db) return _db;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const client = new PrismaClient();
+      // Test the connection with a lightweight query
+      await client.$queryRaw`SELECT 1`;
+      _db = client;
+      return _db;
+    } catch (e) {
+      if (i < retries - 1) {
+        await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+      } else {
+        throw e;
+      }
+    }
+  }
+}
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
@@ -19,7 +40,7 @@ async function callZAI(messages) {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
-    'X-Z-AI-From': 'Z',
+    'X-Z-AI-from': 'Z',
   };
   if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
   if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
@@ -72,29 +93,49 @@ async function sendTelegram(chatId, text) {
 }
 
 async function main() {
-  const pending = await db.message.findMany({
-    where: { status: 'pending', role: 'user' },
-    orderBy: { timestamp: 'asc' },
-    take: 5,
-  });
+  let db;
+  try {
+    db = await getDb();
+  } catch (e) {
+    console.error('DB connection failed after retries:', e.message);
+    return;
+  }
+
+  let pending;
+  try {
+    pending = await db.message.findMany({
+      where: { status: 'pending', role: 'user' },
+      orderBy: { timestamp: 'asc' },
+      take: 5,
+    });
+  } catch (e) {
+    console.error('DB query failed:', e.message);
+    await db.$disconnect().catch(() => {});
+    _db = null;
+    return;
+  }
 
   if (pending.length === 0) {
-    await db.$disconnect();
+    await db.$disconnect().catch(() => {});
+    _db = null;
     return;
   }
 
   console.log(`[${new Date().toISOString()}] Processing ${pending.length} pending messages`);
 
   for (const msg of pending) {
+    let replySent = false;
     try {
       const chatId = msg.chatId || msg.userId;
 
-      // Send typing action
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-      });
+      // Send typing action (non-fatal if it fails)
+      try {
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+        });
+      } catch (_) {}
 
       // Get history
       const history = await db.message.findMany({
@@ -109,39 +150,58 @@ async function main() {
         { role: 'user', content: msg.content },
       ];
 
-      // Call Z-AI first, fallback to Pollinations
+      // Call Z-AI first, fallback to Pollinations, then to a static message
       let reply;
+      let modelUsed = 'moodchat-zai';
       try {
         reply = await callZAI(messages);
       } catch (e) {
         console.error('Z-AI failed:', e.message);
         try {
           reply = await callPollinations(messages);
+          modelUsed = 'moodchat-pollinations';
         } catch (e2) {
           console.error('Pollinations failed:', e2.message);
           reply = "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً 🙏";
+          modelUsed = 'moodchat-fallback';
         }
       }
 
-      // Save reply
+      // Save assistant reply in DB
       await db.message.create({
-        data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: 'moodchat-zai', status: 'done' },
+        data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed, status: 'done' },
       });
 
-      // Mark as done
+      // Mark user message as done
       await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
 
-      // Send reply
-      await sendTelegram(chatId, reply);
-      console.log(`✅ Replied to ${msg.userId}: "${reply.substring(0, 50)}..."`);
+      // Send reply to Telegram (with 3 retries)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await sendTelegram(chatId, reply);
+          replySent = true;
+          console.log(`✅ Replied to ${msg.userId}: "${reply.substring(0, 50)}..."`);
+          break;
+        } catch (e) {
+          console.error(`Send attempt ${attempt + 1} failed:`, e.message);
+          if (attempt < 2) await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+        }
+      }
+      if (!replySent) {
+        console.error(`❌ Failed to send reply to ${msg.userId} after 3 attempts`);
+      }
 
     } catch (error) {
-      console.error(`❌ Error:`, error.message);
-      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } }).catch(() => {});
+      console.error(`❌ Processing error for msg ${msg.id}:`, error.message);
+      // If we never sent a reply, mark as 'failed' (recoverable) — NOT 'done'
+      if (!replySent) {
+        await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } }).catch(() => {});
+      }
     }
   }
 
-  await db.$disconnect();
+  await db.$disconnect().catch(() => {});
+  _db = null;
 }
 
 main().catch(e => {
