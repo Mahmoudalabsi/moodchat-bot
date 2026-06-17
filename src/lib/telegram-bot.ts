@@ -140,35 +140,40 @@ async function isWorkerAlive(): Promise<boolean> {
 // ============================
 
 async function callPollinationsGET(messages: Array<{ role: string; content: string }>): Promise<string> {
-  // Build a compact prompt - limit system prompt + last 6 messages to stay under URL size limit
-  const systemMsg = (messages.find(m => m.role === 'system')?.content || '').substring(0, 500);
-  const conversation = messages
-    .filter(m => m.role !== 'system')
-    .slice(-6)
-    .map(m => m.role === 'user' ? `User: ${m.content}` : `Assistant: ${m.content}`)
-    .join('\n\n');
+  // 🔧 CRITICAL FIX: Keep prompt VERY short to avoid URL length issues + speed up
+  // Pollinations GET works best with simple prompts (<1500 chars)
+  // We send: brief role + last 3 messages only
+  const recent = messages.filter(m => m.role !== 'system').slice(-3);
+  const lastUserMsg = recent.filter(m => m.role === 'user').pop()?.content || '';
+  const lastAssistantMsg = recent.filter(m => m.role === 'assistant').pop()?.content || '';
 
-  const prompt = `${systemMsg}\n\n${conversation}\n\nAssistant:`;
-  // URL-encoded prompt, max ~3000 chars to stay safe
-  const encodedPrompt = encodeURIComponent(prompt.substring(0, 3000));
+  // Build minimal prompt
+  let prompt = 'أنت مود شات، مساعد ذكي وودود. أجب بالعربية بوضوح وإيجاز دون مقدمات.';
+  if (lastAssistantMsg) {
+    prompt += `\n\nمساعد: ${lastAssistantMsg.substring(0, 200)}`;
+  }
+  prompt += `\n\nمستخدم: ${lastUserMsg.substring(0, 800)}\n\nمساعد:`;
+
+  // URL-encode and limit to 1500 chars total (safe for Pollinations)
+  const encodedPrompt = encodeURIComponent(prompt.substring(0, 1500));
 
   const models = ['openai', 'mistral', 'llama'];
   let lastError = '';
   for (const model of models) {
     try {
-      const url = `https://text.pollinations.ai/${encodedPrompt}?model=${model}&seed=${Math.floor(Math.random() * 100000)}&private=true`;
+      const url = `https://text.pollinations.ai/${encodedPrompt}?model=${model}&seed=${Math.floor(Math.random() * 100000)}`;
       const response = await fetch(url, {
         method: 'GET',
         headers: {
           'Referer': 'https://moodchat.bot',
           'User-Agent': 'MoodChat-Bot/1.0',
         },
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(20000),
       });
-      if (response.status === 429) { lastError = `${model}: 429 rate limit`; continue; }
+      if (response.status === 429) { lastError = `${model}: 429 rate limit`; await new Promise(r => setTimeout(r, 1000)); continue; }
       if (!response.ok) { lastError = `${model}: HTTP ${response.status}`; continue; }
       const reply = await response.text();
-      if (reply?.trim() && reply.length > 5) {
+      if (reply?.trim() && reply.length > 3) {
         console.log(`[AI] Pollinations GET ${model} OK (${reply.length} chars)`);
         return reply.trim();
       }
