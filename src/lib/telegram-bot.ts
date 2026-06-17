@@ -858,6 +858,19 @@ export async function handleTelegramUpdate(update: {
       console.log(`[Bot] Processing inline (worker dead). User: ${userId}`);
       const { reply, provider } = await getAIResponseInline(aiMessages);
 
+      if (provider === 'fallback') {
+        // Pollinations failed - send fallback message but DON'T save it as 'done'
+        // (so when VPS Worker comes back, it can reprocess with real AI)
+        // Save user message as 'pending' so worker can pick it up later
+        await db.message.updateMany({
+          where: { userId, role: 'user', content: text, status: 'done' },
+          data: { status: 'pending' },
+        });
+        await sendMessage(chatId, sanitizeMarkdown(reply));
+        console.log(`[Bot] ⚠️ Fallback sent to ${userId} (pending saved for worker)`);
+        return { ok: true, mode: 'inline-fallback', provider };
+      }
+
       // حفظ رد البوت
       await db.message.create({
         data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
