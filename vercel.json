@@ -25,11 +25,11 @@
   "crons": [
     {
       "path": "/api/process-tg-messages",
-      "schedule": "0 * * * *"
+      "schedule": "0 0 * * *"
     },
     {
       "path": "/api/process-wa-messages",
-      "schedule": "0 * * * *"
+      "schedule": "0 0 * * *"
     }
   ],
   "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss 2>/dev/null; next build",
