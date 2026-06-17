@@ -12,10 +12,26 @@
     "src/app/api/whatsapp/test/route.ts": {
       "maxDuration": 30
     },
+    "src/app/api/process-tg-messages/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/process-wa-messages/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/**/*.ts": {
       "maxDuration": 30
     }
   },
+  "crons": [
+    {
+      "path": "/api/process-tg-messages",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/process-wa-messages",
+      "schedule": "* * * * *"
+    }
+  ],
   "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss 2>/dev/null; next build",
   "installCommand": "bun install",
   "framework": "nextjs"
