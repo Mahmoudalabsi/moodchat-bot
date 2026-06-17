@@ -28,9 +28,9 @@ async function getDb(retries = 5, delayMs = 1500) {
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
-const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || '';
-const ZAI_USER_ID = process.env.ZAI_USER_ID || '';
-const ZAI_TOKEN = process.env.ZAI_TOKEN || '';
+const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || 'chat-c2ae3234-5685-4053-8998-96e9a664f658';
+const ZAI_USER_ID = process.env.ZAI_USER_ID || '014c4da7-4f7f-4efa-9157-9091a73a3570';
+const ZAI_TOKEN = process.env.ZAI_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0';
 const MAX_HISTORY = 30;
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم. كن مختصراً.";
@@ -62,22 +62,29 @@ async function callZAI(messages) {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
+    'X-Chat-Id': ZAI_CHAT_ID,
+    'X-User-Id': ZAI_USER_ID,
+    'X-Token': ZAI_TOKEN,
     'X-Z-AI-from': 'Z',
   };
-  if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
-  if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
-  if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
 
-  const res = await fetchWithRetry(`${ZAI_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 1024, thinking: { type: 'disabled' } }),
-  });
-  if (!res.ok) throw new Error(`Z-AI ${res.status}`);
-  const data = await res.json();
-  const reply = data.choices?.[0]?.message?.content;
-  if (reply?.trim()) return reply.trim();
-  throw new Error('Empty response');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  try {
+    const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 1024, thinking: { type: 'disabled' } }),
+    });
+    if (!res.ok) throw new Error(`Z-AI ${res.status}`);
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty response');
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function callPollinations(messages) {
@@ -124,12 +131,16 @@ async function main() {
   }
 
   let pending;
+  let pollinationsEnabled = false;
   try {
     pending = await db.message.findMany({
       where: { status: 'pending', role: 'user' },
       orderBy: { timestamp: 'asc' },
       take: 5,
     });
+    // Check if Pollinations fallback is enabled in DB settings
+    const cfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
+    pollinationsEnabled = cfg?.value === 'true';
   } catch (e) {
     console.error(`[${new Date().toISOString()}] DB query failed:`, e.message);
     await db.$disconnect().catch(() => {});
@@ -165,19 +176,24 @@ async function main() {
         { role: 'user', content: msg.content },
       ];
 
-      // Provider chain: Z-AI → Pollinations → static fallback
+      // Provider chain: Z-AI (always) → Pollinations (only if enabled in DB) → static fallback
       let reply;
       let modelUsed = 'moodchat-zai';
       try {
         reply = await callZAI(messages);
       } catch (e) {
         console.error(`  Z-AI failed: ${e.message}`);
-        try {
-          reply = await callPollinations(messages);
-          modelUsed = 'moodchat-pollinations';
-        } catch (e2) {
-          console.error(`  Pollinations failed: ${e2.message}`);
-          reply = "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً 🙏";
+        if (pollinationsEnabled) {
+          try {
+            reply = await callPollinations(messages);
+            modelUsed = 'moodchat-pollinations';
+          } catch (e2) {
+            console.error(`  Pollinations failed: ${e2.message}`);
+            reply = "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً 🙏";
+            modelUsed = 'moodchat-fallback';
+          }
+        } else {
+          reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
           modelUsed = 'moodchat-fallback';
         }
       }

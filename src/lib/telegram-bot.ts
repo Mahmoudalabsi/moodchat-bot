@@ -545,11 +545,11 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/togglepollinations - تفعيل/تعطيل Pollinations Fallback\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 ملفات Word: /doc [الموضوع]\n💻 ملفات كود: /code [اللغة] [المطلوب]\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 ملفات Word: /doc [الموضوع]\n💻 ملفات كود: /code [اللغة] [المطلوب]\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /togglepollinations /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -557,6 +557,7 @@ export async function handleTelegramUpdate(update: {
       if (text.startsWith('/chatlog')) { await handleChatLogCommand(chatId, text); return { ok: true }; }
       if (text === '/aistatus') { await handleAIStatusCommand(chatId); return { ok: true }; }
       if (text === '/workerstatus') { await handleWorkerStatusCommand(chatId); return { ok: true }; }
+      if (text === '/togglepollinations') { await handleTogglePollinationsCommand(chatId); return { ok: true }; }
       if (text.startsWith('/block ')) {
         const tid = parseInt(text.split(' ')[1]);
         if (tid && tid !== userId) { await db.telegramUser.update({ where: { userId: tid }, data: { isBlocked: true, waitingForPassword: false } }); await sendMessage(chatId, `تم حظر \`${tid}\``); }
@@ -877,7 +878,26 @@ async function handleWorkerStatusCommand(chatId: number) {
   } catch { status += 'خطأ في قراءة الحالة'; }
   const pendingCount = await db.message.count({ where: { status: 'pending' } });
   status += `\n\nرسائل معلقة: ${pendingCount}`;
+  
+  // Show Pollinations fallback status
+  const pollinationsCfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
+  const pollinationsEnabled = pollinationsCfg?.value === 'true';
+  status += `\n\nPollinations Fallback: ${pollinationsEnabled ? 'مفعّل ✅' : 'معطّل ❌'}\nللتفعيل: /togglepollinations`;
+  
   await sendMessage(chatId, status);
+}
+
+async function handleTogglePollinationsCommand(chatId: number) {
+  const current = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
+  const isEnabled = current?.value === 'true';
+  const newValue = isEnabled ? 'false' : 'true';
+  await db.botConfig.upsert({
+    where: { key: 'pollinations_fallback_enabled' },
+    update: { value: newValue },
+    create: { key: 'pollinations_fallback_enabled', value: newValue },
+  });
+  const statusText = newValue === 'true' ? 'مفعّل ✅' : 'معطّل ❌';
+  await sendMessage(chatId, `**Pollinations Fallback: ${statusText}**\n\n${newValue === 'true' ? 'سيتم استخدام Pollinations كـ fallback عند فشل Z-AI SDK.' : 'سيتم استخدام رسالة خطأ بسيطة عند فشل Z-AI SDK.'}`);
 }
 
 function sanitizeMarkdown(text: string): string {
