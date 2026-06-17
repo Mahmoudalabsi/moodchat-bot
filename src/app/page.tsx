@@ -91,9 +91,10 @@ interface User {
 }
 
 interface Message {
-  id: string; userId: number; role: string; content: string;
+  id: string; userId: number | null; role: string; content: string;
   modelUsed: string | null; timestamp: string; imageUrl: string | null;
   fileName: string | null; fileType: string | null; mimeType: string | null;
+  platform?: string | null; whatsappPhone?: string | null;
   user?: { firstName: string | null; username: string | null; userId: number; photoUrl: string | null } | null;
 }
 
@@ -206,6 +207,29 @@ export default function Dashboard() {
   const [cfgPassword, setCfgPassword] = useState('');
   const [cfgPasswordEnabled, setCfgPasswordEnabled] = useState(true);
   const [cfgGeminiKey, setCfgGeminiKey] = useState('');
+
+  // WhatsApp state
+  interface WhatsAppUser {
+    id: string; phone: string; name: string | null; waId: string | null;
+    languageCode: string | null; firstSeen: string; lastActive: string;
+    totalMessages: number; isBlocked: boolean; isApproved: boolean;
+    approvedAt: string | null; joinAttempts: number; waitingForPassword: boolean;
+    _count?: { messages: number };
+  }
+  interface WhatsAppStatus {
+    connected: boolean; phone_number_id: string; display_phone_number?: string;
+    verified_name?: string; error?: string;
+    config?: { apiVersion: string; phoneNumberId: string; verifyToken: string; adminPhones: string[]; wabaId: string; businessId: string; appId: string; hasAccessToken: boolean };
+    stats?: { users: number; approved: number; pending: number; blocked: number; messages: number; pendingMsgs: number } | null;
+  }
+  const [waStatus, setWaStatus] = useState<WhatsAppStatus | null>(null);
+  const [waUsers, setWaUsers] = useState<WhatsAppUser[]>([]);
+  const [waLoading, setWaLoading] = useState(false);
+  const [waTestPhone, setWaTestPhone] = useState('');
+  const [waTestText, setWaTestText] = useState('🧪 رسالة اختبار من مود شات');
+  const [waSending, setWaSending] = useState(false);
+  const [waTestResult, setWaTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [waActionLoading, setWaActionLoading] = useState<string | null>(null);
 
   // Theme
   const { theme, toggleTheme } = useTheme();
@@ -458,6 +482,87 @@ export default function Dashboard() {
     setRefreshingPhotos(false);
     return null;
   };
+
+  // ============================
+  // WhatsApp functions
+  // ============================
+
+  const fetchWhatsAppStatus = useCallback(async () => {
+    try {
+      const r = await fetch('/api/whatsapp-status');
+      if (r.ok) {
+        const data = await r.json();
+        setWaStatus(data);
+      }
+    } catch (e) {
+      console.error('fetchWhatsAppStatus error:', e);
+    }
+  }, []);
+
+  const fetchWhatsAppUsers = useCallback(async () => {
+    try {
+      const r = await fetch('/api/whatsapp-users');
+      if (r.ok) {
+        const data = await r.json();
+        setWaUsers(data.users || []);
+      }
+    } catch (e) {
+      console.error('fetchWhatsAppUsers error:', e);
+    }
+  }, []);
+
+  const refreshWhatsApp = useCallback(async () => {
+    setWaLoading(true);
+    await Promise.all([fetchWhatsAppStatus(), fetchWhatsAppUsers()]);
+    setWaLoading(false);
+  }, [fetchWhatsAppStatus, fetchWhatsAppUsers]);
+
+  const sendWhatsAppTest = async () => {
+    if (!waTestPhone.trim()) return;
+    setWaSending(true);
+    setWaTestResult(null);
+    try {
+      const r = await fetch('/api/whatsapp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: waTestPhone, type: 'text', text: waTestText }),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        setWaTestResult({ ok: true, message: t.waTestSuccess });
+      } else {
+        setWaTestResult({ ok: false, message: data.error || t.waTestFailed });
+      }
+    } catch (e: any) {
+      setWaTestResult({ ok: false, message: e?.message || String(e) });
+    } finally {
+      setWaSending(false);
+      setTimeout(() => setWaTestResult(null), 5000);
+    }
+  };
+
+  const waUserAction = async (phone: string, action: 'approve' | 'block' | 'unblock' | 'delete') => {
+    setWaActionLoading(`${phone}:${action}`);
+    try {
+      await fetch('/api/whatsapp-users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, action }),
+      });
+      await refreshWhatsApp();
+    } catch (e) {
+      console.error('waUserAction error:', e);
+    } finally {
+      setWaActionLoading(null);
+    }
+  };
+
+  // Load WhatsApp data when tab is opened
+  useEffect(() => {
+    if (activeTab === 'whatsapp' && isLoggedIn) {
+      refreshWhatsApp();
+    }
+  }, [activeTab, isLoggedIn, refreshWhatsApp]);
 
   // Fetch dashboard data
   const fetchDashboard = useCallback(async () => {
@@ -750,6 +855,7 @@ export default function Dashboard() {
               { v: 'stats', l: t.tabStats, i: BarChart3 },
               { v: 'users', l: t.tabUsers, i: Users },
               { v: 'messages', l: t.tabMessages, i: MessageSquare },
+              { v: 'whatsapp', l: t.tabWhatsApp, i: MessageCircle },
               { v: 'settings', l: t.tabSettings, i: Settings },
             ].map(tab => (
               <TabsTrigger
@@ -1712,6 +1818,287 @@ export default function Dashboard() {
                     )}
                   </ScrollArea>
                 </div>
+              </Card>
+            </div>
+          </TabsContent>
+
+          {/* ========== WHATSAPP TAB ========== */}
+          <TabsContent value="whatsapp" className="animate-fade-in mt-6">
+            <div className="space-y-6">
+
+              {/* Header card with status */}
+              <Card className="border-border/50">
+                <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
+                  <div className="space-y-1">
+                    <CardTitle className="flex items-center gap-2 text-xl">
+                      <MessageCircle className="text-green-500" size={22} />
+                      {t.waTitle}
+                    </CardTitle>
+                    <CardDescription>{t.waSubtitle}</CardDescription>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => refreshWhatsApp()}
+                      disabled={waLoading}
+                      className="rounded-lg"
+                    >
+                      <RefreshCw size={14} className={waLoading ? 'animate-spin' : ''} />
+                      <span className="hidden sm:inline mr-1">{t.waRefresh}</span>
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Status banner */}
+                  <div className={`flex items-center gap-3 rounded-lg border p-3 ${
+                    waStatus?.connected
+                      ? 'border-green-500/30 bg-green-500/10'
+                      : 'border-red-500/30 bg-red-500/10'
+                  }`}>
+                    {waStatus?.connected ? (
+                      <Wifi className="text-green-500" size={20} />
+                    ) : (
+                      <WifiOff className="text-red-500" size={20} />
+                    )}
+                    <div className="flex-1">
+                      <div className="font-semibold text-sm">
+                        {t.waStatus}:{' '}
+                        {waStatus?.connected ? t.waConnected : t.waDisconnected}
+                      </div>
+                      {waStatus?.error && (
+                        <div className="text-xs text-muted-foreground mt-1 font-mono break-all">
+                          {waStatus.error}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* No-token warning */}
+                  {waStatus?.config && !waStatus.config.hasAccessToken && (
+                    <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+                      <AlertTriangle className="text-amber-500 shrink-0" size={16} />
+                      <span>{t.waNoToken}</span>
+                    </div>
+                  )}
+
+                  {/* Connection info grid */}
+                  {waStatus?.config && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                      <div className="rounded-lg border border-border/40 p-3 bg-muted/30">
+                        <div className="text-xs text-muted-foreground mb-1">{t.waApiVersion}</div>
+                        <div className="font-mono font-semibold">{waStatus.config.apiVersion}</div>
+                      </div>
+                      <div className="rounded-lg border border-border/40 p-3 bg-muted/30">
+                        <div className="text-xs text-muted-foreground mb-1">{t.waPhoneNumberId}</div>
+                        <div className="font-mono font-semibold">{waStatus.config.phoneNumberId}</div>
+                      </div>
+                      <div className="rounded-lg border border-border/40 p-3 bg-muted/30">
+                        <div className="text-xs text-muted-foreground mb-1">{t.waDisplayNumber}</div>
+                        <div className="font-mono font-semibold">
+                          {waStatus.display_phone_number || '—'}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-border/40 p-3 bg-muted/30">
+                        <div className="text-xs text-muted-foreground mb-1">{t.waVerifiedName}</div>
+                        <div className="font-semibold">
+                          {waStatus.verified_name || '—'}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-border/40 p-3 bg-muted/30 sm:col-span-2">
+                        <div className="text-xs text-muted-foreground mb-1">{t.waVerifyToken}</div>
+                        <div className="font-mono font-semibold break-all">{waStatus.config.verifyToken}</div>
+                      </div>
+                      <div className="rounded-lg border border-border/40 p-3 bg-muted/30 sm:col-span-2">
+                        <div className="text-xs text-muted-foreground mb-1">{t.waWebhookUrl}</div>
+                        <div className="font-mono text-xs break-all bg-background/50 p-2 rounded border border-border/40">
+                          {typeof window !== 'undefined' ? `${window.location.origin}/api/whatsapp/webhook` : '/api/whatsapp/webhook'}
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                          {t.waWebhookHint}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* WhatsApp Stats */}
+              <Card className="border-border/50">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <BarChart3 size={18} />
+                    {t.waStatsTitle}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {waStatus?.stats ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {[
+                        { label: t.waTotalUsers, value: waStatus.stats.users, color: 'text-blue-500' },
+                        { label: t.waApprovedUsers, value: waStatus.stats.approved, color: 'text-green-500' },
+                        { label: t.waPendingUsers, value: waStatus.stats.pending, color: 'text-amber-500' },
+                        { label: t.waBlockedUsers, value: waStatus.stats.blocked, color: 'text-red-500' },
+                        { label: t.waTotalMessages, value: waStatus.stats.messages, color: 'text-purple-500' },
+                        { label: t.waPendingMessages, value: waStatus.stats.pendingMsgs, color: 'text-orange-500' },
+                      ].map((s, i) => (
+                        <div key={i} className="rounded-lg border border-border/40 p-4 bg-muted/20">
+                          <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
+                          <div className="text-xs text-muted-foreground mt-1">{s.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <Skeleton className="h-24 w-full" />
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Send test message */}
+              <Card className="border-border/50">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Send size={18} />
+                    {t.waSendTest}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>{t.waTestPhone}</Label>
+                    <Input
+                      value={waTestPhone}
+                      onChange={e => setWaTestPhone(e.target.value)}
+                      placeholder="970593265926"
+                      dir="ltr"
+                      className="font-mono text-left"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>{t.waTestMessage}</Label>
+                    <Input
+                      value={waTestText}
+                      onChange={e => setWaTestText(e.target.value)}
+                      placeholder={t.waTestMessage}
+                      dir={t.dir}
+                    />
+                  </div>
+                  <Button
+                    onClick={sendWhatsAppTest}
+                    disabled={waSending || !waTestPhone.trim()}
+                    className="rounded-lg bg-green-600 hover:bg-green-700 text-white"
+                  >
+                    <Send size={14} className={t.dir === 'rtl' ? 'ml-2' : 'mr-2'} />
+                    {waSending ? t.waSending : t.waSend}
+                  </Button>
+                  {waTestResult && (
+                    <div className={`text-sm p-3 rounded-lg border ${
+                      waTestResult.ok
+                        ? 'border-green-500/30 bg-green-500/10 text-green-600'
+                        : 'border-red-500/30 bg-red-500/10 text-red-600'
+                    }`}>
+                      {waTestResult.message}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* WhatsApp users */}
+              <Card className="border-border/50">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Users size={18} />
+                    {t.waUsersTitle}
+                    {waUsers.length > 0 && (
+                      <Badge variant="secondary" className="ml-2">{waUsers.length}</Badge>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {waUsers.length === 0 ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <MessageCircle size={40} className="mx-auto mb-2 opacity-30" />
+                      <p className="text-sm">{t.waNoUsers}</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>{t.waPhone}</TableHead>
+                            <TableHead>{t.waName}</TableHead>
+                            <TableHead>{t.status}</TableHead>
+                            <TableHead>{t.msgs}</TableHead>
+                            <TableHead>{t.lastActive}</TableHead>
+                            <TableHead className="text-right">{t.actions}</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {waUsers.map(u => (
+                            <TableRow key={u.id}>
+                              <TableCell className="font-mono text-sm" dir="ltr">{u.phone}</TableCell>
+                              <TableCell>{u.name || '—'}</TableCell>
+                              <TableCell>
+                                {u.isBlocked ? (
+                                  <Badge variant="destructive">{t.blocked}</Badge>
+                                ) : u.isApproved ? (
+                                  <Badge className="bg-green-500/15 text-green-600 border-green-500/30">{t.approved}</Badge>
+                                ) : u.waitingForPassword ? (
+                                  <Badge variant="outline">{t.pending}</Badge>
+                                ) : (
+                                  <Badge className="bg-amber-500/15 text-amber-600 border-amber-500/30">{t.pending}</Badge>
+                                )}
+                              </TableCell>
+                              <TableCell>{u._count?.messages || u.totalMessages || 0}</TableCell>
+                              <TableCell className="text-xs text-muted-foreground">
+                                {new Date(u.lastActive).toLocaleDateString()}
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex gap-1 justify-end">
+                                  {!u.isApproved && !u.isBlocked && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => waUserAction(u.phone, 'approve')}
+                                      disabled={!!waActionLoading}
+                                      className="h-8 text-green-600 hover:bg-green-500/10"
+                                      title={t.approve}
+                                    >
+                                      <CheckCircle size={14} />
+                                    </Button>
+                                  )}
+                                  {!u.isBlocked && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => waUserAction(u.phone, 'block')}
+                                      disabled={!!waActionLoading}
+                                      className="h-8 text-red-600 hover:bg-red-500/10"
+                                      title={t.block}
+                                    >
+                                      <Ban size={14} />
+                                    </Button>
+                                  )}
+                                  {u.isBlocked && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => waUserAction(u.phone, 'unblock')}
+                                      disabled={!!waActionLoading}
+                                      className="h-8 text-amber-600 hover:bg-amber-500/10"
+                                      title={t.unblock}
+                                    >
+                                      <RotateCcw size={14} />
+                                    </Button>
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                </CardContent>
               </Card>
             </div>
           </TabsContent>

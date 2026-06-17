@@ -28,22 +28,48 @@ model TelegramUser {
   joinLogs           JoinLog[]
 }
 
+// ============================
+// نموذج مستخدم واتساب (منفصل تماماً عن تيليجرام)
+// ============================
+model WhatsAppUser {
+  id                 String             @id @default(cuid())
+  phone              String             @unique   // صيغة E.164، مثال: "970593265926"
+  name               String?                       // الاسم من بروفايل واتساب
+  waId               String?                       // WhatsApp ID الرسمي (مثل 970593265926)
+  languageCode       String?
+  firstSeen          DateTime           @default(now())
+  lastActive         DateTime           @updatedAt
+  totalMessages      Int                @default(0)
+  isBlocked          Boolean            @default(false)
+  isApproved         Boolean            @default(false)
+  approvedAt         DateTime?
+  joinAttempts       Int                @default(0)
+  waitingForPassword Boolean            @default(false)
+  messages           Message[]
+  joinLogs           WhatsAppJoinLog[]
+}
+
 model Message {
-  id         String       @id @default(cuid())
-  userId     Int
-  role       String
-  content    String
-  modelUsed  String?
-  timestamp  DateTime     @default(now())
-  status     String       @default("done")  // "pending" = يحتاج رد AI, "done" = تم الرد
-  chatId     Int?                             // معرف المحادثة لإرسال الرد
-  imageUrl   String?                         // رابط الصورة أو file_id من تيليجرام
-  fileName   String?                         // اسم الملف الأصلي (للمستندات والملفات)
-  fileType   String?                         // نوع الملف: image, document, voice, audio, video, sticker
-  mimeType   String?                         // MIME type للملف
-  user       TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  id              String         @id @default(cuid())
+  userId          Int?                                       // معرف مستخدم تيليجرام (أصبح اختيارياً لدعم واتساب)
+  whatsappPhone   String?                                    // رقم هاتف مستخدم واتساب (جديد)
+  platform        String         @default("telegram")        // "telegram" | "whatsapp"
+  role            String
+  content         String
+  modelUsed       String?
+  timestamp       DateTime       @default(now())
+  status          String         @default("done")            // "pending" = يحتاج رد AI, "done" = تم الرد, "processing", "failed"
+  chatId          Int?                                        // معرف محادثة تيليجرام
+  imageUrl        String?                                     // رابط الصورة أو file_id من تيليجرام، أو Media ID من واتساب
+  fileName        String?
+  fileType        String?                                     // image, document, voice, audio, video, sticker
+  mimeType        String?
+  user            TelegramUser?  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  whatsappUser    WhatsAppUser?  @relation(fields: [whatsappPhone], references: [phone], onDelete: Cascade)
 
   @@index([userId])
+  @@index([whatsappPhone])
+  @@index([platform])
   @@index([timestamp])
   @@index([status])
 }
@@ -57,6 +83,20 @@ model JoinLog {
   user          TelegramUser @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// ============================
+// سجل الانضمام لمستخدمي واتساب
+// ============================
+model WhatsAppJoinLog {
+  id            String       @id @default(cuid())
+  phone         String
+  action        String
+  passwordTried String?
+  timestamp     DateTime     @default(now())
+  user          WhatsAppUser @relation(fields: [phone], references: [phone], onDelete: Cascade)
+
+  @@index([phone])
 }
 
 model BotConfig {

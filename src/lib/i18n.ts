@@ -31,6 +31,43 @@ export interface Translations {
   tabUsers: string;
   tabMessages: string;
   tabSettings: string;
+  tabWhatsApp: string;
+
+  // WhatsApp Tab
+  waTitle: string;
+  waSubtitle: string;
+  waStatus: string;
+  waConnected: string;
+  waDisconnected: string;
+  waPhoneNumberId: string;
+  waDisplayNumber: string;
+  waVerifiedName: string;
+  waApiVersion: string;
+  waVerifyToken: string;
+  waWebhookUrl: string;
+  waWebhookHint: string;
+  waStatsTitle: string;
+  waTotalUsers: string;
+  waApprovedUsers: string;
+  waPendingUsers: string;
+  waBlockedUsers: string;
+  waTotalMessages: string;
+  waPendingMessages: string;
+  waUsersTitle: string;
+  waSendTest: string;
+  waSendToUser: string;
+  waTestPhone: string;
+  waTestMessage: string;
+  waSend: string;
+  waSending: string;
+  waTestSuccess: string;
+  waTestFailed: string;
+  waNoToken: string;
+  waNoUsers: string;
+  waPhone: string;
+  waName: string;
+  waRefresh: string;
+  waCheckConnection: string;
 
   // Webhook Status
   online: string;
@@ -151,6 +188,42 @@ const ar: Translations = {
   tabUsers: 'المستخدمين',
   tabMessages: 'المحادثات',
   tabSettings: 'الاعدادات',
+  tabWhatsApp: 'واتساب',
+
+  waTitle: 'بوت واتساب',
+  waSubtitle: 'إدارة WhatsApp Cloud API — مستقل عن بوت تيليجرام',
+  waStatus: 'الحالة',
+  waConnected: 'متصل ✅',
+  waDisconnected: 'غير متصل ❌',
+  waPhoneNumberId: 'Phone Number ID',
+  waDisplayNumber: 'الرقم المعروض',
+  waVerifiedName: 'الاسم الموثق',
+  waApiVersion: 'إصدار API',
+  waVerifyToken: 'Verify Token',
+  waWebhookUrl: 'رابط الـ Webhook',
+  waWebhookHint: 'انسخ هذا الرابط وأدخله في Meta Dashboard مع Verify Token أعلاه. اشترك في حقلي messages و message_status.',
+  waStatsTitle: 'إحصائيات واتساب',
+  waTotalUsers: 'إجمالي المستخدمين',
+  waApprovedUsers: 'الموافق عليهم',
+  waPendingUsers: 'بانتظار الموافقة',
+  waBlockedUsers: 'المحظورون',
+  waTotalMessages: 'إجمالي الرسائل',
+  waPendingMessages: 'رسائل معلقة',
+  waUsersTitle: 'مستخدمو واتساب',
+  waSendTest: 'إرسال رسالة اختبار',
+  waSendToUser: 'إرسال رسالة لمستخدم',
+  waTestPhone: 'رقم الهاتف (مع رمز الدولة، بدون +)',
+  waTestMessage: 'نص الرسالة',
+  waSend: 'إرسال',
+  waSending: 'جاري الإرسال...',
+  waTestSuccess: 'تم الإرسال بنجاح ✅',
+  waTestFailed: 'فشل الإرسال ❌',
+  waNoToken: 'WA_ACCESS_TOKEN غير مضبوط في متغيرات البيئة. أضفه في Vercel لإ تفعيل البوت.',
+  waNoUsers: 'لا يوجد مستخدمو واتساب بعد',
+  waPhone: 'الهاتف',
+  waName: 'الاسم',
+  waRefresh: 'تحديث',
+  waCheckConnection: 'فحص الاتصال',
 
   online: 'متصل',
   offline: 'غير متصل',
@@ -262,6 +335,42 @@ const en: Translations = {
   tabUsers: 'Users',
   tabMessages: 'Messages',
   tabSettings: 'Settings',
+  tabWhatsApp: 'WhatsApp',
+
+  waTitle: 'WhatsApp Bot',
+  waSubtitle: 'Manage WhatsApp Cloud API — independent from Telegram bot',
+  waStatus: 'Status',
+  waConnected: 'Connected ✅',
+  waDisconnected: 'Disconnected ❌',
+  waPhoneNumberId: 'Phone Number ID',
+  waDisplayNumber: 'Display Number',
+  waVerifiedName: 'Verified Name',
+  waApiVersion: 'API Version',
+  waVerifyToken: 'Verify Token',
+  waWebhookUrl: 'Webhook URL',
+  waWebhookHint: 'Copy this URL into Meta Dashboard along with the Verify Token above. Subscribe to messages and message_status fields.',
+  waStatsTitle: 'WhatsApp Stats',
+  waTotalUsers: 'Total Users',
+  waApprovedUsers: 'Approved',
+  waPendingUsers: 'Pending',
+  waBlockedUsers: 'Blocked',
+  waTotalMessages: 'Total Messages',
+  waPendingMessages: 'Pending Messages',
+  waUsersTitle: 'WhatsApp Users',
+  waSendTest: 'Send Test Message',
+  waSendToUser: 'Send to User',
+  waTestPhone: 'Phone (with country code, no +)',
+  waTestMessage: 'Message text',
+  waSend: 'Send',
+  waSending: 'Sending...',
+  waTestSuccess: 'Sent successfully ✅',
+  waTestFailed: 'Send failed ❌',
+  waNoToken: 'WA_ACCESS_TOKEN is not set in env vars. Add it in Vercel to enable the bot.',
+  waNoUsers: 'No WhatsApp users yet',
+  waPhone: 'Phone',
+  waName: 'Name',
+  waRefresh: 'Refresh',
+  waCheckConnection: 'Check Connection',
 
   online: 'Online',
   offline: 'Offline',

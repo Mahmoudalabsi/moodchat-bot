@@ -3,6 +3,15 @@
     "src/app/api/telegram/route.ts": {
       "maxDuration": 60
     },
+    "src/app/api/whatsapp/webhook/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/whatsapp/send/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/whatsapp/test/route.ts": {
+      "maxDuration": 30
+    },
     "src/app/api/**/*.ts": {
       "maxDuration": 30
     }
