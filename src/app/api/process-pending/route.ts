@@ -28,7 +28,7 @@ async function callZAI(messages: Array<{ role: string; content: string }>): Prom
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
-    'X-Z-AI-from': 'Z',
+    'X-Z-AI-From': 'Z',
   };
   if (ZAI_CHAT_ID) headers['X-Chat-Id'] = ZAI_CHAT_ID;
   if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
@@ -78,24 +78,29 @@ async function callPollinations(messages: Array<{ role: string; content: string 
   }
 }
 
-async function getAIResponse(messages: Array<{ role: string; content: string }>): Promise<{ reply: string; provider: string }> {
-  // Try Z-AI first
+async function getAIResponse(
+  messages: Array<{ role: string; content: string }>,
+  pollinationsEnabled: boolean
+): Promise<{ reply: string; provider: string }> {
+  // Try Z-AI first (always on — fast, ~0.4s)
   try {
     const reply = await callZAI(messages);
     return { reply, provider: 'zai-sdk' };
   } catch (e) {
     console.error('[Vercel Worker] Z-AI failed:', (e as Error).message);
   }
-  // Fall back to Pollinations
-  try {
-    const reply = await callPollinations(messages);
-    return { reply, provider: 'pollinations' };
-  } catch (e) {
-    console.error('[Vercel Worker] Pollinations failed:', (e as Error).message);
+  // Fall back to Pollinations ONLY if enabled in DB settings
+  if (pollinationsEnabled) {
+    try {
+      const reply = await callPollinations(messages);
+      return { reply, provider: 'pollinations' };
+    } catch (e) {
+      console.error('[Vercel Worker] Pollinations failed:', (e as Error).message);
+    }
   }
   // Final fallback
   return {
-    reply: 'عذراً، أواجه ضغطاً على الخوادم حالياً. حاول مرة أخرى بعد قليل 🙏',
+    reply: 'عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏',
     provider: 'fallback',
   };
 }
@@ -152,6 +157,15 @@ async function processPending(): Promise<{ processed: number; failed: number }> 
     return { processed: 0, failed: 0 };
   }
 
+  // Check if Pollinations fallback is enabled in DB settings
+  let pollinationsEnabled = false;
+  try {
+    const cfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
+    pollinationsEnabled = cfg?.value === 'true';
+  } catch (e) {
+    console.error('[Vercel Worker] Failed to read pollinations_fallback_enabled:', (e as Error).message);
+  }
+
   // Fetch the claimed messages
   const messages = await db.message.findMany({
     where: { status: 'processing', role: 'user' },
@@ -159,7 +173,7 @@ async function processPending(): Promise<{ processed: number; failed: number }> 
     take: 3,
   });
 
-  console.log(`[Vercel Worker] Claimed ${messages.length} messages`);
+  console.log(`[Vercel Worker] Claimed ${messages.length} messages (Pollinations fallback: ${pollinationsEnabled ? 'ON' : 'OFF'})`);
 
   for (const msg of messages) {
     try {
@@ -179,7 +193,7 @@ async function processPending(): Promise<{ processed: number; failed: number }> 
         { role: 'user', content: msg.content },
       ];
 
-      const { reply, provider } = await getAIResponse(aiMessages);
+      const { reply, provider } = await getAIResponse(aiMessages, pollinationsEnabled);
 
       // Save assistant reply
       await db.message.create({

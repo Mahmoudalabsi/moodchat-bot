@@ -65,7 +65,7 @@ async function callZAI(messages) {
     'X-Chat-Id': ZAI_CHAT_ID,
     'X-User-Id': ZAI_USER_ID,
     'X-Token': ZAI_TOKEN,
-    'X-Z-AI-from': 'Z',
+    'X-Z-AI-From': 'Z',
   };
 
   const controller = new AbortController();
