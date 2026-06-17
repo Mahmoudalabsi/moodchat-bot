@@ -6,9 +6,10 @@ export async function GET() {
   const tests = [
     { name: 'internal-api.z.ai', url: 'https://internal-api.z.ai/v1/chat/completions' },
     { name: 'api.z.ai', url: 'https://api.z.ai/v1/chat/completions' },
+    { name: 'z.ai', url: 'https://z.ai/api/v1/chat/completions' },
     { name: 'open.bigmodel.cn', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions' },
+    { name: 'text.pollinations.ai', url: 'https://text.pollinations.ai/openai/chat/completions' },
     { name: 'google', url: 'https://www.google.com' },
-    { name: 'cloudflare-dns', url: 'https://1.1.1.1' },
   ];
 
   for (const t of tests) {
