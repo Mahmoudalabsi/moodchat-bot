@@ -1,10 +1,10 @@
 /**
  * Telegram Bot Library - MoodChat (مود شات)
- * 
- * نظام Worker فقط:
- * - Vercel Webhook: يستقبل الرسائل ويحفظها كـ pending
- * - Z.ai Worker: يعالج الرسائل باستخدام Z-AI SDK (الأساسي)
- * - لا APIs خارجية - Z-AI SDK فقط!
+ *
+ * بنية Webhook متزامن (لا يعتمد على Worker أو جلسة):
+ * - Vercel Webhook: يستقبل الرسالة ويعالجها فوراً باستخدام Z-AI SDK
+ * - Pollinations API: fallback اختياري يُفعّله الأدمن عبر /togglepollinations
+ * - كل المعالجة تحدث داخل طلب الـ webhook نفسه (ضمن مهلة 60 ثانية من Vercel)
  */
 
 import { db } from './db';
@@ -116,6 +116,230 @@ async function getUserLang(userId: number): Promise<string> {
 
 async function setUserLang(userId: number, lang: string): Promise<void> {
   await setConfigValue(`user_lang_${userId}`, lang);
+}
+
+// ============================
+// معالج الرسائل المتزامن - Z-AI SDK + Pollinations Fallback
+// ============================
+
+/** استدعاء Z-AI SDK عبر fetch مباشر (أسرع من استيراد الـ SDK الكامل) */
+async function callZAISDK(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${ZAI_CONFIG.apiKey}`,
+    'X-Chat-Id': ZAI_CONFIG.chatId,
+    'X-User-Id': ZAI_CONFIG.userId,
+    'X-Token': ZAI_CONFIG.token,
+    'X-Z-AI-From': 'Z',
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  try {
+    const res = await fetch(`${ZAI_CONFIG.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages,
+        temperature: 0.7,
+        max_tokens: 2048,
+        thinking: { type: 'disabled' },
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`Z-AI ${res.status}: ${errBody.substring(0, 100)}`);
+    }
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty Z-AI response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** استدعاء Pollinations API كـ fallback */
+async function callPollinationsAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages,
+        model: 'openai',
+        temperature: 0.7,
+        seed: Math.floor(Math.random() * 10000),
+      }),
+    });
+    if (!res.ok) throw new Error(`Pollinations ${res.status}`);
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (reply?.trim()) return reply.trim();
+    throw new Error('Empty Pollinations response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** سلسلة الـ providers: Z-AI SDK → Pollinations (إذا مفعّل) → رسالة ثابتة */
+async function processWithAI(
+  messages: Array<{ role: string; content: string }>
+): Promise<{ reply: string; provider: string }> {
+  // 1) Z-AI SDK (الأساسي - سريع جداً)
+  try {
+    const reply = await callZAISDK(messages);
+    return { reply, provider: 'zai-sdk' };
+  } catch (e: any) {
+    console.error('[AI] Z-AI SDK failed:', e?.message?.substring(0, 120));
+  }
+
+  // 2) Pollinations Fallback (إذا كان مفعّلاً من الأدمن)
+  try {
+    const cfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
+    if (cfg?.value === 'true') {
+      const reply = await callPollinationsAPI(messages);
+      return { reply, provider: 'pollinations' };
+    }
+  } catch (e: any) {
+    console.error('[AI] Pollinations failed:', e?.message?.substring(0, 120));
+  }
+
+  // 3) رسالة ثابتة
+  return {
+    reply: 'عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏',
+    provider: 'fallback',
+  };
+}
+
+/** معالجة رسالة نصية بشكل متزامن: حفظ → استدعاء AI → حفظ الرد → إرسال */
+async function handleTextMessageSynchronous(
+  userId: number,
+  chatId: number,
+  text: string
+): Promise<void> {
+  // إرسال "يكتب..." لإعلام المستخدم
+  await sendChatAction(chatId);
+
+  // حفظ رسالة المستخدم (status=done مباشرة لأننا نعالجها الآن)
+  await db.message.create({
+    data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
+  });
+
+  // جلب الذاكرة السابقة
+  const clearMarker = await getConfigValue(`clear_marker_${userId}`);
+  const historyWhere: any = { userId, status: 'done' };
+  if (clearMarker) {
+    historyWhere.timestamp = { gt: new Date(clearMarker) };
+  }
+  const history = await db.message.findMany({
+    where: historyWhere,
+    orderBy: { timestamp: 'asc' },
+    take: MAX_HISTORY,
+  });
+
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...history.map(m => ({ role: m.role, content: m.content })),
+    { role: 'user', content: text },
+  ];
+
+  // استدعاء AI
+  const { reply, provider } = await processWithAI(messages);
+
+  // حفظ رد المساعد
+  await db.message.create({
+    data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done' },
+  });
+
+  // إرسال الرد إلى تيليجرام
+  const safeReply = sanitizeMarkdown(reply);
+  await sendMessage(chatId, safeReply);
+  console.log(`[Bot] ✅ Replied to ${userId} via ${provider}: "${reply.substring(0, 60)}..."`);
+}
+
+/** معالجة ملف (صورة/مستند/صوت/فيديو/ملصق) بشكل متزامن */
+async function handleFileMessageSynchronous(
+  userId: number,
+  chatId: number,
+  userContent: string,
+  fileType: string,
+  fileId: string,
+  caption: string,
+  userLang: string
+): Promise<void> {
+  try {
+    await sendChatAction(chatId);
+
+    // جلب الذاكرة السابقة
+    const clearMarker = await getConfigValue(`clear_marker_${userId}`);
+    const historyWhere: any = { userId, status: 'done' };
+    if (clearMarker) {
+      historyWhere.timestamp = { gt: new Date(clearMarker) };
+    }
+    const history = await db.message.findMany({
+      where: historyWhere,
+      orderBy: { timestamp: 'asc' },
+      take: MAX_HISTORY,
+    });
+
+    let reply = '';
+    let provider = 'unknown';
+
+    // === الصور والملصقات: استخدم Z-AI VLM SDK ===
+    if (fileType === 'image' || fileType === 'sticker') {
+      try {
+        const fileData = await downloadTelegramFile(fileId);
+        if (fileData) {
+          reply = await analyzeImageWithVLM(
+            fileData.base64,
+            fileData.mimeType,
+            caption || (userLang === 'ar' ? 'حلل هذه الصورة بالتفصيل' : 'Analyze this image in detail'),
+            history.map(m => ({ role: m.role, content: m.content })),
+            userLang
+          );
+          provider = 'zai-vlm';
+        } else {
+          throw new Error('Failed to download file');
+        }
+      } catch (vlmErr: any) {
+        console.error('[Bot] VLM error:', vlmErr?.message?.substring(0, 100));
+        // Fallback إلى معالجة نصية
+        const result = await processWithAI([
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...history.map(m => ({ role: m.role, content: m.content })),
+          { role: 'user', content: `${caption || 'صورة'} (تعذّر تحليل الصورة بصرياً، أجب عن النص المرفق إن وُجد)` },
+        ]);
+        reply = result.reply;
+        provider = `vlm-fallback-${result.provider}`;
+      }
+    } else {
+      // === المستندات والصوت والفيديو: معالجة نصية ===
+      const result = await processWithAI([
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...history.map(m => ({ role: m.role, content: m.content })),
+        { role: 'user', content: `${userContent}\n\nالطلب: ${caption || 'حلل هذا الملف'}` },
+      ]);
+      reply = result.reply;
+      provider = result.provider;
+    }
+
+    // حفظ رد المساعد
+    await db.message.create({
+      data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done' },
+    });
+
+    // إرسال الرد
+    const safeReply = sanitizeMarkdown(reply);
+    await sendMessage(chatId, safeReply);
+    console.log(`[Bot] ✅ File [${fileType}] replied to ${userId} via ${provider}`);
+  } catch (err: any) {
+    console.error('[Bot] File processing error:', err?.message?.substring(0, 150));
+    await sendMessage(chatId, '❌ حدث خطأ أثناء معالجة الملف. حاول مرة أخرى.');
+  }
 }
 
 // ============================
@@ -398,7 +622,7 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // معالجة الملفات (صور + مستندات + صوت + فيديو) - حفظ كـ pending للـ Worker
+    // معالجة الملفات (صور + مستندات + صوت + فيديو) - معالجة متزامنة بالـ Webhook
     // ==========================================
     if (hasFile && !user.isBlocked && (user.isApproved || isAdm)) {
       try {
@@ -414,15 +638,16 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'vlm', status: 'pending', chatId,
+              modelUsed: 'vlm', status: 'done', chatId,
               imageUrl: bestPhoto.file_id,
               fileName: `photo_${bestPhoto.file_id.substring(0, 10)}.jpg`,
               fileType: 'image',
               mimeType: 'image/jpeg',
             },
           });
-          console.log(`[Bot] 📸 Image saved as pending. fileId=${bestPhoto.file_id}`);
-          return { ok: true, mode: 'image-pending' };
+          console.log(`[Bot] 📸 Image received. Processing with VLM...`);
+          await handleFileMessageSynchronous(userId, chatId, userContent, 'image', bestPhoto.file_id, caption, userLang);
+          return { ok: true, mode: 'image-processed' };
         }
 
         // === مستند (PDF, DOCX, TXT, كود, Excel, إلخ) ===
@@ -436,15 +661,16 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'file-analyze', status: 'pending', chatId,
+              modelUsed: 'file-analyze', status: 'done', chatId,
               imageUrl: doc.file_id,
               fileName,
               fileType: 'document',
               mimeType,
             },
           });
-          console.log(`[Bot] 📎 Document saved as pending. fileId=${doc.file_id} name=${fileName} mime=${mimeType}`);
-          return { ok: true, mode: 'document-pending' };
+          console.log(`[Bot] 📎 Document received. Processing... name=${fileName} mime=${mimeType}`);
+          await handleFileMessageSynchronous(userId, chatId, userContent, 'document', doc.file_id, caption || `حلل هذا الملف: ${fileName}`, userLang);
+          return { ok: true, mode: 'document-processed' };
         }
 
         // === رسالة صوتية ===
@@ -456,15 +682,16 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'voice-analyze', status: 'pending', chatId,
+              modelUsed: 'voice-analyze', status: 'done', chatId,
               imageUrl: voice.file_id,
               fileName: `voice_${voice.file_id.substring(0, 10)}.ogg`,
               fileType: 'voice',
               mimeType: voice.mime_type || 'audio/ogg',
             },
           });
-          console.log(`[Bot] 🎤 Voice saved as pending. fileId=${voice.file_id}`);
-          return { ok: true, mode: 'voice-pending' };
+          console.log(`[Bot] 🎤 Voice received. Processing...`);
+          await handleFileMessageSynchronous(userId, chatId, userContent, 'voice', voice.file_id, caption || (userLang === 'ar' ? 'فرّغ هذه الرسالة الصوتية' : 'Transcribe this voice message'), userLang);
+          return { ok: true, mode: 'voice-processed' };
         }
 
         // === ملف صوتي ===
@@ -476,15 +703,16 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'audio-analyze', status: 'pending', chatId,
+              modelUsed: 'audio-analyze', status: 'done', chatId,
               imageUrl: audio.file_id,
               fileName: audio.title ? `${audio.title}.mp3` : `audio_${audio.file_id.substring(0, 10)}.mp3`,
               fileType: 'audio',
               mimeType: audio.mime_type || 'audio/mpeg',
             },
           });
-          console.log(`[Bot] 🎵 Audio saved as pending. fileId=${audio.file_id}`);
-          return { ok: true, mode: 'audio-pending' };
+          console.log(`[Bot] 🎵 Audio received. Processing...`);
+          await handleFileMessageSynchronous(userId, chatId, userContent, 'audio', audio.file_id, caption || `حلل هذا الملف الصوتي: ${audio.title || ''}`, userLang);
+          return { ok: true, mode: 'audio-processed' };
         }
 
         // === فيديو ===
@@ -496,15 +724,16 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'video-analyze', status: 'pending', chatId,
+              modelUsed: 'video-analyze', status: 'done', chatId,
               imageUrl: vid.file_id,
               fileName: `video_${vid.file_id.substring(0, 10)}.mp4`,
               fileType: 'video',
               mimeType: (vid as any).mime_type || 'video/mp4',
             },
           });
-          console.log(`[Bot] 🎬 Video saved as pending. fileId=${vid.file_id}`);
-          return { ok: true, mode: 'video-pending' };
+          console.log(`[Bot] 🎬 Video received. Processing...`);
+          await handleFileMessageSynchronous(userId, chatId, userContent, 'video', vid.file_id, caption || `حلل هذا الفيديو`, userLang);
+          return { ok: true, mode: 'video-processed' };
         }
 
         // === ملصق (Sticker) ===
@@ -514,15 +743,16 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'vlm', status: 'pending', chatId,
+              modelUsed: 'vlm', status: 'done', chatId,
               imageUrl: sticker.file_id,
               fileName: `sticker_${sticker.emoji || 'sticker'}.webp`,
               fileType: 'sticker',
               mimeType: sticker.is_animated ? 'application/x-tgsticker' : 'image/webp',
             },
           });
-          console.log(`[Bot] 🏷️ Sticker saved as pending. fileId=${sticker.file_id}`);
-          return { ok: true, mode: 'sticker-pending' };
+          console.log(`[Bot] 🏷️ Sticker received. Processing...`);
+          await handleFileMessageSynchronous(userId, chatId, userContent, 'sticker', sticker.file_id, caption || `حلل هذا الملصق`, userLang);
+          return { ok: true, mode: 'sticker-processed' };
         }
 
       } catch (fileErr: any) {
@@ -545,7 +775,7 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/togglepollinations - تفعيل/تعطيل Pollinations Fallback\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK + Pollinations Fallback\n\n⚡ **بنية Webhook متزامن:** لا حاجة لـ Worker، المعالجة فورية!\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة النظام\n/togglepollinations - تفعيل/تعطيل Pollinations Fallback\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
         return { ok: true };
       }
       if (text === '/help') {
@@ -620,11 +850,14 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "📄 اكتب الموضوع بعد الأمر، مثال:\n`/doc تقرير عن الذكاء الاصطناعي`");
           return { ok: true };
         }
+        const userContent = `📄 إنشاء ملف Word عن: ${docTopic}`;
         await db.message.create({
-          data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
+          data: { userId, role: 'user', content: userContent, modelUsed: 'file-docx', status: 'done', chatId },
         });
         await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
-        return { ok: true, mode: 'file-pending' };
+        // NOTE: لإنشاء ملف Word فعلي نحتاج لـ SDK VLM/Document - سيتم الرد كنص متزامن
+        await handleTextMessageSynchronous(userId, chatId, `أنشئ محتوى تفصيلي لملف Word عن: ${docTopic}. قدّم هيكلاً وعناوين ومحتوى.`);
+        return { ok: true, mode: 'doc-processed' };
       }
       // أمر /code - إنشاء ملف كود
       if (text.startsWith('/code ')) {
@@ -633,11 +866,13 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "💻 اكتب المطلوب بعد الأمر، مثال:\n`/code python لعبة ثعبان`\n`/code js صفحة ويب`");
           return { ok: true };
         }
+        const userContent = `💻 إنشاء كود: ${codeRequest}`;
         await db.message.create({
-          data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
+          data: { userId, role: 'user', content: userContent, modelUsed: 'file-code', status: 'done', chatId },
         });
         await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
-        return { ok: true, mode: 'file-pending' };
+        await handleTextMessageSynchronous(userId, chatId, `اكتب كود برمجي للتالي: ${codeRequest}. ضع الكود في block معين اللغة.`);
+        return { ok: true, mode: 'code-processed' };
       }
     }
 
@@ -720,11 +955,13 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "📄 اكتب الموضوع بعد الأمر، مثال:\n`/doc تقرير عن الذكاء الاصطناعي`");
           return { ok: true };
         }
+        const userContent = `📄 إنشاء ملف Word عن: ${docTopic}`;
         await db.message.create({
-          data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
+          data: { userId, role: 'user', content: userContent, modelUsed: 'file-docx', status: 'done', chatId },
         });
         await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
-        return { ok: true, mode: 'file-pending' };
+        await handleTextMessageSynchronous(userId, chatId, `أنشئ محتوى تفصيلي لملف Word عن: ${docTopic}. قدّم هيكلاً وعناوين ومحتوى.`);
+        return { ok: true, mode: 'doc-processed' };
       }
       // أمر /code - إنشاء ملف كود
       if (text.startsWith('/code ')) {
@@ -733,24 +970,22 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "💻 اكتب المطلوب بعد الأمر، مثال:\n`/code python لعبة ثعبان`\n`/code js صفحة ويب`");
           return { ok: true };
         }
+        const userContent = `💻 إنشاء كود: ${codeRequest}`;
         await db.message.create({
-          data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
+          data: { userId, role: 'user', content: userContent, modelUsed: 'file-code', status: 'done', chatId },
         });
         await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
-        return { ok: true, mode: 'file-pending' };
+        await handleTextMessageSynchronous(userId, chatId, `اكتب كود برمجي للتالي: ${codeRequest}. ضع الكود في block معين اللغة.`);
+        return { ok: true, mode: 'code-processed' };
       }
     }
 
     // ==========================================
-    // المحادثة مع الذكاء الاصطناعي - حفظ كـ pending للـ Worker
+    // المحادثة مع الذكاء الاصطناعي - معالجة متزامنة (لا حاجة لـ Worker)
     // ==========================================
     if ((user.isApproved || isAdm) && !user.isBlocked) {
-      // حفظ الرسالة كـ pending - الـ Worker سيعالجها باستخدام Z-AI SDK
-      await db.message.create({
-        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
-      });
-      console.log(`[Bot] Message saved as pending. User: ${userId}, Worker will process with Z-AI SDK`);
-      return { ok: true, mode: 'pending' };
+      await handleTextMessageSynchronous(userId, chatId, text);
+      return { ok: true, mode: 'processed' };
     }
 
     console.log(`[Bot] Unhandled state for user ${userId}`);
@@ -859,31 +1094,37 @@ async function handleAIStatusCommand(chatId: number) {
   } catch (err: any) {
     status += `Z-AI SDK: غير متاح ❌ (${err?.message?.substring(0, 40)})\n`;
   }
-  const workerAlive = await isWorkerAlive();
-  status += `\nWorker: ${workerAlive ? 'يعمل ✅' : 'متوقف ❌'}\nالنظام: Z-AI SDK فقط`;
+  status += `\nالنظام: Webhook متزامن (لا Worker) - Z-AI SDK + Pollinations Fallback`;
   await sendMessage(chatId, status);
 }
 
 async function handleWorkerStatusCommand(chatId: number) {
-  let status = "**حالة الـ Worker:**\n\n";
-  try {
-    const heartbeat = await db.botConfig.findUnique({ where: { key: 'worker_heartbeat' } });
-    if (heartbeat?.value) {
-      const lastBeat = new Date(heartbeat.value);
-      const age = Math.round((Date.now() - lastBeat.getTime()) / 1000);
-      status += `آخر نبضة: ${lastBeat.toISOString()}\nمنذ: ${age} ثانية\nالحالة: ${age < 120 ? 'يعمل ✅' : 'متوقف ❌'}`;
-    } else {
-      status += 'لا توجد نبضة - Worker لم يعمل بعد';
-    }
-  } catch { status += 'خطأ في قراءة الحالة'; }
+  let status = "**حالة النظام:**\n\n";
+  status += "🏗️ **البنية:** Webhook متزامن (لا حاجة لـ Worker)\n";
+  status += "⚙️ **المعالج:** Z-AI SDK (رئيسي) + Pollinations (fallback اختياري)\n";
+  status += "⚡ **المعالجة:** فورية داخل طلب الـ webhook\n\n";
+
+  // Pending messages (should be 0 in this architecture)
   const pendingCount = await db.message.count({ where: { status: 'pending' } });
-  status += `\n\nرسائل معلقة: ${pendingCount}`;
-  
-  // Show Pollinations fallback status
+  status += `📨 رسائل معلقة: ${pendingCount}\n`;
+  if (pendingCount > 0) {
+    status += "   ⚠️ يجب أن تكون 0 في البنية المتزامنة. شغّل worker للتنظيف.\n";
+  }
+
+  // Pollinations fallback status
   const pollinationsCfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
   const pollinationsEnabled = pollinationsCfg?.value === 'true';
-  status += `\n\nPollinations Fallback: ${pollinationsEnabled ? 'مفعّل ✅' : 'معطّل ❌'}\nللتفعيل: /togglepollinations`;
-  
+  status += `\nPollinations Fallback: ${pollinationsEnabled ? 'مفعّل ✅' : 'معطّل ❌'}\nللتفعيل: /togglepollinations`;
+
+  // Z-AI test
+  try {
+    const t0 = Date.now();
+    await callZAISDK([{ role: 'user', content: 'ok' }]);
+    status += `\n\nZ-AI SDK: يعمل ✅ (${Date.now() - t0}ms)`;
+  } catch (e: any) {
+    status += `\n\nZ-AI SDK: خطأ ❌ (${e?.message?.substring(0, 50)})`;
+  }
+
   await sendMessage(chatId, status);
 }
 
