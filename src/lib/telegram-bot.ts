@@ -134,83 +134,6 @@ async function isWorkerAlive(): Promise<boolean> {
 }
 
 // ============================
-// AI Inline Fallback (used only when Worker is dead, for text messages only)
-// 🔧 SAFE FIX: Pollinations GET is fast (3.3s) and reliable on Vercel
-// All complex messages (images, docs, voice, video) stay as 'pending' for the Worker
-// ============================
-
-async function callPollinationsGET(messages: Array<{ role: string; content: string }>): Promise<string> {
-  // 🔧 CRITICAL FIX: Keep prompt VERY short to avoid URL length issues + speed up
-  // Pollinations GET works best with simple prompts (<1500 chars)
-  // We send: brief role + last 3 messages only
-  const recent = messages.filter(m => m.role !== 'system').slice(-3);
-  const lastUserMsg = recent.filter(m => m.role === 'user').pop()?.content || '';
-  const lastAssistantMsg = recent.filter(m => m.role === 'assistant').pop()?.content || '';
-
-  // Build minimal prompt
-  let prompt = 'أنت مود شات، مساعد ذكي وودود. أجب بالعربية بوضوح وإيجاز دون مقدمات.';
-  if (lastAssistantMsg) {
-    prompt += `\n\nمساعد: ${lastAssistantMsg.substring(0, 200)}`;
-  }
-  prompt += `\n\nمستخدم: ${lastUserMsg.substring(0, 800)}\n\nمساعد:`;
-
-  // URL-encode and limit to 1500 chars total (safe for Pollinations)
-  const encodedPrompt = encodeURIComponent(prompt.substring(0, 1500));
-
-  const models = ['openai', 'mistral', 'llama'];
-  let lastError = '';
-  for (const model of models) {
-    try {
-      const url = `https://text.pollinations.ai/${encodedPrompt}?model=${model}&seed=${Math.floor(Math.random() * 100000)}`;
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Referer': 'https://moodchat.bot',
-          'User-Agent': 'MoodChat-Bot/1.0',
-        },
-        signal: AbortSignal.timeout(20000),
-      });
-      if (response.status === 429) { lastError = `${model}: 429 rate limit`; await new Promise(r => setTimeout(r, 1000)); continue; }
-      if (!response.ok) { lastError = `${model}: HTTP ${response.status}`; continue; }
-      const reply = await response.text();
-      if (reply?.trim() && reply.length > 3) {
-        console.log(`[AI] Pollinations GET ${model} OK (${reply.length} chars)`);
-        return reply.trim();
-      }
-      lastError = `${model}: empty reply`;
-    } catch (err: any) { lastError = `${model}: ${err?.message?.substring(0, 50) || 'timeout'}`; continue; }
-  }
-  throw new Error(`Pollinations GET failed: ${lastError}`);
-}
-
-function generateSmartFallback(userMessage: string): string {
-  const msg = userMessage.toLowerCase().trim();
-  if (/^(مرحبا|سلام|هلا|اهلا|السلام|أهلا|مرحباً|هاي|صباح|مساء)/.test(msg))
-    return "وعليكم السلام ورحمة الله وبركاته!\n\nأهلاً وسهلاً بك في مود شات. كيف يمكنني مساعدتك اليوم؟";
-  if (/^(كيف|شلون|شخبار|عامل|كيفك)/.test(msg))
-    return "الحمد لله بخير! كيف حالك أنت؟ أتمنى أن تكون بخير وعافية.";
-  if (/^(شكرا|شكراً|مشكور|تسلم|الله يجزاك)/.test(msg))
-    return "العفو! لا شكر على واجب. أنا هنا لمساعدتك دائماً.";
-  if (/^(من أنت|مين أنت|اسمك|عرف نفسك)/.test(msg))
-    return "أنا مود شات، مساعدك الذكي! يمكنني مساعدتك في الإجابة على أسئلتك والمحادثة بأي لغة تريدها.";
-  if (/^(ساعدني|محتاج مساعدة|help|مساعدة)/.test(msg))
-    return "بالطبع! أنا هنا لمساعدتك. أخبرني بما تحتاج وسأبذل قصارى جهدي لمساعدتك.";
-  return "شكراً لرسالتك! حالياً أواجه ضغطاً على الخوادم، لكن يمكنك المحاولة مرة أخرى بعد قليل.\n\n/clear - مسح الذاكرة\n/help - المساعدة";
-}
-
-async function getAIResponseInline(messages: Array<{ role: string; content: string }>): Promise<{ reply: string; provider: string }> {
-  try {
-    const reply = await callPollinationsGET(messages);
-    return { reply, provider: 'pollinations-get' };
-  } catch (err: any) {
-    console.log('[AI Inline] Pollinations failed:', err?.message);
-  }
-  // Final fallback - smart canned response
-  const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
-  return { reply: generateSmartFallback(lastUserMsg), provider: 'fallback' };
-}
-
-// ============================
 // Telegram API
 // ============================
 
@@ -818,67 +741,15 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // المحادثة مع الذكاء الاصطناعي
-    // 🔧 SAFE FIX:
-    // - إذا Worker حي: احفظ كـ pending (الـ Worker سيعالجها بـ Z-AI SDK)
-    // - إذا Worker ميت: عالج النصوص inline عبر Pollinations GET (سريع 3.3s)
-    // - الصور/المستندات/الصوت/الفيديو: دائماً pending (يحتاجوا Z-AI SDK)
+    // المحادثة مع الذكاء الاصطناعي - حفظ كـ pending للـ Worker
     // ==========================================
     if ((user.isApproved || isAdm) && !user.isBlocked) {
-      const workerAlive = await isWorkerAlive();
-
-      if (workerAlive) {
-        // ✅ Worker حي - احفظ كـ pending وسيعالجها Z-AI SDK
-        await db.message.create({
-          data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
-        });
-        console.log(`[Bot] Message saved as pending (worker alive). User: ${userId}`);
-        return { ok: true, mode: 'pending' };
-      }
-
-      // ❌ Worker ميت - عالج النص inline عبر Pollinations GET
-      await sendChatAction(chatId);
+      // حفظ الرسالة كـ pending - الـ Worker سيعالجها باستخدام Z-AI SDK
       await db.message.create({
-        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
+        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
       });
-
-      // جلب سجل المحادثة (آخر 6 رسائل فقط لسرعة Pollinations)
-      const dbMessages = await db.message.findMany({
-        where: { userId, status: 'done' },
-        orderBy: { timestamp: 'asc' },
-        take: 6,
-        select: { role: true, content: true },
-      });
-
-      const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...dbMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      ];
-
-      console.log(`[Bot] Processing inline (worker dead). User: ${userId}`);
-      const { reply, provider } = await getAIResponseInline(aiMessages);
-
-      if (provider === 'fallback') {
-        // Pollinations failed - send fallback message but DON'T save it as 'done'
-        // (so when VPS Worker comes back, it can reprocess with real AI)
-        // Save user message as 'pending' so worker can pick it up later
-        await db.message.updateMany({
-          where: { userId, role: 'user', content: text, status: 'done' },
-          data: { status: 'pending' },
-        });
-        await sendMessage(chatId, sanitizeMarkdown(reply));
-        console.log(`[Bot] ⚠️ Fallback sent to ${userId} (pending saved for worker)`);
-        return { ok: true, mode: 'inline-fallback', provider };
-      }
-
-      // حفظ رد البوت
-      await db.message.create({
-        data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done', chatId },
-      });
-
-      await sendMessage(chatId, sanitizeMarkdown(reply));
-      console.log(`[Bot] ✅ Replied to ${userId} via ${provider}`);
-      return { ok: true, mode: 'inline', provider };
+      console.log(`[Bot] Message saved as pending. User: ${userId}, Worker will process with Z-AI SDK`);
+      return { ok: true, mode: 'pending' };
     }
 
     console.log(`[Bot] Unhandled state for user ${userId}`);

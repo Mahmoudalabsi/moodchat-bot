@@ -6,11 +6,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { handleTelegramUpdate, setWebhook, getWebhookInfo, deleteWebhook } from '@/lib/telegram-bot';
 
-// 🔧 FIX: maxDuration=30s - Vercel default 10s is too short, 60s causes FUNCTION_INVOCATION_TIMEOUT
-// Pollinations GET takes 3-5s typically, 30s gives comfortable margin
-export const maxDuration = 30;
-export const runtime = 'nodejs';
-
 // استقبال تحديثات تيليجرام
 export async function POST(request: NextRequest) {
   try {
