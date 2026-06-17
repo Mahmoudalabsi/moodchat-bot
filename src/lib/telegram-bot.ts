@@ -18,14 +18,39 @@ const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').m
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
 
-// Z-AI SDK Config
-const ZAI_CONFIG = {
-  baseUrl: 'https://internal-api.z.ai/v1',
-  apiKey: 'Z.ai',
-  chatId: 'chat-c2ae3234-5685-4053-8998-96e9a664f658',
-  userId: '014c4da7-4f7f-4efa-9157-9091a73a3570',
-  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
-};
+// Zhipu AI Config (GLM-4.5-Flash - public API, works from Vercel)
+// API key format: {id}.{secret} - we sign a JWT with the secret
+const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY || 'ba0c0421a5a2409ca7ded8f64a5504ce.wY6XGMuaApa32mCf';
+const ZHIPU_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+const ZHIPU_MODEL = process.env.ZHIPU_MODEL || 'glm-4.5-flash';
+
+// Cache the JWT (regenerate when expiry < 5 min away)
+let cachedJwt: { token: string; exp: number } | null = null;
+
+function base64url(input: string): string {
+  return Buffer.from(input).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function generateZhipuJWT(): string {
+  // Reuse cached JWT if still valid (>5 min remaining)
+  if (cachedJwt && cachedJwt.exp - Math.floor(Date.now() / 1000) > 300) {
+    return cachedJwt.token;
+  }
+  const [id, secret] = ZHIPU_API_KEY.split('.');
+  if (!id || !secret) throw new Error('Invalid ZHIPU_API_KEY format (expected id.secret)');
+  const header = { alg: 'HS256', sign_type: 'SIGN' };
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { api_key: id, exp: now + 3600, timestamp: now };
+  const headerB64 = base64url(JSON.stringify(header));
+  const payloadB64 = base64url(JSON.stringify(payload));
+  const data = `${headerB64}.${payloadB64}`;
+  // Zhipu uses HMAC-SHA256 with the secret, then hex → base64url
+  const sig = require('crypto').createHmac('sha256', secret).update(data).digest('hex');
+  const sigB64 = Buffer.from(sig, 'hex').toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  const token = `${data}.${sigB64}`;
+  cachedJwt = { token, exp: now + 3600 };
+  return token;
+}
 
 const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
 
@@ -68,10 +93,10 @@ async function getAIConfig() {
     if (provider === 'api' && m.api_base_url && m.api_key) {
       aiConfigCache = { provider: 'api', baseUrl: m.api_base_url, apiKey: m.api_key, model: m.api_model || 'gpt-4' };
     } else {
-      aiConfigCache = { provider: 'zsdk', baseUrl: ZAI_CONFIG.baseUrl, apiKey: ZAI_CONFIG.apiKey, model: 'glm-4-plus' };
+      aiConfigCache = { provider: 'zsdk', baseUrl: ZHIPU_BASE_URL, apiKey: ZHIPU_API_KEY, model: ZHIPU_MODEL };
     }
   } catch {
-    aiConfigCache = { provider: 'zsdk', baseUrl: ZAI_CONFIG.baseUrl, apiKey: ZAI_CONFIG.apiKey, model: 'glm-4-plus' };
+    aiConfigCache = { provider: 'zsdk', baseUrl: ZHIPU_BASE_URL, apiKey: ZHIPU_API_KEY, model: ZHIPU_MODEL };
   }
   aiConfigCacheTime = Date.now();
   return aiConfigCache!;
@@ -122,24 +147,21 @@ async function setUserLang(userId: number, lang: string): Promise<void> {
 // معالج الرسائل المتزامن - Z-AI SDK + Pollinations Fallback
 // ============================
 
-/** استدعاء Z-AI SDK عبر fetch مباشر (أسرع من استيراد الـ SDK الكامل) */
+/** استدعاء Zhipu GLM-4.5-Flash عبر fetch مباشر (API عام يعمل من Vercel) */
 async function callZAISDK(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${ZAI_CONFIG.apiKey}`,
-    'X-Chat-Id': ZAI_CONFIG.chatId,
-    'X-User-Id': ZAI_CONFIG.userId,
-    'X-Token': ZAI_CONFIG.token,
-    'X-Z-AI-From': 'Z',
-  };
+  const jwt = generateZhipuJWT();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
-    const res = await fetch(`${ZAI_CONFIG.baseUrl}/chat/completions`, {
+    const res = await fetch(`${ZHIPU_BASE_URL}/chat/completions`, {
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${jwt}`,
+      },
       signal: controller.signal,
       body: JSON.stringify({
+        model: ZHIPU_MODEL,
         messages,
         temperature: 0.7,
         max_tokens: 2048,
@@ -148,12 +170,12 @@ async function callZAISDK(messages: Array<{ role: string; content: string }>): P
     });
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
-      throw new Error(`Z-AI ${res.status}: ${errBody.substring(0, 100)}`);
+      throw new Error(`Zhipu ${res.status}: ${errBody.substring(0, 120)}`);
     }
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content;
     if (reply?.trim()) return reply.trim();
-    throw new Error('Empty Z-AI response');
+    throw new Error('Empty Zhipu response');
   } finally {
     clearTimeout(timeout);
   }
@@ -441,7 +463,7 @@ async function downloadTelegramFile(fileId: string): Promise<{ base64: string; m
   }
 }
 
-/** تحليل صورة باستخدام Z-AI SDK VLM */
+/** تحليل صورة باستخدام Zhipu GLM-4V API (يدعم الصور عبر نفس الـ endpoint) */
 async function analyzeImageWithVLM(
   imageBase64: string,
   mimeType: string,
@@ -449,50 +471,65 @@ async function analyzeImageWithVLM(
   conversationHistory: Array<{ role: string; content: string }>,
   lang: string
 ): Promise<string> {
-  try {
-    const ZAIModule = await import('z-ai-web-dev-sdk');
-    const ZAIClass = ZAIModule.default;
-    const zai = new ZAIClass(ZAI_CONFIG);
+  const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
 
-    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
+  const messages: any[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...conversationHistory.map(m => ({ role: m.role, content: m.content })),
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+      ],
+    },
+  ];
 
-    const imageContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-      { type: 'text', text: prompt },
-      { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-    ];
-
-    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      { role: 'user', content: imageContent },
-    ];
-
-    // إعادة المحاولة 3 مرات
-    for (let attempt = 0; attempt < 3; attempt++) {
+  // إعادة المحاولة 3 مرات
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const jwt = generateZhipuJWT();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
       try {
-        const completion = await zai.chat.completions.createVision({
-          model: 'glm-4v-plus',
-          messages: messages as any,
-          thinking: { type: 'disabled' },
+        const res = await fetch(`${ZHIPU_BASE_URL}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${jwt}`,
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: 'glm-4v-flash',
+            messages,
+            temperature: 0.5,
+            max_tokens: 2048,
+            thinking: { type: 'disabled' },
+          }),
         });
-        const reply = completion?.choices?.[0]?.message?.content;
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          throw new Error(`Zhipu VLM ${res.status}: ${errBody.substring(0, 100)}`);
+        }
+        const data = await res.json();
+        const reply = data.choices?.[0]?.message?.content;
         if (reply?.trim()) {
-          console.log('[VLM] Z-AI SDK OK');
+          console.log('[VLM] Zhipu GLM-4V OK');
           return reply.trim();
         }
-      } catch (err: any) {
-        if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-          continue;
-        }
-        throw err;
+        throw new Error('Empty VLM response');
+      } finally {
+        clearTimeout(timeout);
       }
+    } catch (err: any) {
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
     }
-    throw new Error('Empty VLM response');
-  } catch (err: any) {
-    console.error('[VLM] Z-AI SDK error:', err?.message?.substring(0, 100));
-    throw new Error(`VLM: ${err?.message?.substring(0, 80)}`);
   }
+  throw new Error('VLM: all retries exhausted');
 }
 
 // ============================
@@ -1076,32 +1113,22 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
 // ============================
 
 async function handleAIStatusCommand(chatId: number) {
-  let status = "**حالة Z-AI SDK:**\n\n";
+  let status = `**حالة Zhipu GLM-4.5-Flash:**\n\n`;
   try {
-    const ZAIModule = await import('z-ai-web-dev-sdk');
-    const ZAIClass = ZAIModule.default;
-    const zai = new ZAIClass(ZAI_CONFIG);
     const s = Date.now();
-    const completion = await zai.chat.completions.create({
-      messages: [{ role: 'user', content: 'say ok' }],
-      model: 'glm-4-plus',
-      temperature: 0.7,
-      max_tokens: 50,
-      thinking: { type: 'disabled' },
-    });
-    const reply = completion?.choices?.[0]?.message?.content;
-    status += `Z-AI SDK: يعمل ✅ (${Date.now() - s}ms)\nالرد: ${reply?.substring(0, 30) || 'فارغ'}\n`;
+    const reply = await callZAISDK([{ role: 'user', content: 'say ok' }]);
+    status += `Zhipu API: يعمل ✅ (${Date.now() - s}ms)\nالرد: ${reply?.substring(0, 30) || 'فارغ'}\n`;
   } catch (err: any) {
-    status += `Z-AI SDK: غير متاح ❌ (${err?.message?.substring(0, 40)})\n`;
+    status += `Zhipu API: غير متاح ❌ (${err?.message?.substring(0, 60)})\n`;
   }
-  status += `\nالنظام: Webhook متزامن (لا Worker) - Z-AI SDK + Pollinations Fallback`;
+  status += `\nالنظام: Webhook متزامن (لا Worker) - Zhipu GLM + Pollinations Fallback`;
   await sendMessage(chatId, status);
 }
 
 async function handleWorkerStatusCommand(chatId: number) {
   let status = "**حالة النظام:**\n\n";
   status += "🏗️ **البنية:** Webhook متزامن (لا حاجة لـ Worker)\n";
-  status += "⚙️ **المعالج:** Z-AI SDK (رئيسي) + Pollinations (fallback اختياري)\n";
+  status += "⚙️ **المعالج:** Zhipu GLM-4.5-Flash (رئيسي) + Pollinations (fallback اختياري)\n";
   status += "⚡ **المعالجة:** فورية داخل طلب الـ webhook\n\n";
 
   // Pending messages (should be 0 in this architecture)
@@ -1116,13 +1143,13 @@ async function handleWorkerStatusCommand(chatId: number) {
   const pollinationsEnabled = pollinationsCfg?.value === 'true';
   status += `\nPollinations Fallback: ${pollinationsEnabled ? 'مفعّل ✅' : 'معطّل ❌'}\nللتفعيل: /togglepollinations`;
 
-  // Z-AI test
+  // Zhipu API test
   try {
     const t0 = Date.now();
     await callZAISDK([{ role: 'user', content: 'ok' }]);
-    status += `\n\nZ-AI SDK: يعمل ✅ (${Date.now() - t0}ms)`;
+    status += `\n\nZhipu GLM-4.5-Flash: يعمل ✅ (${Date.now() - t0}ms)`;
   } catch (e: any) {
-    status += `\n\nZ-AI SDK: خطأ ❌ (${e?.message?.substring(0, 50)})`;
+    status += `\n\nZhipu GLM-4.5-Flash: خطأ ❌ (${e?.message?.substring(0, 60)})`;
   }
 
   await sendMessage(chatId, status);
