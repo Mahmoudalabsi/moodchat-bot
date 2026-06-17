@@ -3,10 +3,19 @@
     "src/app/api/telegram/route.ts": {
       "maxDuration": 60
     },
+    "src/app/api/process-pending/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/**/*.ts": {
       "maxDuration": 30
     }
   },
+  "crons": [
+    {
+      "path": "/api/process-pending?secret=moodchat-cron-secret-2026",
+      "schedule": "* * * * *"
+    }
+  ],
   "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss 2>/dev/null; next build",
   "installCommand": "bun install",
   "framework": "nextjs"
