@@ -1,7 +1,7 @@
 /**
  * One-shot message processor - runs once and exits
- * Called by worker-cron.sh in a loop every 3 seconds.
- * Includes retry logic for Neon scale-to-zero cold starts.
+ * Called by worker-cron.sh in a loop.
+ * Includes retry logic for Neon scale-to-zero cold starts AND network errors.
  */
 const { PrismaClient } = require('@prisma/client');
 
@@ -12,7 +12,6 @@ async function getDb(retries = 5, delayMs = 1500) {
   for (let i = 0; i < retries; i++) {
     try {
       const client = new PrismaClient();
-      // Test the connection with a lightweight query
       await client.$queryRaw`SELECT 1`;
       _db = client;
       return _db;
@@ -36,6 +35,29 @@ const MAX_HISTORY = 30;
 
 const SYSTEM_PROMPT = "أنت مساعد ذكي اسمك مود شات. أنت مسلم تتحدث بأسلوب إسلامي محترم. كن مختصراً.";
 
+// Sleep helper
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Fetch with retry — handles transient "fetch failed" errors
+async function fetchWithRetry(url, options, retries = 3) {
+  let lastErr;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+      return res;
+    } catch (e) {
+      lastErr = e;
+      if (i < retries - 1) {
+        await sleep(1500 * (i + 1));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function callZAI(messages) {
   const headers = {
     'Content-Type': 'application/json',
@@ -46,50 +68,50 @@ async function callZAI(messages) {
   if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
   if (ZAI_TOKEN) headers['X-Token'] = ZAI_TOKEN;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
-
-  try {
-    const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 1024, thinking: { type: 'disabled' } }),
-    });
-    if (!res.ok) throw new Error(`Z-AI ${res.status}`);
-    const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty response');
-  } finally {
-    clearTimeout(timeout);
-  }
+  const res = await fetchWithRetry(`${ZAI_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ messages, temperature: 0.7, max_tokens: 1024, thinking: { type: 'disabled' } }),
+  });
+  if (!res.ok) throw new Error(`Z-AI ${res.status}`);
+  const data = await res.json();
+  const reply = data.choices?.[0]?.message?.content;
+  if (reply?.trim()) return reply.trim();
+  throw new Error('Empty response');
 }
 
 async function callPollinations(messages) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  try {
-    const res = await fetch('https://text.pollinations.ai/openai/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({ messages, model: 'openai', temperature: 0.7, seed: Math.floor(Math.random() * 10000) }),
-    });
-    if (!res.ok) throw new Error(`Pollinations ${res.status}`);
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || 'عذراً، لا أستطيع الرد الآن';
-  } finally {
-    clearTimeout(timeout);
-  }
+  const res = await fetchWithRetry('https://text.pollinations.ai/openai/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, model: 'openai', temperature: 0.7, seed: Math.floor(Math.random() * 10000) }),
+  });
+  if (!res.ok) throw new Error(`Pollinations ${res.status}`);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || 'عذراً، لا أستطيع الرد الآن';
 }
 
 async function sendTelegram(chatId, text) {
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
   });
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    throw new Error(`Telegram ${res.status}: ${errBody.substring(0, 200)}`);
+  }
+  return res.json();
+}
+
+async function sendTyping(chatId) {
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+    });
+  } catch (_) {}
 }
 
 async function main() {
@@ -97,7 +119,7 @@ async function main() {
   try {
     db = await getDb();
   } catch (e) {
-    console.error('DB connection failed after retries:', e.message);
+    console.error(`[${new Date().toISOString()}] DB connection failed:`, e.message);
     return;
   }
 
@@ -109,7 +131,7 @@ async function main() {
       take: 5,
     });
   } catch (e) {
-    console.error('DB query failed:', e.message);
+    console.error(`[${new Date().toISOString()}] DB query failed:`, e.message);
     await db.$disconnect().catch(() => {});
     _db = null;
     return;
@@ -128,14 +150,7 @@ async function main() {
     try {
       const chatId = msg.chatId || msg.userId;
 
-      // Send typing action (non-fatal if it fails)
-      try {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-        });
-      } catch (_) {}
+      await sendTyping(chatId);
 
       // Get history
       const history = await db.message.findMany({
@@ -150,18 +165,18 @@ async function main() {
         { role: 'user', content: msg.content },
       ];
 
-      // Call Z-AI first, fallback to Pollinations, then to a static message
+      // Provider chain: Z-AI → Pollinations → static fallback
       let reply;
       let modelUsed = 'moodchat-zai';
       try {
         reply = await callZAI(messages);
       } catch (e) {
-        console.error('Z-AI failed:', e.message);
+        console.error(`  Z-AI failed: ${e.message}`);
         try {
           reply = await callPollinations(messages);
           modelUsed = 'moodchat-pollinations';
         } catch (e2) {
-          console.error('Pollinations failed:', e2.message);
+          console.error(`  Pollinations failed: ${e2.message}`);
           reply = "عذراً، لم أتمكن من الاتصال بالذكاء الاصطناعي حالياً 🙏";
           modelUsed = 'moodchat-fallback';
         }
@@ -175,28 +190,17 @@ async function main() {
       // Mark user message as done
       await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
 
-      // Send reply to Telegram (with 3 retries)
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await sendTelegram(chatId, reply);
-          replySent = true;
-          console.log(`✅ Replied to ${msg.userId}: "${reply.substring(0, 50)}..."`);
-          break;
-        } catch (e) {
-          console.error(`Send attempt ${attempt + 1} failed:`, e.message);
-          if (attempt < 2) await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
-        }
-      }
-      if (!replySent) {
-        console.error(`❌ Failed to send reply to ${msg.userId} after 3 attempts`);
+      // Send reply to Telegram (3 retries inside sendTelegram)
+      try {
+        await sendTelegram(chatId, reply);
+        replySent = true;
+        console.log(`  ✅ Replied to ${msg.userId}: "${reply.substring(0, 50)}..."`);
+      } catch (e) {
+        console.error(`  ❌ Send failed after retries: ${e.message}`);
       }
 
     } catch (error) {
-      console.error(`❌ Processing error for msg ${msg.id}:`, error.message);
-      // If we never sent a reply, mark as 'failed' (recoverable) — NOT 'done'
-      if (!replySent) {
-        await db.message.update({ where: { id: msg.id }, data: { status: 'failed' } }).catch(() => {});
-      }
+      console.error(`  ❌ Processing error for msg ${msg.id}:`, error.message);
     }
   }
 
@@ -204,7 +208,19 @@ async function main() {
   _db = null;
 }
 
-main().catch(e => {
-  console.error('Fatal:', e);
+// Run with overall timeout guard
+const timeoutGuard = setTimeout(() => {
+  console.error('Overall timeout (90s) - exiting');
   process.exit(1);
-});
+}, 90000);
+
+main()
+  .then(() => {
+    clearTimeout(timeoutGuard);
+    process.exit(0);
+  })
+  .catch(e => {
+    console.error('Fatal:', e);
+    clearTimeout(timeoutGuard);
+    process.exit(1);
+  });
