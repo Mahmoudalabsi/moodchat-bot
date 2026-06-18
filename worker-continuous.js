@@ -23,7 +23,7 @@
  * أو يكتشف تلقائياً: روابط URL → قراءة الويب
  */
 
-const { PrismaClient } = require('@prisma/client');
+const { PrismaShim } = require('./scripts/db-shim');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -73,7 +73,7 @@ async function getDb() {
   if (db) return db;
   for (let i = 0; i < 5; i++) {
     try {
-      const client = new PrismaClient({ log: ['error'] });
+      const client = new PrismaShim(process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require');
       await client.$queryRaw`SELECT 1`;
       db = client;
       dbFailures = 0;
