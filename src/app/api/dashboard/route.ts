@@ -7,7 +7,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
+// Force the new @moodchatbot token. NEVER read from process.env because the
+// preview platform may still hold an OLD token which Telegram rejects with 401.
+const BOT_TOKEN = '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
 
 // كاش موحد - 15 ثانية
 let dashCache: { data: unknown; timestamp: number } | null = null;

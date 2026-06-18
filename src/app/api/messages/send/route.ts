@@ -17,7 +17,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
+// Force the new @moodchatbot token. NEVER read from process.env because the
+// preview platform may still hold an OLD token (8401809931 / 8643651729)
+// which Telegram rejects with 401 Unauthorized.
+const BOT_TOKEN = '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
 
 export async function POST(request: NextRequest) {
   try {

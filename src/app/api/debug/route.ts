@@ -3,14 +3,14 @@ import { NextResponse } from 'next/server';
 export async function GET() {
   const results: Record<string, any> = {};
 
-  // فحص التوكن
+  // فحص التوكن — نُجبر دائماً على التوكن الجديد لتجنب أي توكن قديم في env
   const envToken = process.env.TELEGRAM_BOT_TOKEN || '';
   const NEW_TOKEN = '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
-  const OLD_TOKEN = '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
-  const activeToken = (envToken === OLD_TOKEN || !envToken) ? NEW_TOKEN : envToken;
+  const activeToken = NEW_TOKEN;
   results.token = {
     env_prefix: envToken ? envToken.substring(0, 10) + '...' : 'not set',
-    using_new: activeToken === NEW_TOKEN,
+    using_new: true,
+    note: 'forced to NEW_TOKEN (8877954741) regardless of env to avoid 401',
   };
 
   // Test 1: Z-AI SDK (new ZAI(config))
