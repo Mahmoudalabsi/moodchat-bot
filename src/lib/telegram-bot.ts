@@ -558,11 +558,11 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز بكل قدرات GLM-5.2! 🚀\n\n**🧠 القدرات الأساسية:**\n💬 محادثة ذكية - يتذكر آخر 30 رسالة\n🌐 متعدد اللغات - أي لغة تطلبها\n📎 معالجة الملفات: PDF/DOCX/Excel/كود/صور/صوت/فيديو\n\n**🤖 قدرات GLM-5.2 الجديدة:**\n🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً\n🧠 /think [سؤال] - تفكير عميق خطوة بخطوة\n🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً\n\n**🎨 قدرات Z-AI الكاملة:**\n🔍 /search [سؤال] - بحث مباشر في الويب\n🔗 /read [رابط] - قراءة وتلخيص أي صفحة\n🎨 /draw [وصف] - توليد الصور بالذكاء الاصطناعي\n🎤 /tts [نص] - تحويل النص إلى صوت\n📸 تحليل الصور - أرسل صورة وسأحللها\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء ملف كود\n💡 يمكنك أيضاً كتابة الأوامر كأوامر مسبقة: agent: think: tts: draw: read:\n\n**أوامر المدير:** 👑\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] / /unblock [id] / /kick [id]\n/broadcast [رسالة] - إرسال للجميع\n/setpass [كلمة] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:** /clear /help");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز للعمل! 🚀\n\n**🧠 القدرات الأساسية:**\n💬 محادثة ذكية - يتذكر آخر 30 رسالة\n🌐 متعدد اللغات - أي لغة تطلبها\n📎 معالجة الملفات: PDF/DOCX/Excel/كود/صور/صوت/فيديو\n\n**🤖 القدرات المتقدمة:**\n🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً\n🧠 /think [سؤال] - تفكير عميق خطوة بخطوة\n🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً\n\n**🎨 القدرات الكاملة:**\n🔍 /search [سؤال] - بحث مباشر في الويب\n🔗 /read [رابط] - قراءة وتلخيص أي صفحة\n🎨 /draw [وصف] - توليد الصور بالذكاء الاصطناعي\n🎤 /tts [نص] - تحويل النص إلى صوت\n📸 تحليل الصور - أرسل صورة وسأحللها\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء ملف كود\n💡 يمكنك أيضاً كتابة الأوامر كأوامر مسبقة: agent: think: tts: draw: read:\n\n**أوامر المدير:** 👑\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] / /unblock [id] / /kick [id]\n/broadcast [رسالة] - إرسال للجميع\n/setpass [كلمة] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/settings - إعدادات البوت\n\n**أوامر عامة:** /clear /help");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة الشاملة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: GLM-5.2 (أحدث نموذج من Z AI)\n\n**🤖 قدرات GLM-5.2 الجديدة:**\n🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً\n🧠 /think [سؤال] - تفكير عميق خطوة بخطوة\n🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً\n\n**🎨 قدرات أخرى:**\n🔍 /search [سؤال] - بحث في الويب مع تلخيص\n🔗 /read [رابط] - قراءة وتلخيص صفحة ويب\n🎨 /draw [وصف] - توليد صورة من وصف نصي\n🎤 /tts [نص] - تحويل النص إلى ملف صوتي\n📸 فهم الصور: أرسل صورة وسأحللها بالكامل\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء ملف كود\n💡 يمكنك أيضاً كتابة: agent: think: tts: draw: read: مباشرة بدون /\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة الشاملة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n\n**🤖 القدرات المتقدمة:**\n🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً\n🧠 /think [سؤال] - تفكير عميق خطوة بخطوة\n🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً\n\n**🎨 قدرات أخرى:**\n🔍 /search [سؤال] - بحث في الويب مع تلخيص\n🔗 /read [رابط] - قراءة وتلخيص صفحة ويب\n🎨 /draw [وصف] - توليد صورة من وصف نصي\n🎤 /tts [نص] - تحويل النص إلى ملف صوتي\n📸 فهم الصور: أرسل صورة وسأحللها بالكامل\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء ملف كود\n💡 يمكنك أيضاً كتابة: agent: think: tts: draw: read: مباشرة بدون /\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -756,7 +756,7 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "🔒 **هذا البوت خاص ومحمي بكلمة مرور!**\n\nلتفعيل حسابك والمحادثة مع الذكاء الاصطناعي، أرسل كلمة المرور:\n\n_(إذا لم تكن تعرف كلمة المرور، تواصل مع المدير)_");
         } else {
           await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false } });
-          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
+          await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         }
         return { ok: true };
       }
@@ -769,7 +769,7 @@ export async function handleTelegramUpdate(update: {
         if (text === pw) {
           await db.telegramUser.update({ where: { userId }, data: { isApproved: true, approvedAt: new Date(), waitingForPassword: false, joinAttempts: 0 } });
           await db.joinLog.create({ data: { userId, action: 'success' } });
-          await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\nابدأ محادثتك الآن! 🎉");
+          await sendMessage(chatId, "✅ **تم تفعيل حسابك بنجاح!**\n\nأهلاً وسهلاً بك في بوت **مود شات**!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات\n\nابدأ محادثتك الآن! 🎉");
           return { ok: true };
         } else {
           const newAttempts = (user.joinAttempts || 0) + 1;
@@ -795,11 +795,11 @@ export async function handleTelegramUpdate(update: {
     // ==========================================
     if (user.isApproved && !isAdm) {
       if (text === '/start') {
-        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
+        await sendMessage(chatId, "أهلاً بك في بوت **مود شات**! 🎉\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات\n\n/clear - مسح الذاكرة\n/help - المساعدة\n/settings - الإعدادات");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: GLM-5.2 (أحدث نموذج)\n\n**🤖 قدرات GLM-5.2 الجديدة:**\n🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً\n🧠 /think [سؤال] - تفكير عميق خطوة بخطوة\n🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً\n\n**🎨 قدرات أخرى:**\n🔍 /search [سؤال] - بحث في الويب\n🎨 /draw [وصف] - توليد صورة\n🎤 /tts [نص] - تحويل نص إلى صوت\n🔗 /read [رابط] - قراءة صفحة ويب\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء كود\n💡 يمكنك أيضاً كتابة: agent: think: tts: draw: read: بدون /\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n\n**🤖 القدرات المتقدمة:**\n🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً\n🧠 /think [سؤال] - تفكير عميق خطوة بخطوة\n🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً\n\n**🎨 قدرات أخرى:**\n🔍 /search [سؤال] - بحث في الويب\n🎨 /draw [وصف] - توليد صورة\n🎤 /tts [نص] - تحويل نص إلى صوت\n🔗 /read [رابط] - قراءة صفحة ويب\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء كود\n💡 يمكنك أيضاً كتابة: agent: think: tts: draw: read: بدون /\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
         return { ok: true };
       }
       if (text === '/clear') {
