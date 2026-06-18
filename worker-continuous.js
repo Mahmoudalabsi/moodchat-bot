@@ -30,9 +30,10 @@ const os = require('os');
 const { execSync } = require('child_process');
 
 // === Config ===
-const POLL_INTERVAL_MS = 2000;
-const MAX_PER_BATCH = 5;
-const MAX_HISTORY = 30;
+// ⚡ Fast mode: 300ms polling, 10 messages per batch, smaller history for speed
+const POLL_INTERVAL_MS = 300;
+const MAX_PER_BATCH = 10;
+const MAX_HISTORY = 15;
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
@@ -95,18 +96,18 @@ async function resetDb() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ts = () => new Date().toISOString();
 
-async function fetchWithRetry(url, options, retries = 3) {
+async function fetchWithRetry(url, options, retries = 2) {
   let lastErr;
   for (let i = 0; i < retries; i++) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
+      const timeout = setTimeout(() => controller.abort(), 10000);  // ⚡ 10s instead of 30s
       const res = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timeout);
       return res;
     } catch (e) {
       lastErr = e;
-      if (i < retries - 1) await sleep(1500 * (i + 1));
+      if (i < retries - 1) await sleep(500 * (i + 1));  // ⚡ Faster retry: 500ms, 1000ms
     }
   }
   throw lastErr;
@@ -128,7 +129,7 @@ function zaiHeaders() {
 
 async function callZAIChat(messages) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  const timeout = setTimeout(() => controller.abort(), 12000);  // ⚡ 12s instead of 25s
   try {
     const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -137,7 +138,7 @@ async function callZAIChat(messages) {
       body: JSON.stringify({
         messages,
         temperature: 0.7,
-        max_tokens: 2048,
+        max_tokens: 1500,  // ⚡ Smaller for faster response
         thinking: { type: 'disabled' },
       }),
     });
@@ -154,23 +155,7 @@ async function callZAIChat(messages) {
   }
 }
 
-async function callPollinations(messages) {
-  const res = await fetchWithRetry('https://text.pollinations.ai/openai/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messages,
-      model: 'openai',
-      temperature: 0.7,
-      seed: Math.floor(Math.random() * 10000),
-    }),
-  });
-  if (!res.ok) throw new Error(`Pollinations ${res.status}`);
-  const data = await res.json();
-  const reply = data.choices?.[0]?.message?.content;
-  if (reply?.trim()) return reply.trim();
-  throw new Error('Empty Pollinations response');
-}
+// ❌ Removed: callPollinations — user requested Z AI SDK only, no third-party chat providers
 
 // === Z-AI Web Search ===
 async function zaiWebSearch(query, num = 6) {
@@ -452,13 +437,12 @@ async function sendAudio(chatId, audioPath, title = '') {
 }
 
 async function sendTyping(chatId) {
-  try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
-    });
-  } catch (_) {}
+  // ⚡ Fire-and-forget — don't await, so it doesn't block the main response
+  fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, action: 'typing' }),
+  }).catch(() => {});
 }
 
 async function sendUploadPhotoAction(chatId) {
@@ -820,7 +804,7 @@ async function processMessage(msg, db, pollinationsEnabled) {
   const content = msg.content || '';
   const modelUsed = msg.modelUsed || '';
 
-  await sendTyping(chatId);
+  sendTyping(chatId);  // ⚡ Fire-and-forget, no await
 
   // ============================================================
   // 1. AI Conversation (default - normal chat)
@@ -860,23 +844,22 @@ async function processMessage(msg, db, pollinationsEnabled) {
 
     let reply;
     let modelTag = 'moodchat-zai';
-    try {
-      reply = await callZAIChat(messages);
-    } catch (e) {
-      console.error(`[${ts()}]   Z-AI failed: ${e.message.substring(0, 80)}`);
-      if (pollinationsEnabled) {
-        try {
-          reply = await callPollinations(messages);
-          modelTag = 'moodchat-pollinations';
-        } catch (e2) {
-          console.error(`[${ts()}]   Pollinations failed: ${e2.message.substring(0, 80)}`);
-          reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
-          modelTag = 'moodchat-fallback';
-        }
-      } else {
-        reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
-        modelTag = 'moodchat-fallback';
+    // ⚡ Z AI SDK only — no fallback providers. Retry up to 2 times on transient errors.
+    let lastErr;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        reply = await callZAIChat(messages);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        console.error(`[${ts()}]   Z-AI attempt ${attempt + 1} failed: ${e.message.substring(0, 80)}`);
+        if (attempt < 1) await sleep(500);  // small backoff before retry
       }
+    }
+    if (!reply) {
+      reply = "عذراً، واجهت خطأ في الاتصال بـ Z AI. حاول مرة أخرى بعد قليل 🙏";
+      modelTag = 'moodchat-error';
     }
     await replyAndSave(db, msg, chatId, reply, modelTag);
     return;
@@ -1316,15 +1299,14 @@ async function tick() {
   }
 
   let pending = [];
-  let pollinationsEnabled = false;
+  let pollinationsEnabled = false;  // ⚡ Always false — Z AI SDK only, no Pollinations
   try {
     pending = await db.message.findMany({
       where: { status: 'pending', role: 'user' },
       orderBy: { timestamp: 'asc' },
       take: MAX_PER_BATCH,
     });
-    const cfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
-    pollinationsEnabled = cfg?.value === 'true';
+    // ⚡ Skip the BotConfig query — we don't use Pollinations anymore
   } catch (e) {
     console.error(`[${ts()}] DB query failed: ${e.message.substring(0, 80)}`);
     dbFailures++;
