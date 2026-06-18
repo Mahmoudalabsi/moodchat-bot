@@ -1,10 +1,10 @@
 /**
  * Telegram Bot Library - MoodChat (مود شات)
- *
- * بنية Webhook متزامن (لا يعتمد على Worker أو جلسة):
- * - Vercel Webhook: يستقبل الرسالة ويعالجها فوراً باستخدام Z-AI SDK
- * - Pollinations API: fallback اختياري يُفعّله الأدمن عبر /togglepollinations
- * - كل المعالجة تحدث داخل طلب الـ webhook نفسه (ضمن مهلة 60 ثانية من Vercel)
+ * 
+ * نظام Worker فقط:
+ * - Vercel Webhook: يستقبل الرسائل ويحفظها كـ pending
+ * - Z.ai Worker: يعالج الرسائل باستخدام Z-AI SDK (الأساسي)
+ * - لا APIs خارجية - Z-AI SDK فقط!
  */
 
 import { db } from './db';
@@ -18,39 +18,14 @@ const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').m
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;
 
-// Zhipu AI Config (GLM-4.5-Flash - public API, works from Vercel)
-// API key format: {id}.{secret} - we sign a JWT with the secret
-const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY || 'ba0c0421a5a2409ca7ded8f64a5504ce.wY6XGMuaApa32mCf';
-const ZHIPU_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
-const ZHIPU_MODEL = process.env.ZHIPU_MODEL || 'glm-4.5-flash';
-
-// Cache the JWT (regenerate when expiry < 5 min away)
-let cachedJwt: { token: string; exp: number } | null = null;
-
-function base64url(input: string): string {
-  return Buffer.from(input).toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-}
-
-function generateZhipuJWT(): string {
-  // Reuse cached JWT if still valid (>5 min remaining)
-  if (cachedJwt && cachedJwt.exp - Math.floor(Date.now() / 1000) > 300) {
-    return cachedJwt.token;
-  }
-  const [id, secret] = ZHIPU_API_KEY.split('.');
-  if (!id || !secret) throw new Error('Invalid ZHIPU_API_KEY format (expected id.secret)');
-  const header = { alg: 'HS256', sign_type: 'SIGN' };
-  const now = Math.floor(Date.now() / 1000);
-  const payload = { api_key: id, exp: now + 3600, timestamp: now };
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const data = `${headerB64}.${payloadB64}`;
-  // Zhipu uses HMAC-SHA256 with the secret, then hex → base64url
-  const sig = require('crypto').createHmac('sha256', secret).update(data).digest('hex');
-  const sigB64 = Buffer.from(sig, 'hex').toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-  const token = `${data}.${sigB64}`;
-  cachedJwt = { token, exp: now + 3600 };
-  return token;
-}
+// Z-AI SDK Config
+const ZAI_CONFIG = {
+  baseUrl: 'https://internal-api.z.ai/v1',
+  apiKey: 'Z.ai',
+  chatId: 'chat-c2ae3234-5685-4053-8998-96e9a664f658',
+  userId: '014c4da7-4f7f-4efa-9157-9091a73a3570',
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
+};
 
 const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
 
@@ -93,10 +68,10 @@ async function getAIConfig() {
     if (provider === 'api' && m.api_base_url && m.api_key) {
       aiConfigCache = { provider: 'api', baseUrl: m.api_base_url, apiKey: m.api_key, model: m.api_model || 'gpt-4' };
     } else {
-      aiConfigCache = { provider: 'zsdk', baseUrl: ZHIPU_BASE_URL, apiKey: ZHIPU_API_KEY, model: ZHIPU_MODEL };
+      aiConfigCache = { provider: 'zsdk', baseUrl: ZAI_CONFIG.baseUrl, apiKey: ZAI_CONFIG.apiKey, model: 'glm-4-plus' };
     }
   } catch {
-    aiConfigCache = { provider: 'zsdk', baseUrl: ZHIPU_BASE_URL, apiKey: ZHIPU_API_KEY, model: ZHIPU_MODEL };
+    aiConfigCache = { provider: 'zsdk', baseUrl: ZAI_CONFIG.baseUrl, apiKey: ZAI_CONFIG.apiKey, model: 'glm-4-plus' };
   }
   aiConfigCacheTime = Date.now();
   return aiConfigCache!;
@@ -141,227 +116,6 @@ async function getUserLang(userId: number): Promise<string> {
 
 async function setUserLang(userId: number, lang: string): Promise<void> {
   await setConfigValue(`user_lang_${userId}`, lang);
-}
-
-// ============================
-// معالج الرسائل المتزامن - Z-AI SDK + Pollinations Fallback
-// ============================
-
-/** استدعاء Zhipu GLM-4.5-Flash عبر fetch مباشر (API عام يعمل من Vercel) */
-async function callZAISDK(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const jwt = generateZhipuJWT();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
-  try {
-    const res = await fetch(`${ZHIPU_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwt}`,
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: ZHIPU_MODEL,
-        messages,
-        temperature: 0.7,
-        max_tokens: 2048,
-        thinking: { type: 'disabled' },
-      }),
-    });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      throw new Error(`Zhipu ${res.status}: ${errBody.substring(0, 120)}`);
-    }
-    const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty Zhipu response');
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/** استدعاء Pollinations API كـ fallback */
-async function callPollinationsAPI(messages: Array<{ role: string; content: string }>): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  try {
-    const res = await fetch('https://text.pollinations.ai/openai/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        messages,
-        model: 'openai',
-        temperature: 0.7,
-        seed: Math.floor(Math.random() * 10000),
-      }),
-    });
-    if (!res.ok) throw new Error(`Pollinations ${res.status}`);
-    const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (reply?.trim()) return reply.trim();
-    throw new Error('Empty Pollinations response');
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/** سلسلة الـ providers: Z-AI SDK → Pollinations (إذا مفعّل) → رسالة ثابتة */
-async function processWithAI(
-  messages: Array<{ role: string; content: string }>
-): Promise<{ reply: string; provider: string }> {
-  // 1) Z-AI SDK (الأساسي - سريع جداً)
-  try {
-    const reply = await callZAISDK(messages);
-    return { reply, provider: 'zai-sdk' };
-  } catch (e: any) {
-    console.error('[AI] Z-AI SDK failed:', e?.message?.substring(0, 120));
-  }
-
-  // 2) Pollinations Fallback (إذا كان مفعّلاً من الأدمن)
-  try {
-    const cfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
-    if (cfg?.value === 'true') {
-      const reply = await callPollinationsAPI(messages);
-      return { reply, provider: 'pollinations' };
-    }
-  } catch (e: any) {
-    console.error('[AI] Pollinations failed:', e?.message?.substring(0, 120));
-  }
-
-  // 3) رسالة ثابتة
-  return {
-    reply: 'عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏',
-    provider: 'fallback',
-  };
-}
-
-/** معالجة رسالة نصية بشكل متزامن: حفظ → استدعاء AI → حفظ الرد → إرسال */
-async function handleTextMessageSynchronous(
-  userId: number,
-  chatId: number,
-  text: string
-): Promise<void> {
-  // إرسال "يكتب..." لإعلام المستخدم
-  await sendChatAction(chatId);
-
-  // حفظ رسالة المستخدم (status=done مباشرة لأننا نعالجها الآن)
-  await db.message.create({
-    data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'done', chatId },
-  });
-
-  // جلب الذاكرة السابقة
-  const clearMarker = await getConfigValue(`clear_marker_${userId}`);
-  const historyWhere: any = { userId, status: 'done' };
-  if (clearMarker) {
-    historyWhere.timestamp = { gt: new Date(clearMarker) };
-  }
-  const history = await db.message.findMany({
-    where: historyWhere,
-    orderBy: { timestamp: 'asc' },
-    take: MAX_HISTORY,
-  });
-
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...history.map(m => ({ role: m.role, content: m.content })),
-    { role: 'user', content: text },
-  ];
-
-  // استدعاء AI
-  const { reply, provider } = await processWithAI(messages);
-
-  // حفظ رد المساعد
-  await db.message.create({
-    data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done' },
-  });
-
-  // إرسال الرد إلى تيليجرام
-  const safeReply = sanitizeMarkdown(reply);
-  await sendMessage(chatId, safeReply);
-  console.log(`[Bot] ✅ Replied to ${userId} via ${provider}: "${reply.substring(0, 60)}..."`);
-}
-
-/** معالجة ملف (صورة/مستند/صوت/فيديو/ملصق) بشكل متزامن */
-async function handleFileMessageSynchronous(
-  userId: number,
-  chatId: number,
-  userContent: string,
-  fileType: string,
-  fileId: string,
-  caption: string,
-  userLang: string
-): Promise<void> {
-  try {
-    await sendChatAction(chatId);
-
-    // جلب الذاكرة السابقة
-    const clearMarker = await getConfigValue(`clear_marker_${userId}`);
-    const historyWhere: any = { userId, status: 'done' };
-    if (clearMarker) {
-      historyWhere.timestamp = { gt: new Date(clearMarker) };
-    }
-    const history = await db.message.findMany({
-      where: historyWhere,
-      orderBy: { timestamp: 'asc' },
-      take: MAX_HISTORY,
-    });
-
-    let reply = '';
-    let provider = 'unknown';
-
-    // === الصور والملصقات: استخدم Z-AI VLM SDK ===
-    if (fileType === 'image' || fileType === 'sticker') {
-      try {
-        const fileData = await downloadTelegramFile(fileId);
-        if (fileData) {
-          reply = await analyzeImageWithVLM(
-            fileData.base64,
-            fileData.mimeType,
-            caption || (userLang === 'ar' ? 'حلل هذه الصورة بالتفصيل' : 'Analyze this image in detail'),
-            history.map(m => ({ role: m.role, content: m.content })),
-            userLang
-          );
-          provider = 'zai-vlm';
-        } else {
-          throw new Error('Failed to download file');
-        }
-      } catch (vlmErr: any) {
-        console.error('[Bot] VLM error:', vlmErr?.message?.substring(0, 100));
-        // Fallback إلى معالجة نصية
-        const result = await processWithAI([
-          { role: 'system', content: SYSTEM_PROMPT },
-          ...history.map(m => ({ role: m.role, content: m.content })),
-          { role: 'user', content: `${caption || 'صورة'} (تعذّر تحليل الصورة بصرياً، أجب عن النص المرفق إن وُجد)` },
-        ]);
-        reply = result.reply;
-        provider = `vlm-fallback-${result.provider}`;
-      }
-    } else {
-      // === المستندات والصوت والفيديو: معالجة نصية ===
-      const result = await processWithAI([
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...history.map(m => ({ role: m.role, content: m.content })),
-        { role: 'user', content: `${userContent}\n\nالطلب: ${caption || 'حلل هذا الملف'}` },
-      ]);
-      reply = result.reply;
-      provider = result.provider;
-    }
-
-    // حفظ رد المساعد
-    await db.message.create({
-      data: { userId, role: 'assistant', content: reply, modelUsed: `moodchat-${provider}`, status: 'done' },
-    });
-
-    // إرسال الرد
-    const safeReply = sanitizeMarkdown(reply);
-    await sendMessage(chatId, safeReply);
-    console.log(`[Bot] ✅ File [${fileType}] replied to ${userId} via ${provider}`);
-  } catch (err: any) {
-    console.error('[Bot] File processing error:', err?.message?.substring(0, 150));
-    await sendMessage(chatId, '❌ حدث خطأ أثناء معالجة الملف. حاول مرة أخرى.');
-  }
 }
 
 // ============================
@@ -463,7 +217,7 @@ async function downloadTelegramFile(fileId: string): Promise<{ base64: string; m
   }
 }
 
-/** تحليل صورة باستخدام Zhipu GLM-4V API (يدعم الصور عبر نفس الـ endpoint) */
+/** تحليل صورة باستخدام Z-AI SDK VLM */
 async function analyzeImageWithVLM(
   imageBase64: string,
   mimeType: string,
@@ -471,65 +225,50 @@ async function analyzeImageWithVLM(
   conversationHistory: Array<{ role: string; content: string }>,
   lang: string
 ): Promise<string> {
-  const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
+  try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = new ZAIClass(ZAI_CONFIG);
 
-  const messages: any[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...conversationHistory.map(m => ({ role: m.role, content: m.content })),
-    {
-      role: 'user',
-      content: [
-        { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
-      ],
-    },
-  ];
+    const prompt = userPrompt || (lang === 'ar' ? 'حلل هذه الصورة بالتفصيل وصف كل ما تراه فيها' : 'Analyze this image in detail, describe everything you see');
 
-  // إعادة المحاولة 3 مرات
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const jwt = generateZhipuJWT();
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000);
+    const imageContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+    ];
+
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...conversationHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      { role: 'user', content: imageContent },
+    ];
+
+    // إعادة المحاولة 3 مرات
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const res = await fetch(`${ZHIPU_BASE_URL}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${jwt}`,
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            model: 'glm-4v-flash',
-            messages,
-            temperature: 0.5,
-            max_tokens: 2048,
-            thinking: { type: 'disabled' },
-          }),
+        const completion = await zai.chat.completions.createVision({
+          model: 'glm-4v-plus',
+          messages: messages as any,
+          thinking: { type: 'disabled' },
         });
-        if (!res.ok) {
-          const errBody = await res.text().catch(() => '');
-          throw new Error(`Zhipu VLM ${res.status}: ${errBody.substring(0, 100)}`);
-        }
-        const data = await res.json();
-        const reply = data.choices?.[0]?.message?.content;
+        const reply = completion?.choices?.[0]?.message?.content;
         if (reply?.trim()) {
-          console.log('[VLM] Zhipu GLM-4V OK');
+          console.log('[VLM] Z-AI SDK OK');
           return reply.trim();
         }
-        throw new Error('Empty VLM response');
-      } finally {
-        clearTimeout(timeout);
+      } catch (err: any) {
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          continue;
+        }
+        throw err;
       }
-    } catch (err: any) {
-      if (attempt < 2) {
-        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-        continue;
-      }
-      throw err;
     }
+    throw new Error('Empty VLM response');
+  } catch (err: any) {
+    console.error('[VLM] Z-AI SDK error:', err?.message?.substring(0, 100));
+    throw new Error(`VLM: ${err?.message?.substring(0, 80)}`);
   }
-  throw new Error('VLM: all retries exhausted');
 }
 
 // ============================
@@ -659,7 +398,7 @@ export async function handleTelegramUpdate(update: {
     }
 
     // ==========================================
-    // معالجة الملفات (صور + مستندات + صوت + فيديو) - معالجة متزامنة بالـ Webhook
+    // معالجة الملفات (صور + مستندات + صوت + فيديو) - حفظ كـ pending للـ Worker
     // ==========================================
     if (hasFile && !user.isBlocked && (user.isApproved || isAdm)) {
       try {
@@ -675,16 +414,15 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'vlm', status: 'done', chatId,
+              modelUsed: 'vlm', status: 'pending', chatId,
               imageUrl: bestPhoto.file_id,
               fileName: `photo_${bestPhoto.file_id.substring(0, 10)}.jpg`,
               fileType: 'image',
               mimeType: 'image/jpeg',
             },
           });
-          console.log(`[Bot] 📸 Image received. Processing with VLM...`);
-          await handleFileMessageSynchronous(userId, chatId, userContent, 'image', bestPhoto.file_id, caption, userLang);
-          return { ok: true, mode: 'image-processed' };
+          console.log(`[Bot] 📸 Image saved as pending. fileId=${bestPhoto.file_id}`);
+          return { ok: true, mode: 'image-pending' };
         }
 
         // === مستند (PDF, DOCX, TXT, كود, Excel, إلخ) ===
@@ -698,16 +436,15 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'file-analyze', status: 'done', chatId,
+              modelUsed: 'file-analyze', status: 'pending', chatId,
               imageUrl: doc.file_id,
               fileName,
               fileType: 'document',
               mimeType,
             },
           });
-          console.log(`[Bot] 📎 Document received. Processing... name=${fileName} mime=${mimeType}`);
-          await handleFileMessageSynchronous(userId, chatId, userContent, 'document', doc.file_id, caption || `حلل هذا الملف: ${fileName}`, userLang);
-          return { ok: true, mode: 'document-processed' };
+          console.log(`[Bot] 📎 Document saved as pending. fileId=${doc.file_id} name=${fileName} mime=${mimeType}`);
+          return { ok: true, mode: 'document-pending' };
         }
 
         // === رسالة صوتية ===
@@ -719,16 +456,15 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'voice-analyze', status: 'done', chatId,
+              modelUsed: 'voice-analyze', status: 'pending', chatId,
               imageUrl: voice.file_id,
               fileName: `voice_${voice.file_id.substring(0, 10)}.ogg`,
               fileType: 'voice',
               mimeType: voice.mime_type || 'audio/ogg',
             },
           });
-          console.log(`[Bot] 🎤 Voice received. Processing...`);
-          await handleFileMessageSynchronous(userId, chatId, userContent, 'voice', voice.file_id, caption || (userLang === 'ar' ? 'فرّغ هذه الرسالة الصوتية' : 'Transcribe this voice message'), userLang);
-          return { ok: true, mode: 'voice-processed' };
+          console.log(`[Bot] 🎤 Voice saved as pending. fileId=${voice.file_id}`);
+          return { ok: true, mode: 'voice-pending' };
         }
 
         // === ملف صوتي ===
@@ -740,16 +476,15 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'audio-analyze', status: 'done', chatId,
+              modelUsed: 'audio-analyze', status: 'pending', chatId,
               imageUrl: audio.file_id,
               fileName: audio.title ? `${audio.title}.mp3` : `audio_${audio.file_id.substring(0, 10)}.mp3`,
               fileType: 'audio',
               mimeType: audio.mime_type || 'audio/mpeg',
             },
           });
-          console.log(`[Bot] 🎵 Audio received. Processing...`);
-          await handleFileMessageSynchronous(userId, chatId, userContent, 'audio', audio.file_id, caption || `حلل هذا الملف الصوتي: ${audio.title || ''}`, userLang);
-          return { ok: true, mode: 'audio-processed' };
+          console.log(`[Bot] 🎵 Audio saved as pending. fileId=${audio.file_id}`);
+          return { ok: true, mode: 'audio-pending' };
         }
 
         // === فيديو ===
@@ -761,16 +496,15 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'video-analyze', status: 'done', chatId,
+              modelUsed: 'video-analyze', status: 'pending', chatId,
               imageUrl: vid.file_id,
               fileName: `video_${vid.file_id.substring(0, 10)}.mp4`,
               fileType: 'video',
               mimeType: (vid as any).mime_type || 'video/mp4',
             },
           });
-          console.log(`[Bot] 🎬 Video received. Processing...`);
-          await handleFileMessageSynchronous(userId, chatId, userContent, 'video', vid.file_id, caption || `حلل هذا الفيديو`, userLang);
-          return { ok: true, mode: 'video-processed' };
+          console.log(`[Bot] 🎬 Video saved as pending. fileId=${vid.file_id}`);
+          return { ok: true, mode: 'video-pending' };
         }
 
         // === ملصق (Sticker) ===
@@ -780,16 +514,15 @@ export async function handleTelegramUpdate(update: {
           await db.message.create({
             data: {
               userId, role: 'user', content: userContent,
-              modelUsed: 'vlm', status: 'done', chatId,
+              modelUsed: 'vlm', status: 'pending', chatId,
               imageUrl: sticker.file_id,
               fileName: `sticker_${sticker.emoji || 'sticker'}.webp`,
               fileType: 'sticker',
               mimeType: sticker.is_animated ? 'application/x-tgsticker' : 'image/webp',
             },
           });
-          console.log(`[Bot] 🏷️ Sticker received. Processing...`);
-          await handleFileMessageSynchronous(userId, chatId, userContent, 'sticker', sticker.file_id, caption || `حلل هذا الملصق`, userLang);
-          return { ok: true, mode: 'sticker-processed' };
+          console.log(`[Bot] 🏷️ Sticker saved as pending. fileId=${sticker.file_id}`);
+          return { ok: true, mode: 'sticker-pending' };
         }
 
       } catch (fileErr: any) {
@@ -812,7 +545,7 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK + Pollinations Fallback\n\n⚡ **بنية Webhook متزامن:** لا حاجة لـ Worker، المعالجة فورية!\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة النظام\n/togglepollinations - تفعيل/تعطيل Pollinations Fallback\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/togglepollinations - تفعيل/تعطيل Pollinations Fallback\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
         return { ok: true };
       }
       if (text === '/help') {
@@ -887,14 +620,11 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "📄 اكتب الموضوع بعد الأمر، مثال:\n`/doc تقرير عن الذكاء الاصطناعي`");
           return { ok: true };
         }
-        const userContent = `📄 إنشاء ملف Word عن: ${docTopic}`;
         await db.message.create({
-          data: { userId, role: 'user', content: userContent, modelUsed: 'file-docx', status: 'done', chatId },
+          data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
         });
         await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
-        // NOTE: لإنشاء ملف Word فعلي نحتاج لـ SDK VLM/Document - سيتم الرد كنص متزامن
-        await handleTextMessageSynchronous(userId, chatId, `أنشئ محتوى تفصيلي لملف Word عن: ${docTopic}. قدّم هيكلاً وعناوين ومحتوى.`);
-        return { ok: true, mode: 'doc-processed' };
+        return { ok: true, mode: 'file-pending' };
       }
       // أمر /code - إنشاء ملف كود
       if (text.startsWith('/code ')) {
@@ -903,13 +633,11 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "💻 اكتب المطلوب بعد الأمر، مثال:\n`/code python لعبة ثعبان`\n`/code js صفحة ويب`");
           return { ok: true };
         }
-        const userContent = `💻 إنشاء كود: ${codeRequest}`;
         await db.message.create({
-          data: { userId, role: 'user', content: userContent, modelUsed: 'file-code', status: 'done', chatId },
+          data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
         });
         await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
-        await handleTextMessageSynchronous(userId, chatId, `اكتب كود برمجي للتالي: ${codeRequest}. ضع الكود في block معين اللغة.`);
-        return { ok: true, mode: 'code-processed' };
+        return { ok: true, mode: 'file-pending' };
       }
     }
 
@@ -992,13 +720,11 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "📄 اكتب الموضوع بعد الأمر، مثال:\n`/doc تقرير عن الذكاء الاصطناعي`");
           return { ok: true };
         }
-        const userContent = `📄 إنشاء ملف Word عن: ${docTopic}`;
         await db.message.create({
-          data: { userId, role: 'user', content: userContent, modelUsed: 'file-docx', status: 'done', chatId },
+          data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
         });
         await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
-        await handleTextMessageSynchronous(userId, chatId, `أنشئ محتوى تفصيلي لملف Word عن: ${docTopic}. قدّم هيكلاً وعناوين ومحتوى.`);
-        return { ok: true, mode: 'doc-processed' };
+        return { ok: true, mode: 'file-pending' };
       }
       // أمر /code - إنشاء ملف كود
       if (text.startsWith('/code ')) {
@@ -1007,22 +733,24 @@ export async function handleTelegramUpdate(update: {
           await sendMessage(chatId, "💻 اكتب المطلوب بعد الأمر، مثال:\n`/code python لعبة ثعبان`\n`/code js صفحة ويب`");
           return { ok: true };
         }
-        const userContent = `💻 إنشاء كود: ${codeRequest}`;
         await db.message.create({
-          data: { userId, role: 'user', content: userContent, modelUsed: 'file-code', status: 'done', chatId },
+          data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
         });
         await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
-        await handleTextMessageSynchronous(userId, chatId, `اكتب كود برمجي للتالي: ${codeRequest}. ضع الكود في block معين اللغة.`);
-        return { ok: true, mode: 'code-processed' };
+        return { ok: true, mode: 'file-pending' };
       }
     }
 
     // ==========================================
-    // المحادثة مع الذكاء الاصطناعي - معالجة متزامنة (لا حاجة لـ Worker)
+    // المحادثة مع الذكاء الاصطناعي - حفظ كـ pending للـ Worker
     // ==========================================
     if ((user.isApproved || isAdm) && !user.isBlocked) {
-      await handleTextMessageSynchronous(userId, chatId, text);
-      return { ok: true, mode: 'processed' };
+      // حفظ الرسالة كـ pending - الـ Worker سيعالجها باستخدام Z-AI SDK
+      await db.message.create({
+        data: { userId, role: 'user', content: text, modelUsed: 'moodchat', status: 'pending', chatId },
+      });
+      console.log(`[Bot] Message saved as pending. User: ${userId}, Worker will process with Z-AI SDK`);
+      return { ok: true, mode: 'pending' };
     }
 
     console.log(`[Bot] Unhandled state for user ${userId}`);
@@ -1113,45 +841,49 @@ async function handleCallbackQuery(cb: { id: string; from: { id: number; usernam
 // ============================
 
 async function handleAIStatusCommand(chatId: number) {
-  let status = `**حالة Zhipu GLM-4.5-Flash:**\n\n`;
+  let status = "**حالة Z-AI SDK:**\n\n";
   try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = new ZAIClass(ZAI_CONFIG);
     const s = Date.now();
-    const reply = await callZAISDK([{ role: 'user', content: 'say ok' }]);
-    status += `Zhipu API: يعمل ✅ (${Date.now() - s}ms)\nالرد: ${reply?.substring(0, 30) || 'فارغ'}\n`;
+    const completion = await zai.chat.completions.create({
+      messages: [{ role: 'user', content: 'say ok' }],
+      model: 'glm-4-plus',
+      temperature: 0.7,
+      max_tokens: 50,
+      thinking: { type: 'disabled' },
+    });
+    const reply = completion?.choices?.[0]?.message?.content;
+    status += `Z-AI SDK: يعمل ✅ (${Date.now() - s}ms)\nالرد: ${reply?.substring(0, 30) || 'فارغ'}\n`;
   } catch (err: any) {
-    status += `Zhipu API: غير متاح ❌ (${err?.message?.substring(0, 60)})\n`;
+    status += `Z-AI SDK: غير متاح ❌ (${err?.message?.substring(0, 40)})\n`;
   }
-  status += `\nالنظام: Webhook متزامن (لا Worker) - Zhipu GLM + Pollinations Fallback`;
+  const workerAlive = await isWorkerAlive();
+  status += `\nWorker: ${workerAlive ? 'يعمل ✅' : 'متوقف ❌'}\nالنظام: Z-AI SDK فقط`;
   await sendMessage(chatId, status);
 }
 
 async function handleWorkerStatusCommand(chatId: number) {
-  let status = "**حالة النظام:**\n\n";
-  status += "🏗️ **البنية:** Webhook متزامن (لا حاجة لـ Worker)\n";
-  status += "⚙️ **المعالج:** Zhipu GLM-4.5-Flash (رئيسي) + Pollinations (fallback اختياري)\n";
-  status += "⚡ **المعالجة:** فورية داخل طلب الـ webhook\n\n";
-
-  // Pending messages (should be 0 in this architecture)
+  let status = "**حالة الـ Worker:**\n\n";
+  try {
+    const heartbeat = await db.botConfig.findUnique({ where: { key: 'worker_heartbeat' } });
+    if (heartbeat?.value) {
+      const lastBeat = new Date(heartbeat.value);
+      const age = Math.round((Date.now() - lastBeat.getTime()) / 1000);
+      status += `آخر نبضة: ${lastBeat.toISOString()}\nمنذ: ${age} ثانية\nالحالة: ${age < 120 ? 'يعمل ✅' : 'متوقف ❌'}`;
+    } else {
+      status += 'لا توجد نبضة - Worker لم يعمل بعد';
+    }
+  } catch { status += 'خطأ في قراءة الحالة'; }
   const pendingCount = await db.message.count({ where: { status: 'pending' } });
-  status += `📨 رسائل معلقة: ${pendingCount}\n`;
-  if (pendingCount > 0) {
-    status += "   ⚠️ يجب أن تكون 0 في البنية المتزامنة. شغّل worker للتنظيف.\n";
-  }
-
-  // Pollinations fallback status
+  status += `\n\nرسائل معلقة: ${pendingCount}`;
+  
+  // Show Pollinations fallback status
   const pollinationsCfg = await db.botConfig.findUnique({ where: { key: 'pollinations_fallback_enabled' } });
   const pollinationsEnabled = pollinationsCfg?.value === 'true';
-  status += `\nPollinations Fallback: ${pollinationsEnabled ? 'مفعّل ✅' : 'معطّل ❌'}\nللتفعيل: /togglepollinations`;
-
-  // Zhipu API test
-  try {
-    const t0 = Date.now();
-    await callZAISDK([{ role: 'user', content: 'ok' }]);
-    status += `\n\nZhipu GLM-4.5-Flash: يعمل ✅ (${Date.now() - t0}ms)`;
-  } catch (e: any) {
-    status += `\n\nZhipu GLM-4.5-Flash: خطأ ❌ (${e?.message?.substring(0, 60)})`;
-  }
-
+  status += `\n\nPollinations Fallback: ${pollinationsEnabled ? 'مفعّل ✅' : 'معطّل ❌'}\nللتفعيل: /togglepollinations`;
+  
   await sendMessage(chatId, status);
 }
 
