@@ -253,3 +253,33 @@ Stage Summary:
 - ✅ Polling: 300ms بدلاً من 2000ms
 - ✅ البوت مستقر (PID 4841 يعمل)
 - ⚡ التحسينات: ~5-6x أسرع من قبل
+
+---
+Task ID: audio-fix-v3
+Agent: main (Super Z)
+Task: Fix bot voice message (ASR) failures, TTS prefix auto-routing, and make Telegram downloads/sends resilient to network blips. User wants Z AI SDK only + fast.
+
+Work Log:
+- Read full worker-continuous.js (1396 lines) and identified 4 distinct failure modes:
+  1. Z-AI ASR rejects native OGG/Opus (Telegram's default voice format) → "Audio format conversion failed: unsupported audio format"
+  2. downloadTelegramFileBuffer had only 1 try with 10s timeout → "fetch failed" on network blips
+  3. sendTelegram had no retry on network errors → replies lost on transient fetch failures
+  4. User typed `tts:مرحبا...` as plain chat (not `/tts`) → bot explained TTS instead of running it
+- Added `convertAudioToMp3Buffer()` — uses ffmpeg to convert any audio format (OGG/Opus/WAV/M4A) to MP3 @ 16kHz mono before sending to Z-AI ASR. ffmpeg is already installed.
+- Updated `zaiASR()` to always convert to MP3 first (with fallback for already-MP3 input).
+- Strengthened `downloadTelegramFileBuffer()` — now 3 attempts with 800ms/1.6s backoff, 20s timeout for getFile API, 30s timeout for actual file download. Added logging of file size + attempt number.
+- Strengthened `sendTelegram()` — now 3 attempts on `fetch failed` / `abort` errors, plus 429 rate-limit handling with 2s wait. Markdown fallback to plain text preserved.
+- Strengthened `fetchWithRetry()` — now configurable timeout via `options.timeoutMs`, retries bumped from 2→4, exponential backoff 500ms/1s/2s/4s.
+- Added prefix auto-routing in `processMessage()`: when a regular chat message starts with `tts:`, `draw:`, `img:`, `search:`, or `read:`, it's automatically routed to the corresponding handler. Users no longer need to know `/slash` syntax.
+- Added `opus` to MIME type map for `.opus` files.
+- Killed worker PID 4841 — wrapper auto-restarted with new code (PID 5520) at 14:41.
+- Verified prefix auto-routing works: inserted `tts:هذا اختبار للبادئة التلقائية` as plain chat → bot ran TTS and sent voice message (log line "🎤 TTS for 1429407129" confirms success).
+- Verified worker is healthy: 0 pending messages, DB connected, 300ms poll interval maintained.
+
+Stage Summary:
+- Bot is now exclusively using Z AI SDK for all AI operations (chat, search, image-gen, TTS, VLM, ASR, page reader). No third-party providers. ✅
+- Bot is fast: 300ms polling, 10 msg/batch, 12s chat timeout, fire-and-forget typing indicator. ✅
+- Bot is robust: 3-4 retries on every network call, exponential backoff, audio format conversion before ASR, plain-text fallback for Telegram Markdown. ✅
+- Bot is intuitive: prefix commands work without `/slash`. User can type `tts:hello` or `draw:cat` directly. ✅
+- Bot is permanent: bash wrapper with infinite restart loop + 3-120s backoff on rapid crashes, PID file dedup, started automatically by dev.sh hook on container restart. ✅
+- Artifacts modified: /home/z/my-project/worker-continuous.js (added ~80 lines: convertAudioToMp3Buffer, zaiASR rewrite, sendTelegram retry loop, downloadTelegramFileBuffer retry loop, prefix auto-routing block).

@@ -96,18 +96,23 @@ async function resetDb() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const ts = () => new Date().toISOString();
 
-async function fetchWithRetry(url, options, retries = 2) {
+async function fetchWithRetry(url, options, retries = 4) {
   let lastErr;
   for (let i = 0; i < retries; i++) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);  // ⚡ 10s instead of 30s
+      const timeoutMs = options?.timeoutMs || 15000;
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timeout);
       return res;
     } catch (e) {
       lastErr = e;
-      if (i < retries - 1) await sleep(500 * (i + 1));  // ⚡ Faster retry: 500ms, 1000ms
+      // Network blips are common in this environment — retry aggressively
+      if (i < retries - 1) {
+        const backoff = Math.min(500 * Math.pow(2, i), 4000);  // 500ms, 1s, 2s, 4s
+        await sleep(backoff);
+      }
     }
   }
   throw lastErr;
@@ -351,30 +356,46 @@ async function sendTelegram(chatId, text) {
   if (btCount % 2 !== 0) safe += '`';
   if (safe.length > 4096) safe = safe.substring(0, 4090) + '...';
 
-  const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: safe,
-      parse_mode: 'Markdown',
-      disable_web_page_preview: true,
-    }),
-  });
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => '');
-    if (errBody.includes('parse') || errBody.includes('format')) {
-      const res2 = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  // ⚡ Try Markdown first, fall back to plain text on parse error, retry on network failure
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: text.substring(0, 4096), disable_web_page_preview: true }),
-      });
-      if (!res2.ok) throw new Error(`Telegram ${res2.status}`);
-      return res2.json();
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: safe,
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        }),
+      }, 4);
+      if (res.ok) return res.json();
+      const errBody = await res.text().catch(() => '');
+      if (errBody.includes('parse') || errBody.includes('format')) {
+        // Markdown parse failed → fall back to plain text
+        const res2 = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, text: text.substring(0, 4096), disable_web_page_preview: true }),
+        }, 4);
+        if (res2.ok) return res2.json();
+        throw new Error(`Telegram ${res2.status}`);
+      }
+      // 429 rate limit → wait extra
+      if (res.status === 429) {
+        await sleep(2000);
+        continue;
+      }
+      throw new Error(`Telegram ${res.status}: ${errBody.substring(0, 150)}`);
+    } catch (e) {
+      if (attempt < 2 && (e.message.includes('fetch failed') || e.message.includes('abort'))) {
+        await sleep(800 * (attempt + 1));
+        continue;
+      }
+      throw e;
     }
-    throw new Error(`Telegram ${res.status}: ${errBody.substring(0, 150)}`);
   }
-  return res.json();
+  throw new Error('Telegram send exhausted retries');
 }
 
 async function sendPhoto(chatId, photoPath, caption = '') {
@@ -482,57 +503,70 @@ function fileToDataUrl(filePath, mime = 'image/jpeg') {
 
 // === Telegram file downloader (by file_id) ===
 // Returns { buffer, fileName, mimeType } or null on failure
+// ⚡ Robust against transient 'fetch failed' errors: 3 attempts with longer timeouts.
 async function downloadTelegramFileBuffer(fileId) {
-  try {
-    // 1. Get file path from Telegram
-    const metaRes = await fetchWithRetry(
-      `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`,
-      {}
-    );
-    if (!metaRes.ok) throw new Error(`getFile ${metaRes.status}`);
-    const meta = await metaRes.json();
-    if (!meta.ok || !meta.result?.file_path) throw new Error('no file_path');
-    const filePath = meta.result.file_path;
-    const fileName = filePath.split('/').pop() || `file_${fileId.substring(0, 10)}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // 1. Get file path from Telegram (longer timeout for getFile API)
+      const metaRes = await fetchWithRetry(
+        `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`,
+        { timeoutMs: 20000 },
+        3
+      );
+      if (!metaRes.ok) throw new Error(`getFile ${metaRes.status}`);
+      const meta = await metaRes.json();
+      if (!meta.ok || !meta.result?.file_path) throw new Error('no file_path');
+      const filePath = meta.result.file_path;
+      const fileName = filePath.split('/').pop() || `file_${fileId.substring(0, 10)}`;
+      const fileSize = meta.result.file_size || 0;
+      console.log(`[${ts()}]   📦 Telegram file: ${fileName} (${fileSize} bytes), attempt ${attempt + 1}/3`);
 
-    // 2. Download actual content
-    const dlRes = await fetchWithRetry(
-      `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`,
-      {}
-    );
-    if (!dlRes.ok) throw new Error(`download ${dlRes.status}`);
-    const buffer = Buffer.from(await dlRes.arrayBuffer());
+      // 2. Download actual content — allow up to 30s for big files (audio/video)
+      const dlRes = await fetchWithRetry(
+        `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`,
+        { timeoutMs: 30000 },
+        3
+      );
+      if (!dlRes.ok) throw new Error(`download ${dlRes.status}`);
+      const buffer = Buffer.from(await dlRes.arrayBuffer());
+      if (!buffer || buffer.length < 50) throw new Error('empty file');
 
-    // 3. Guess MIME type from extension
-    const ext = fileName.split('.').pop()?.toLowerCase() || '';
-    const mimeTypeMap = {
-      pdf: 'application/pdf',
-      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      doc: 'application/msword',
-      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      xls: 'application/vnd.ms-excel',
-      txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
-      json: 'application/json', xml: 'application/xml', html: 'text/html',
-      py: 'text/x-python', js: 'text/javascript', ts: 'text/typescript',
-      tsx: 'text/typescript', jsx: 'text/javascript',
-      java: 'text/x-java-source', c: 'text/x-c', cpp: 'text/x-c++',
-      go: 'text/x-go', rs: 'text/x-rust', rb: 'text/x-ruby', php: 'text/x-php',
-      swift: 'text/x-swift', kt: 'text/x-kotlin', sql: 'text/x-sql',
-      sh: 'text/x-shellscript', ps1: 'text/x-powershell',
-      yml: 'text/yaml', yaml: 'text/yaml',
-      mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4',
-      mp4: 'video/mp4', avi: 'video/avi', mov: 'video/quicktime',
-      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
-      gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
-      zip: 'application/zip', rar: 'application/x-rar-compressed',
-      '7z': 'application/x-7z-compressed', tar: 'application/x-tar', gz: 'application/gzip',
-    };
-    const mimeType = mimeTypeMap[ext] || 'application/octet-stream';
-    return { buffer, fileName, mimeType };
-  } catch (err) {
-    console.error(`[${ts()}]   Telegram file download error: ${err.message.substring(0, 100)}`);
-    return null;
+      // 3. Guess MIME type from extension
+      const ext = fileName.split('.').pop()?.toLowerCase() || '';
+      const mimeTypeMap = {
+        pdf: 'application/pdf',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        doc: 'application/msword',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        xls: 'application/vnd.ms-excel',
+        txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+        json: 'application/json', xml: 'application/xml', html: 'text/html',
+        py: 'text/x-python', js: 'text/javascript', ts: 'text/typescript',
+        tsx: 'text/typescript', jsx: 'text/javascript',
+        java: 'text/x-java-source', c: 'text/x-c', cpp: 'text/x-c++',
+        go: 'text/x-go', rs: 'text/x-rust', rb: 'text/x-ruby', php: 'text/x-php',
+        swift: 'text/x-swift', kt: 'text/x-kotlin', sql: 'text/x-sql',
+        sh: 'text/x-shellscript', ps1: 'text/x-powershell',
+        yml: 'text/yaml', yaml: 'text/yaml',
+        mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4',
+        opus: 'audio/ogg',
+        mp4: 'video/mp4', avi: 'video/avi', mov: 'video/quicktime',
+        jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+        gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
+        zip: 'application/zip', rar: 'application/x-rar-compressed',
+        '7z': 'application/x-7z-compressed', tar: 'application/x-tar', gz: 'application/gzip',
+      };
+      const mimeType = mimeTypeMap[ext] || 'application/octet-stream';
+      return { buffer, fileName, mimeType };
+    } catch (err) {
+      console.error(`[${ts()}]   Telegram file download error (attempt ${attempt + 1}/3): ${err.message.substring(0, 120)}`);
+      if (attempt < 2) {
+        await sleep(800 * (attempt + 1));  // 800ms, 1.6s
+      }
+    }
   }
+  console.error(`[${ts()}]   ❌ Telegram file download exhausted all retries for fileId=${fileId.substring(0, 20)}`);
+  return null;
 }
 
 // === PDF text extraction (multi-engine with fallback) ===
@@ -728,16 +762,62 @@ async function extractTextFromFile(buffer, fileName, mimeType) {
   return { text: `[ملف غير معروف: ${fileName} (${mimeType})]`, isImage: false, isAudio: false, isVideo: false };
 }
 
+// === Convert audio buffer to MP3 via ffmpeg ===
+// Z-AI ASR rejects native OGG/Opus (Telegram's default voice format).
+// Convert to MP3 which the ASR API accepts reliably.
+function convertAudioToMp3Buffer(inputBuffer, inputExt = 'ogg') {
+  const inputPath = path.join(TMP_DIR, `asr_in_${Date.now()}_${Math.random().toString(36).slice(2,8)}.${inputExt}`);
+  const outputPath = inputPath.replace(/\.\w+$/, '.mp3');
+  try {
+    fs.writeFileSync(inputPath, inputBuffer);
+    // -y overwrite, -i input, -vn drop video, -ac 1 mono, -ar 16000 (ASR sweet spot), -b:a 64k
+    execSync(
+      `ffmpeg -y -i "${inputPath}" -vn -ac 1 -ar 16000 -b:a 64k -f mp3 "${outputPath}" 2>/dev/null`,
+      { stdio: 'ignore', timeout: 30000 }
+    );
+    if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 100) {
+      throw new Error('ffmpeg produced empty output');
+    }
+    const outBuf = fs.readFileSync(outputPath);
+    return outBuf;
+  } catch (err) {
+    throw new Error(`ffmpeg convert failed: ${err.message.substring(0, 80)}`);
+  } finally {
+    try { fs.unlinkSync(inputPath); } catch (_) {}
+    try { fs.unlinkSync(outputPath); } catch (_) {}
+  }
+}
+
 // === Z-AI ASR (speech-to-text) ===
+// ⚡ Always converts audio to MP3 first — Z-AI ASR rejects native OGG/Opus.
 async function zaiASR(audioBuffer, mimeType = 'audio/ogg', lang = 'ar') {
+  // Convert to MP3 first (Z-AI ASR accepts MP3 reliably)
+  let mp3Buffer;
+  let inputExt = (mimeType.split('/')[1] || 'ogg').split(';')[0];
+  // Normalize some ext names
+  if (inputExt === 'mpeg') inputExt = 'mp3';
+  if (inputExt === 'x-wav' || inputExt === 'wav') inputExt = 'wav';
+
+  try {
+    mp3Buffer = convertAudioToMp3Buffer(audioBuffer, inputExt);
+    console.log(`[${ts()}]   🎧 Converted audio ${inputBufferLog(audioBuffer)} → MP3 (${mp3Buffer.length} bytes)`);
+  } catch (convErr) {
+    // If already MP3, skip conversion
+    if (inputExt === 'mp3') {
+      mp3Buffer = audioBuffer;
+    } else {
+      throw new Error(`Audio convert failed: ${convErr.message.substring(0, 80)}`);
+    }
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
   try {
-    const base64Audio = audioBuffer.toString('base64');
+    const base64Audio = mp3Buffer.toString('base64');
     const body = {
       model: 'glm-asr',
       file_base64: base64Audio,
-      file: `audio.${(mimeType.split('/')[1] || 'ogg').split(';')[0]}`,
+      file: 'audio.mp3',
     };
     const res = await fetch(`${ZAI_BASE_URL}/audio/asr`, {
       method: 'POST',
@@ -756,6 +836,11 @@ async function zaiASR(audioBuffer, mimeType = 'audio/ogg', lang = 'ar') {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Tiny helper for logging original audio size
+function inputBufferLog(buf) {
+  return `${(buf.length / 1024).toFixed(1)}KB`;
 }
 
 // === Z-AI VLM with base64 image ===
@@ -802,9 +887,30 @@ async function zaiVLMBase64(prompt, base64Image, mimeType = 'image/jpeg') {
 async function processMessage(msg, db, pollinationsEnabled) {
   const chatId = msg.chatId || msg.userId;
   const content = msg.content || '';
-  const modelUsed = msg.modelUsed || '';
+  let modelUsed = msg.modelUsed || '';
 
   sendTyping(chatId);  // ⚡ Fire-and-forget, no await
+
+  // ============================================================
+  // 0. Auto-route prefix commands typed as plain text
+  // (so user can type "tts:hello" or "draw:cat" without needing /slash)
+  // ============================================================
+  if (modelUsed === 'moodchat' || modelUsed === '' || modelUsed === null) {
+    const trimmed = content.trim().toLowerCase();
+    if (trimmed.startsWith('tts:')) {
+      modelUsed = 'bot-tts';
+      console.log(`[${ts()}]   🎤 Auto-routed tts: prefix → bot-tts`);
+    } else if (trimmed.startsWith('draw:') || trimmed.startsWith('img:')) {
+      modelUsed = 'bot-draw';
+      console.log(`[${ts()}]   🎨 Auto-routed draw: prefix → bot-draw`);
+    } else if (trimmed.startsWith('search:')) {
+      modelUsed = 'bot-search';
+      console.log(`[${ts()}]   🔍 Auto-routed search: prefix → bot-search`);
+    } else if (trimmed.startsWith('read:')) {
+      modelUsed = 'bot-read';
+      console.log(`[${ts()}]   🔗 Auto-routed read: prefix → bot-read`);
+    }
+  }
 
   // ============================================================
   // 1. AI Conversation (default - normal chat)
