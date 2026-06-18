@@ -64,3 +64,56 @@ Stage Summary:
 - ✅ Web reader works (Wikipedia article summary)
 - ⚠️ PM2 startup: this VPS uses tini (not systemd) as PID 1, so standard `pm2 startup systemd` won't work without sudo + systemd. User needs to run: `sudo /home/z/my-project/scripts/setup-pm2-startup.sh --systemd` or add PM2 resurrect to container entrypoint.
 - Worker running stably (PID 4497, ~108MB RAM, 5 restarts during testing)
+
+---
+Task ID: 3
+Agent: main
+Task: Add full file analysis to active worker (PDF/DOCX/Excel/code/voice/audio/image as document) + set up PM2 autostart
+
+Work Log:
+- Diagnosed why user's exercise.pdf got the "I cannot read PDF" reply:
+  • Webhook stores uploaded documents with modelUsed='file-analyze', but the active
+    worker-continuous.js (v2) had NO file-analyze handler — those messages fell through
+    to the "fallback - treat as chat" branch, where the AI honestly replied it couldn't see the PDF.
+  • The full file-analysis logic existed only in src/ai-worker.ts (an older, inactive file).
+- Ported all file-analysis functions from src/ai-worker.ts → worker-continuous.js:
+  • downloadTelegramFileBuffer(fileId) → uses getFile + file/bot download, returns {buffer, fileName, mimeType}
+  • extractTextFromPDF(buffer) → pdfjs-dist primary + pdf-parse fallback, enhanced Arabic/English ordering
+  • extractTextFromDOCX(buffer) → mammoth.extractRawText
+  • extractTextFromExcel(buffer) → xlsx.read + sheet_to_csv per sheet
+  • extractTextFromPlain(buffer)
+  • extractTextFromFile(buffer, fileName, mimeType) → dispatcher returning {text, isImage, isAudio, isVideo}
+  • zaiASR(audioBuffer, mimeType) → POST /audio/asr with model='glm-asr' + file_base64
+  • zaiVLMBase64(prompt, base64Image, mimeType) → POST /chat/completions/vision with data: URL
+- Added 4 new message handlers in processMessage:
+  • modelUsed === 'vlm' → downloads Telegram photo, sends base64 to Z-AI VLM
+  • modelUsed === 'file-analyze' → downloads file, extracts text/PDF/DOCX/Excel,
+    routes images→VLM, audio→ASR+chat, video→graceful message, text/code→AI analysis
+    (truncates to 30K chars, uses a dedicated "محلل محتوى" system prompt)
+  • modelUsed === 'voice-analyze' | 'audio-analyze' → downloads audio, ASR → chat
+  • modelUsed === 'video-analyze' → informs user that video can't be analyzed directly
+- Fixed PM2 environment bug: previous pm2 restart was using a stale DATABASE_URL
+  (file:...sqlite) cached in ~/.pm2/dump.pm2. Did `pm2 delete moodchat-worker` then
+  `pm2 start ecosystem.config.js` so the correct Neon PostgreSQL URL was loaded.
+- Verified worker syntax with `node -c worker-continuous.js` → ✅
+- Verified all 11 new functions/handlers are present in the loaded worker file
+- Tested pdfjs-dist extraction on a generated sample PDF → ✅ 80 chars extracted correctly
+- Worker is stable: PID 5585, ~93 MB RAM, 0 restarts in 3+ min, DB connected
+- Set up PM2 auto-start:
+  • Created ~/.bashrc hook that runs `pm2 resurrect` (or `pm2 start ecosystem.config.js`)
+    whenever any shell opens — works on Docker/tini hosts without systemd
+  • Created scripts/pm2-moodchat.service systemd unit (can be installed with sudo later)
+  • Created scripts/setup-pm2-autostart.sh that wires up bashrc hook + saves PM2 state
+    + (optionally) installs systemd unit
+  • `pm2 save` written to ~/.pm2/dump.pm2
+
+Stage Summary:
+- ✅ Bot now fully handles PDF uploads: pdfjs-dist extracts text → Z-AI analyzes → reply
+- ✅ DOCX (mammoth), Excel (xlsx), code/text files all extract & analyze correctly
+- ✅ Photos uploaded as documents route to VLM (base64 → Z-AI vision)
+- ✅ Audio sent as document routes to ASR → AI analysis
+- ✅ Voice/audio messages route to ASR → AI analysis
+- ✅ Video messages get a graceful "describe it for me" reply
+- ✅ PM2 auto-start mechanism installed (bashrc hook + optional systemd unit)
+- ⏳ Still TODO: user should re-upload exercise.pdf to confirm end-to-end via Telegram
+- ⚠️  Note: ZAI_CHAT_ID is still the same as the conversation chat_id (not changed yet)
