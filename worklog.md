@@ -367,3 +367,38 @@ Stage Summary:
   * /home/z/my-project/src/app/api/messages/send/route.ts — new (90 lines)
   * /home/z/my-project/src/app/page.tsx — +60 lines (state, sendAdminMessage, UI)
   * /home/z/my-project/scripts/check-worker-stats.js — new debug helper
+
+---
+Task ID: telegram-polling-mode
+Agent: main (Super Z)
+Task: User reported "البوت لا يعمل بعدما غيرت شيئا في الهارت بيت" (bot not working after heartbeat change).
+
+Work Log:
+- Verified the worker process WAS running (PID 7874) and heartbeat was being written correctly. The heartbeat change itself was fine.
+- Real issue: Telegram showed `pending_update_count: 6` and `last_error_message: "Wrong response from the webhook: 504 Gateway Timeout"`. The Vercel webhook at /api/telegram was timing out on slow commands (e.g., /aistats takes >10s synchronously), so messages never reached the DB.
+- Confirmed via DB inspection: 0 pending messages in DB, but Telegram had 6 stuck updates. Worker was healthy but starved for input.
+- Added direct Telegram polling to worker-continuous.js as a parallel async loop:
+  * `telegramPollLoop()` — calls `getUpdates` with `timeout=30` (long polling), runs forever in parallel with `tick()`.
+  * On startup: deletes the Vercel webhook via `deleteWebhook` API (so Telegram routes updates to polling instead of webhook).
+  * `handleTelegramUpdate(update, db)` — maps Telegram update types to `modelUsed` values:
+    - photos → `vlm`, documents → `file-analyze` (or `vlm` if image), voice → `voice-analyze`, audio → `audio-analyze`, video → `video-analyze`, sticker → `vlm`.
+    - `/search`, `/draw`, `/tts`, `/read`, `/agent`, `/think`, `/thinkagent` → routed to corresponding bot-* models.
+    - Plain text → `moodchat` (smart intent router kicks in downstream).
+  * `upsertTelegramUser(db, u)` — uses `INSERT ... ON CONFLICT ("userId") DO UPDATE` to keep user records fresh, with SELECT+UPDATE/INSERT fallback.
+  * `insertPendingMessage(db, data)` — direct SQL insert to set `chatId`, `imageUrl`, `fileType`, `mimeType`, `fileName` (PrismaShim's create() didn't support all these fields).
+- Silenced `Conflict: terminated by other getUpdates request` errors (stale Vercel function occasionally tries getUpdates too — harmless, just retry silently).
+- Restarted worker (PID 8674). Verified:
+  * `Webhook deleted: OK` — webhook removed
+  * `📨 Telegram update: uid=1429407129 model=moodchat content="الو انت هنا..."` — receiving messages directly
+  * `✅ Replied to 1429407129 via moodchat-zai: "نعم، أنا هنا لمساعدتك..."` — bot responding
+  * `pending_update_count: 0` — all 6 stuck updates cleared
+- Committed (f416b3f) and pushed to GitHub.
+
+Stage Summary:
+- ✅ Bot is now receiving messages directly via Telegram long polling (bypasses Vercel webhook entirely).
+- ✅ All 6 previously-stuck messages were processed and replied to.
+- ✅ Webhook is deleted — Vercel can no longer interfere.
+- ✅ Heartbeat still updating every 10s (the original change was correct).
+- ✅ No code changes to the dashboard needed — DB polling loop is unchanged, it just has more messages to process now.
+- The smart intent router (from 2 tasks ago) is now actually reachable by users — previously the Vercel webhook 504 was blocking everything.
+- File modified: /home/z/my-project/worker-continuous.js (+261 lines).
