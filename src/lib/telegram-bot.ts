@@ -547,11 +547,11 @@ export async function handleTelegramUpdate(update: {
       }
 
       if (text === '/start') {
-        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز!\n\n🧠 ذاكرة ذكية | 🌍 متعدد اللغات | 🤖 Z-AI SDK\n\n**أنواع الملفات المدعومة:**\n📸 صور - تحليل بالذكاء الاصطناعي\n📄 مستندات (PDF, DOCX, TXT) - قراءة وتحليل\n📊 جداول (Excel, CSV) - تحليل البيانات\n💻 أكواد - مراجعة وتحليل\n🎤 صوتيات - تفريغ وتحليل\n🎬 فيديو - معلومات\n\n**أوامر المدير:**\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] - حظر مستخدم\n/unblock [id] - إلغاء حظر\n/kick [id] - حذف مستخدم\n/broadcast [msg] - إرسال للجميع\n/setpass [pass] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/togglepollinations - تفعيل/تعطيل Pollinations Fallback\n/settings - إعدادات البوت\n\n**أوامر عامة:**\n/clear - مسح الذاكرة\n/help - المساعدة\n/doc [موضوع] - إنشاء ملف Word\n/code [لغة] [مطلوب] - إنشاء ملف كود\n\n📎 **أرسل أي ملف وسأحلله لك!**");
+        await sendMessage(chatId, "👑 **أهلاً بك يا مدير!**\n\nبوت **مود شات** جاهز بكل قدرات Z-AI SDK! 🚀\n\n**🧠 القدرات الأساسية:**\n💬 محادثة ذكية - يتذكر آخر 30 رسالة\n🌐 متعدد اللغات - أي لغة تطلبها\n📎 معالجة الملفات: PDF/DOCX/Excel/كود/صور/صوت/فيديو\n\n**🎨 قدرات Z-AI الكاملة:**\n🔍 /search [سؤال] - بحث مباشر في الويب\n🔗 /read [رابط] - قراءة وتلخيص أي صفحة\n🎨 /draw [وصف] - توليد الصور بالذكاء الاصطناعي\n🎤 /tts [نص] - تحويل النص إلى صوت\n📸 تحليل الصور - أرسل صورة وسأحللها\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء ملف كود\n💡 أرسل أي رابط في رسالة عادية وسأقرأه لك تلقائياً!\n\n**أوامر المدير:** 👑\n/stats - الإحصائيات\n/users - قائمة المستخدمين\n/aistatus - حالة الذكاء الاصطناعي\n/chatlog [id] - سجل محادثة مستخدم\n/block [id] / /unblock [id] / /kick [id]\n/broadcast [رسالة] - إرسال للجميع\n/setpass [كلمة] - تغيير كلمة المرور\n/workerstatus - حالة الـ Worker\n/togglepollinations - تفعيل/تعطيل Pollinations\n/settings - إعدادات البوت\n\n**أوامر عامة:** /clear /help");
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 ملفات Word: /doc [الموضوع]\n💻 ملفات كود: /code [اللغة] [المطلوب]\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /togglepollinations /chatlog /block /unblock /kick /broadcast /setpass`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة الشاملة**\n\n🧠 الذاكرة: آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus + جميع القدرات)\n\n**🎨 قدرات Z-AI الكاملة:**\n🔍 /search [سؤال] - بحث في الويب مع تلخيص\n🔗 /read [رابط] - قراءة وتلخيص صفحة ويب\n🎨 /draw [وصف] - توليد صورة من وصف نصي\n🎤 /tts [نص] - تحويل النص إلى ملف صوتي\n📸 فهم الصور: أرسل صورة وسأحللها بالكامل\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء ملف كود\n💡 أرسل أي رابط في رسالة وسأقرأه تلقائياً!\n\n**أوامر عامة:** /clear /help /start /settings\n**أوامر المدير:** 👑 /stats /users /aistatus /workerstatus /togglepollinations /chatlog /block /unblock /kick /broadcast /setpass`);
         return { ok: true };
       }
       if (text === '/stats') { await handleDashboardCommand(chatId); return { ok: true }; }
@@ -615,7 +615,60 @@ export async function handleTelegramUpdate(update: {
         await sendMessage(chatId, "تم مسح ذاكرة المحادثة. سأبدأ محادثة جديدة معك! (الرسائل السابقة محفوظة)");
         return { ok: true };
       }
-      // أمر /doc - إنشاء ملف Word
+      // ====== أوامر قدرات Z-AI الجديدة ======
+      // /search - بحث في الويب
+      if (text.startsWith('/search ')) {
+        const q = text.replace('/search ', '').trim();
+        if (q.length < 2) {
+          await sendMessage(chatId, "🔍 اكتب استعلام البحث، مثال:\n`/search أسعار البيتكوين اليوم`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `search:${q}`, modelUsed: 'bot-search', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🔍 جاري البحث في الويب... ⏳");
+        return { ok: true, mode: 'search-pending' };
+      }
+      // /draw - توليد صورة
+      if (text.startsWith('/draw ') || text.startsWith('/img ')) {
+        const prompt = text.replace(/^\/(draw|img)\s+/, '').trim();
+        if (prompt.length < 3) {
+          await sendMessage(chatId, "🎨 اكتب وصف الصورة، مثال:\n`/draw قطة لطيفة تلعب في حديقة`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `draw:${prompt}`, modelUsed: 'bot-draw', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🎨 جاري توليد الصورة... ⏳");
+        return { ok: true, mode: 'draw-pending' };
+      }
+      // /tts - تحويل نص إلى صوت
+      if (text.startsWith('/tts ')) {
+        const ttsText = text.replace('/tts ', '').trim();
+        if (ttsText.length < 2) {
+          await sendMessage(chatId, "🎤 اكتب النص، مثال:\n`/tts مرحباً بك في بوت مود شات`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `tts:${ttsText}`, modelUsed: 'bot-tts', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🎤 جاري تحويل النص إلى صوت... ⏳");
+        return { ok: true, mode: 'tts-pending' };
+      }
+      // /read - قراءة محتوى رابط
+      if (text.startsWith('/read ')) {
+        const url = text.replace('/read ', '').trim();
+        if (!/^https?:\/\//i.test(url)) {
+          await sendMessage(chatId, "🔗 أرسل رابطاً صحيحاً، مثال:\n`/read https://example.com/article`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `read:${url}`, modelUsed: 'bot-read', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🔗 جاري قراءة الصفحة... ⏳");
+        return { ok: true, mode: 'read-pending' };
+      }
+      // /doc - إنشاء ملف Word
       if (text.startsWith('/doc ')) {
         const docTopic = text.replace('/doc ', '').trim();
         if (docTopic.length < 3) {
@@ -696,7 +749,7 @@ export async function handleTelegramUpdate(update: {
         return { ok: true };
       }
       if (text === '/help') {
-        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI SDK\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 ملفات Word: /doc [الموضوع]\n💻 ملفات كود: /code [اللغة] [المطلوب]\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
+        await sendMessage(chatId, `**🤖 مود شات - المساعدة**\n\n🧠 الذاكرة: أتذكر آخر ${MAX_HISTORY} رسالة\n🌍 اللغات: أتحدث أي لغة\n🤖 المحرك: Z-AI SDK (GLM-4 Plus)\n\n**قدرات Z-AI الكاملة:**\n🔍 /search [سؤال] - بحث في الويب\n🎨 /draw [وصف] - توليد صورة\n🎤 /tts [نص] - تحويل نص إلى صوت\n🔗 /read [رابط] - قراءة صفحة ويب\n📸 فهم الصور: أرسل صورة وسأحللها!\n📄 /doc [موضوع] - إنشاء ملف Word\n💻 /code [لغة] [مطلوب] - إنشاء كود\n💡 أرسل أي رابط وسأقرأه لك تلقائياً!\n\n**الأوامر:**\n/clear - مسح سجل المحادثة\n/help - المساعدة\n/start - إعادة بدء المحادثة\n/settings - الإعدادات`);
         return { ok: true };
       }
       if (text === '/clear') {
@@ -714,6 +767,59 @@ export async function handleTelegramUpdate(update: {
         const uLang = await getUserLang(userId);
         await sendMessage(chatId, "⚙️ **الإعدادات**\n\nاختر من القائمة:", { reply_markup: JSON.stringify(settingsKeyboard(false, pwEnabled, uLang)) });
         return { ok: true };
+      }
+      // ====== أوامر قدرات Z-AI الجديدة ======
+      // /search - بحث في الويب
+      if (text.startsWith('/search ')) {
+        const q = text.replace('/search ', '').trim();
+        if (q.length < 2) {
+          await sendMessage(chatId, "🔍 اكتب استعلام البحث، مثال:\n`/search أسعار البيتكوين اليوم`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `search:${q}`, modelUsed: 'bot-search', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🔍 جاري البحث في الويب... ⏳");
+        return { ok: true, mode: 'search-pending' };
+      }
+      // /draw - توليد صورة
+      if (text.startsWith('/draw ') || text.startsWith('/img ')) {
+        const prompt = text.replace(/^\/(draw|img)\s+/, '').trim();
+        if (prompt.length < 3) {
+          await sendMessage(chatId, "🎨 اكتب وصف الصورة، مثال:\n`/draw قطة لطيفة تلعب في حديقة`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `draw:${prompt}`, modelUsed: 'bot-draw', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🎨 جاري توليد الصورة... ⏳");
+        return { ok: true, mode: 'draw-pending' };
+      }
+      // /tts - تحويل نص إلى صوت
+      if (text.startsWith('/tts ')) {
+        const ttsText = text.replace('/tts ', '').trim();
+        if (ttsText.length < 2) {
+          await sendMessage(chatId, "🎤 اكتب النص، مثال:\n`/tts مرحباً بك في بوت مود شات`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `tts:${ttsText}`, modelUsed: 'bot-tts', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🎤 جاري تحويل النص إلى صوت... ⏳");
+        return { ok: true, mode: 'tts-pending' };
+      }
+      // /read - قراءة محتوى رابط
+      if (text.startsWith('/read ')) {
+        const url = text.replace('/read ', '').trim();
+        if (!/^https?:\/\//i.test(url)) {
+          await sendMessage(chatId, "🔗 أرسل رابطاً صحيحاً، مثال:\n`/read https://example.com/article`");
+          return { ok: true };
+        }
+        await db.message.create({
+          data: { userId, role: 'user', content: `read:${url}`, modelUsed: 'bot-read', status: 'pending', chatId },
+        });
+        await sendMessage(chatId, "🔗 جاري قراءة الصفحة... ⏳");
+        return { ok: true, mode: 'read-pending' };
       }
       // أمر /doc - إنشاء ملف Word
       if (text.startsWith('/doc ')) {

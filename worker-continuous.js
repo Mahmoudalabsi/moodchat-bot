@@ -1,14 +1,33 @@
 /**
- * MoodChat Worker - Continuous loop version for PM2
+ * MoodChat Worker v2 - Continuous loop for PM2
  *
- * - Polls Neon DB every 2 seconds for pending messages
- * - Processes each with Z-AI SDK (primary) + Pollinations (fallback if enabled)
- * - Sends reply via Telegram Bot API
- * - Robust: auto-reconnects DB, retries on transient errors
- * - Designed to run under PM2 (restarts on crash, persists across sessions)
+ * يدعم كل قدرات Z-AI SDK:
+ *  - محادثة ذكية (chat completions)
+ *  - بحث في الويب (web_search)
+ *  - قراءة صفحات الويب (page_reader)
+ *  - توليد الصور (images.generations)
+ *  - تحويل النص إلى كلام (TTS)
+ *  - تفريغ الصوت (ASR) - للرسائل الصوتية
+ *  - تحليل الصور (VLM)
+ *
+ * يستخدم الأوامر التالية في الرسائل:
+ *  - "[text]"                            → رد ذكي
+ *  - "search:[query]"                    → بحث ويب + تلخيص
+ *  - "read:[url]"                        → قراءة صفحة + تلخيص
+ *  - "draw:[prompt]"                     → توليد صورة
+ *  - "tts:[text]"                        → تحويل نص إلى صوت
+ *  - "vlm:[prompt]|url=[url]"            → تحليل صورة بالـ VLM
+ *  - "asr_url:[url]"                     → تفريغ صوتي من URL
+ *  - "vlm_url:[prompt]|url=[url]"        → تحليل صورة من URL
+ *
+ * أو يكتشف تلقائياً: روابط URL → قراءة الويب
  */
 
 const { PrismaClient } = require('@prisma/client');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
 
 // === Config ===
 const POLL_INTERVAL_MS = 2000;
@@ -18,9 +37,12 @@ const MAX_HISTORY = 30;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
-const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || 'chat-c2ae3234-5685-4053-8998-96e9a664f658';
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '014c4da7-4f7f-4efa-9157-9091a73a3570';
 const ZAI_TOKEN = process.env.ZAI_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0';
+
+// مسار حفظ الملفات المؤقتة
+const TMP_DIR = '/tmp/moodchat-bot';
+try { fs.mkdirSync(TMP_DIR, { recursive: true }); } catch (_) {}
 
 const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
 
@@ -39,9 +61,11 @@ const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخص
 
 قواعد السرية:
 - لا تكشف أبداً عن هويتك الحقيقية أو اسم الشركة المطورة لك.
-- إذا سُئلت من أنت، أجب: "أنا مود شات، مساعدك الذكي الخبير في كل المجالات."`;
+- إذا سُئلت من أنت، أجب: "أنا مود شات، مساعدك الذكي الخبير في كل المجالات."
 
-// === DB with auto-reconnect ===
+عندما يقدم لك المستخدم نتائج من بحث ويب أو محتوى من صفحة ويب، استخدمها لإجابة محدثة ودقيقة، واذكر المصدر بصيغة "📚 المصدر: example.com".`;
+
+// === DB ===
 let db = null;
 let dbFailures = 0;
 
@@ -49,9 +73,7 @@ async function getDb() {
   if (db) return db;
   for (let i = 0; i < 5; i++) {
     try {
-      const client = new PrismaClient({
-        log: ['error'],
-      });
+      const client = new PrismaClient({ log: ['error'] });
       await client.$queryRaw`SELECT 1`;
       db = client;
       dbFailures = 0;
@@ -66,10 +88,7 @@ async function getDb() {
 }
 
 async function resetDb() {
-  if (db) {
-    await db.$disconnect().catch(() => {});
-    db = null;
-  }
+  if (db) { await db.$disconnect().catch(() => {}); db = null; }
 }
 
 // === Helpers ===
@@ -93,12 +112,8 @@ async function fetchWithRetry(url, options, retries = 3) {
   throw lastErr;
 }
 
-// === AI Providers ===
-
-async function callZAI(messages) {
-  // Decoupled from any specific Z.ai web chat — no X-Chat-Id header
-  // The SDK token alone is enough to authenticate; chat history is managed
-  // locally in our own DB (per-user) instead of relying on Z.ai's chat session.
+// === Z-AI Common Headers ===
+function zaiHeaders() {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
@@ -106,15 +121,18 @@ async function callZAI(messages) {
     'X-Z-AI-From': 'Z',
   };
   if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
-  // NOTE: deliberately NOT setting X-Chat-Id — keeps bot traffic out of
-  // the user's personal z.ai web chat history.
+  return headers;
+}
 
+// === Z-AI Providers ===
+
+async function callZAIChat(messages) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
     const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
-      headers,
+      headers: zaiHeaders(),
       signal: controller.signal,
       body: JSON.stringify({
         messages,
@@ -154,23 +172,198 @@ async function callPollinations(messages) {
   throw new Error('Empty Pollinations response');
 }
 
-// === Telegram ===
+// === Z-AI Web Search ===
+async function zaiWebSearch(query, num = 6) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25000);
+  try {
+    const res = await fetch(`${ZAI_BASE_URL}/functions/invoke`, {
+      method: 'POST',
+      headers: zaiHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({ function_name: 'web_search', arguments: { query, num } }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`web_search ${res.status}: ${err.substring(0, 100)}`);
+    }
+    const data = await res.json();
+    // The API returns { result: [...] } - extract the result
+    const results = Array.isArray(data) ? data : (data.result || data.data || []);
+    return results;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// === Z-AI Page Reader ===
+async function zaiPageReader(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${ZAI_BASE_URL}/functions/invoke`, {
+      method: 'POST',
+      headers: zaiHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({ function_name: 'page_reader', arguments: { url } }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`page_reader ${res.status}: ${err.substring(0, 100)}`);
+    }
+    const data = await res.json();
+    // The API returns { result: {...} }
+    const result = data.result || data.data || data;
+    return {
+      title: result.title || data.title || '',
+      html: result.html || data.html || '',
+      url: result.url || url,
+      publishedTime: result.publishedTime || result.publish_time || null,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Convert HTML to plain text (very basic, sufficient for summarization)
+function htmlToText(html) {
+  if (!html) return '';
+  let t = html;
+  // Remove scripts and styles
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, '');
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, '');
+  t = t.replace(/<nav[\s\S]*?<\/nav>/gi, '');
+  t = t.replace(/<footer[\s\S]*?<\/footer>/gi, '');
+  // Convert breaks and paragraphs
+  t = t.replace(/<br\s*\/?>/gi, '\n');
+  t = t.replace(/<\/p>/gi, '\n\n');
+  t = t.replace(/<\/div>/gi, '\n');
+  t = t.replace(/<li[^>]*>/gi, '• ');
+  // Strip remaining tags
+  t = t.replace(/<[^>]+>/g, '');
+  // Decode a few common entities
+  t = t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  // Collapse whitespace
+  t = t.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+  return t;
+}
+
+// === Z-AI Image Generation ===
+async function zaiImageGeneration(prompt, size = '1024x1024') {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000); // image gen can be slow
+  try {
+    const res = await fetch(`${ZAI_BASE_URL}/images/generations`, {
+      method: 'POST',
+      headers: zaiHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({ prompt, size }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`images.gen ${res.status}: ${err.substring(0, 100)}`);
+    }
+    const data = await res.json();
+    const item = data.data?.[0];
+    if (!item) throw new Error('No image in response');
+    // Response may be either { base64 } or { url }
+    if (item.base64) return Buffer.from(item.base64, 'base64');
+    if (item.b64_json) return Buffer.from(item.b64_json, 'base64');
+    if (item.url) {
+      // Download the image from the URL
+      console.log(`[${ts()}]   Downloading generated image from URL: ${item.url.substring(0, 80)}...`);
+      const imgRes = await fetchWithRetry(item.url, {});
+      if (!imgRes.ok) throw new Error(`img download ${imgRes.status}`);
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      if (!buf || buf.length < 100) throw new Error('Empty image download');
+      return buf;
+    }
+    throw new Error('No image data in response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// === Z-AI TTS ===
+async function zaiTTS(input, voice = 'tongtong', speed = 1.0) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${ZAI_BASE_URL}/audio/tts`, {
+      method: 'POST',
+      headers: zaiHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({
+        input,
+        voice,
+        speed,
+        response_format: 'wav',
+        stream: false,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`tts ${res.status}: ${err.substring(0, 100)}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf || buf.length < 100) throw new Error('Empty audio response');
+    return buf;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// === Z-AI VLM (vision) ===
+async function zaiVLM(prompt, imageUrl) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${ZAI_BASE_URL}/chat/completions/vision`, {
+      method: 'POST',
+      headers: zaiHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+        thinking: { type: 'disabled' },
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => '');
+      throw new Error(`vlm ${res.status}: ${err.substring(0, 100)}`);
+    }
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content;
+    if (typeof reply === 'string') return reply.trim();
+    if (Array.isArray(reply)) {
+      // join text items
+      return reply.map(x => x.text || '').join('').trim();
+    }
+    throw new Error('Empty VLM response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// === Telegram send helpers ===
 
 async function sendTelegram(chatId, text) {
-  // Telegram's Markdown v1 has strict rules - sanitize aggressively
   let safe = text;
-  // Remove unsupported markdown
   safe = safe.replace(/^#{1,6}\s+/gm, '');
   safe = safe.replace(/\*\*([^*]+)\*\*/g, '*$1*');
   safe = safe.replace(/~~[^~]+~~/g, '');
   safe = safe.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  // Balance asterisks
   const starCount = (safe.match(/\*/g) || []).length;
   if (starCount % 2 !== 0) safe = safe.replace(/\*([^*]*)$/, '$1');
-  // Balance backticks
   const btCount = (safe.match(/`/g) || []).length;
   if (btCount % 2 !== 0) safe += '`';
-  // Limit length
   if (safe.length > 4096) safe = safe.substring(0, 4090) + '...';
 
   const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -185,22 +378,75 @@ async function sendTelegram(chatId, text) {
   });
   if (!res.ok) {
     const errBody = await res.text().catch(() => '');
-    // If Markdown parsing fails, retry without parse_mode
     if (errBody.includes('parse') || errBody.includes('format')) {
-      console.log(`  Retrying without Markdown...`);
       const res2 = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: text.substring(0, 4096),
-          disable_web_page_preview: true,
-        }),
+        body: JSON.stringify({ chat_id: chatId, text: text.substring(0, 4096), disable_web_page_preview: true }),
       });
       if (!res2.ok) throw new Error(`Telegram ${res2.status}`);
       return res2.json();
     }
     throw new Error(`Telegram ${res.status}: ${errBody.substring(0, 150)}`);
+  }
+  return res.json();
+}
+
+async function sendPhoto(chatId, photoPath, caption = '') {
+  const fs2 = require('fs');
+  const buf = fs2.readFileSync(photoPath);
+  const blob = new Blob([buf], { type: 'image/png' });
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (caption) form.append('caption', caption.substring(0, 1024));
+  form.append('photo', blob, 'image.png');
+
+  const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`sendPhoto ${res.status}: ${err.substring(0, 150)}`);
+  }
+  return res.json();
+}
+
+async function sendVoice(chatId, audioPath) {
+  const fs2 = require('fs');
+  const buf = fs2.readFileSync(audioPath);
+  const blob = new Blob([buf], { type: 'audio/ogg' });
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('voice', blob, 'voice.ogg');
+
+  const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendVoice`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`sendVoice ${res.status}: ${err.substring(0, 150)}`);
+  }
+  return res.json();
+}
+
+async function sendAudio(chatId, audioPath, title = '') {
+  const fs2 = require('fs');
+  const buf = fs2.readFileSync(audioPath);
+  const blob = new Blob([buf], { type: 'audio/ogg' });
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (title) form.append('title', title.substring(0, 64));
+  form.append('audio', blob, 'audio.ogg');
+
+  const res = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
+    method: 'POST',
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`sendAudio ${res.status}: ${err.substring(0, 150)}`);
   }
   return res.json();
 }
@@ -215,73 +461,350 @@ async function sendTyping(chatId) {
   } catch (_) {}
 }
 
-// === Main Loop ===
+async function sendUploadPhotoAction(chatId) {
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action: 'upload_photo' }),
+    });
+  } catch (_) {}
+}
+
+async function sendUploadVoiceAction(chatId) {
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action: 'upload_voice' }),
+    });
+  } catch (_) {}
+}
+
+// === File downloading (for VLM/ASR with Telegram file URLs) ===
+async function downloadFile(url, dest) {
+  const res = await fetchWithRetry(url, {});
+  if (!res.ok) throw new Error(`download ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(dest, buf);
+  return dest;
+}
+
+// Convert local file to base64 data URL
+function fileToDataUrl(filePath, mime = 'image/jpeg') {
+  const b64 = fs.readFileSync(filePath).toString('base64');
+  return `data:${mime};base64,${b64}`;
+}
+
+// === Main message processor ===
 
 async function processMessage(msg, db, pollinationsEnabled) {
   const chatId = msg.chatId || msg.userId;
+  const content = msg.content || '';
+  const modelUsed = msg.modelUsed || '';
+
   await sendTyping(chatId);
 
-  // Get conversation history
-  const history = await db.message.findMany({
-    where: { userId: msg.userId, status: 'done' },
-    orderBy: { timestamp: 'asc' },
-    take: MAX_HISTORY,
-  });
-
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...history.map(m => ({ role: m.role, content: m.content })),
-    { role: 'user', content: msg.content },
-  ];
-
-  // Provider chain
-  let reply;
-  let modelUsed = 'moodchat-zai';
-  try {
-    reply = await callZAI(messages);
-  } catch (e) {
-    console.error(`[${ts()}]   Z-AI failed: ${e.message.substring(0, 80)}`);
-    if (pollinationsEnabled) {
+  // ============================================================
+  // 1. AI Conversation (default - normal chat)
+  // ============================================================
+  if (modelUsed === 'moodchat' || modelUsed === '' || modelUsed === null) {
+    // Check for URL in content → use web reader automatically
+    const urlMatch = content.match(/https?:\/\/[^\s]+/);
+    if (urlMatch) {
+      const url = urlMatch[0];
+      console.log(`[${ts()}]   🔗 Detected URL, reading page: ${url.substring(0, 80)}`);
       try {
-        reply = await callPollinations(messages);
-        modelUsed = 'moodchat-pollinations';
-      } catch (e2) {
-        console.error(`[${ts()}]   Pollinations failed: ${e2.message.substring(0, 80)}`);
-        reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
-        modelUsed = 'moodchat-fallback';
+        const page = await zaiPageReader(url);
+        const text = htmlToText(page.html).substring(0, 6000);
+        const augmented = `المستخدم سأل: ${content}\n\nتم استخراج المحتوى من ${url}:\nالعنوان: ${page.title}\n\n${text}\n\nبناءً على المحتوى أعلاه، أجب على سؤال المستخدم.`;
+        const history = await getHistory(db, msg.userId);
+        const messages = [
+          { role: 'system', content: SYSTEM_PROMPT + '\n\nاستخدم المحتوى المرفق للإجابة، واذكر المصدر.' },
+          ...history,
+          { role: 'user', content: augmented },
+        ];
+        const reply = await callZAIChat(messages);
+        await replyAndSave(db, msg, chatId, reply, 'moodchat-webreader');
+        return;
+      } catch (e) {
+        console.error(`[${ts()}]   ⚠️ Page reader failed: ${e.message.substring(0, 80)} - falling back to chat`);
+        // fall through to normal chat
       }
-    } else {
-      reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
-      modelUsed = 'moodchat-fallback';
+    }
+
+    // Normal chat
+    const history = await getHistory(db, msg.userId);
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...history,
+      { role: 'user', content },
+    ];
+
+    let reply;
+    let modelTag = 'moodchat-zai';
+    try {
+      reply = await callZAIChat(messages);
+    } catch (e) {
+      console.error(`[${ts()}]   Z-AI failed: ${e.message.substring(0, 80)}`);
+      if (pollinationsEnabled) {
+        try {
+          reply = await callPollinations(messages);
+          modelTag = 'moodchat-pollinations';
+        } catch (e2) {
+          console.error(`[${ts()}]   Pollinations failed: ${e2.message.substring(0, 80)}`);
+          reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
+          modelTag = 'moodchat-fallback';
+        }
+      } else {
+        reply = "عذراً، واجهت خطأ في الاتصال بالذكاء الاصطناعي. حاول مرة أخرى بعد قليل 🙏";
+        modelTag = 'moodchat-fallback';
+      }
+    }
+    await replyAndSave(db, msg, chatId, reply, modelTag);
+    return;
+  }
+
+  // ============================================================
+  // 2. Image Generation: modelUsed = 'bot-draw'
+  // ============================================================
+  if (modelUsed === 'bot-draw') {
+    const prompt = content.replace(/^draw:/i, '').trim() || content;
+    await sendUploadPhotoAction(chatId);
+    try {
+      const buf = await zaiImageGeneration(prompt, '1024x1024');
+      const filePath = path.join(TMP_DIR, `img_${Date.now()}_${Math.random().toString(36).slice(2,8)}.png`);
+      fs.writeFileSync(filePath, buf);
+      await sendPhoto(chatId, filePath, `🎨 ${prompt.substring(0, 900)}`);
+      try { fs.unlinkSync(filePath); } catch (_) {}
+      await db.message.create({
+        data: { userId: msg.userId, role: 'assistant', content: `🎨 تم توليد صورة: ${prompt}`, modelUsed: 'moodchat-draw', status: 'done' },
+      });
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      console.log(`[${ts()}]   🎨 Image generated for ${msg.userId}: ${prompt.substring(0, 50)}`);
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ Image gen failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, `❌ فشل توليد الصورة: ${e.message.substring(0, 200)}\n\nحاول مرة أخرى بصياغة مختلفة.`);
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      return;
     }
   }
 
-  // Save assistant reply
-  await db.message.create({
-    data: {
-      userId: msg.userId,
-      role: 'assistant',
-      content: reply,
-      modelUsed,
-      status: 'done',
-    },
-  });
+  // ============================================================
+  // 3. Web Search: modelUsed = 'bot-search'
+  // ============================================================
+  if (modelUsed === 'bot-search') {
+    const query = content.replace(/^search:/i, '').trim() || content;
+    try {
+      const results = await zaiWebSearch(query, 6);
+      if (!results || results.length === 0) {
+        await sendTelegram(chatId, `🔍 لا توجد نتائج للبحث: "${query}"`);
+        await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+        return;
+      }
+      // Format results into a prompt
+      const formatted = results.slice(0, 6).map((r, i) =>
+        `${i+1}. ${r.name || ''}\n   المصدر: ${r.host_name || r.url || ''}\n   ${r.snippet || ''}`
+      ).join('\n\n');
 
-  // Mark user message as done
-  await db.message.update({
-    where: { id: msg.id },
-    data: { status: 'done' },
-  });
+      const messages = [
+        { role: 'system', content: SYSTEM_PROMPT + '\n\nاستخدم نتائج البحث التالية للإجابة. اذكر المصادر في نهاية الإجابة بصيغة "📚 المصادر:"' },
+        { role: 'user', content: `سؤال المستخدم: ${query}\n\nنتائج البحث:\n${formatted}\n\nقدّم إجابة محدّثة ودقيقة بناءً على هذه النتائج.` },
+      ];
+      const reply = await callZAIChat(messages);
+      await replyAndSave(db, msg, chatId, reply, 'moodchat-search');
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ Web search failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, `❌ فشل البحث: ${e.message.substring(0, 200)}`);
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      return;
+    }
+  }
 
-  // Send via Telegram
+  // ============================================================
+  // 4. Web Reader (explicit): modelUsed = 'bot-read'
+  // ============================================================
+  if (modelUsed === 'bot-read') {
+    const url = content.replace(/^read:/i, '').trim() || content;
+    try {
+      const page = await zaiPageReader(url);
+      const text = htmlToText(page.html).substring(0, 8000);
+      const messages = [
+        { role: 'system', content: SYSTEM_PROMPT + '\n\nلخص المحتوى التالي بدقة واذكر النقاط الرئيسية.' },
+        { role: 'user', content: `الرابط: ${url}\nالعنوان: ${page.title}\n\nالمحتوى:\n${text}\n\nقدّم ملخصاً شاملاً مع النقاط الرئيسية.` },
+      ];
+      const reply = await callZAIChat(messages);
+      await replyAndSave(db, msg, chatId, reply, 'moodchat-read');
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ Page reader failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, `❌ فشل قراءة الصفحة: ${e.message.substring(0, 200)}`);
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      return;
+    }
+  }
+
+  // ============================================================
+  // 5. TTS: modelUsed = 'bot-tts'
+  // ============================================================
+  if (modelUsed === 'bot-tts') {
+    const text = content.replace(/^tts:/i, '').trim() || content;
+    await sendUploadVoiceAction(chatId);
+    try {
+      // TTS limit is 1024 chars - chunk if needed
+      const chunks = chunkText(text, 1000);
+      for (let i = 0; i < chunks.length; i++) {
+        const buf = await zaiTTS(chunks[i]);
+        const wavPath = path.join(TMP_DIR, `tts_${Date.now()}_${i}.wav`);
+        const oggPath = wavPath.replace(/\.wav$/, '.ogg');
+        fs.writeFileSync(wavPath, buf);
+
+        // Convert WAV to OGG/OPUS so Telegram accepts it as voice
+        const converted = convertWavToOgg(wavPath, oggPath);
+        const sendPath = converted ? oggPath : wavPath;
+
+        try {
+          await sendVoice(chatId, sendPath);
+        } catch (e) {
+          console.log(`[${ts()}]   sendVoice failed, falling back to sendAudio: ${e.message.substring(0, 80)}`);
+          await sendAudio(chatId, sendPath, `MoodChat TTS ${i+1}`);
+        }
+        try { fs.unlinkSync(wavPath); } catch (_) {}
+        try { fs.unlinkSync(oggPath); } catch (_) {}
+      }
+      await db.message.create({
+        data: { userId: msg.userId, role: 'assistant', content: `🎤 تم تحويل النص إلى صوت`, modelUsed: 'moodchat-tts', status: 'done' },
+      });
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      console.log(`[${ts()}]   🎤 TTS for ${msg.userId}: ${text.substring(0, 50)}`);
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ TTS failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, `❌ فشل تحويل النص إلى صوت: ${e.message.substring(0, 200)}`);
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      return;
+    }
+  }
+
+  // ============================================================
+  // 6. VLM (image analysis from URL): modelUsed = 'bot-vlm'
+  // ============================================================
+  if (modelUsed === 'bot-vlm') {
+    // Format: "prompt|url=..." or just "url"
+    let prompt = 'صف هذه الصورة بالتفصيل';
+    let imageUrl = '';
+    if (content.includes('|')) {
+      const [p, u] = content.split('|');
+      prompt = p.trim() || prompt;
+      const m = u.match(/url=(\S+)/);
+      imageUrl = m ? m[1] : u.trim();
+    } else if (content.startsWith('http')) {
+      imageUrl = content.trim();
+    } else {
+      const m = content.match(/url=(\S+)/);
+      if (m) imageUrl = m[1];
+      else { imageUrl = content.trim(); }
+    }
+    try {
+      const reply = await zaiVLM(prompt, imageUrl);
+      await replyAndSave(db, msg, chatId, reply, 'moodchat-vlm');
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ VLM failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, `❌ فشل تحليل الصورة: ${e.message.substring(0, 200)}`);
+      await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      return;
+    }
+  }
+
+  // ============================================================
+  // 7. Fallback - treat as regular chat
+  // ============================================================
+  console.log(`[${ts()}]   Unknown modelUsed='${modelUsed}', treating as chat`);
+  const history = await getHistory(db, msg.userId);
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...history,
+    { role: 'user', content },
+  ];
+  let reply;
   try {
-    await sendTelegram(chatId, reply);
-    console.log(`[${ts()}]   ✅ Replied to ${msg.userId} via ${modelUsed}: "${reply.substring(0, 60)}..."`);
+    reply = await callZAIChat(messages);
   } catch (e) {
-    console.error(`[${ts()}]   ❌ Telegram send failed: ${e.message.substring(0, 100)}`);
-    // Even if Telegram send fails, the message is in DB so user can see it in dashboard
+    reply = "عذراً، واجهت خطأ. حاول مرة أخرى 🙏";
+  }
+  await replyAndSave(db, msg, chatId, reply, 'moodchat-fallback');
+}
+
+// === Helpers ===
+
+async function getHistory(db, userId) {
+  try {
+    const rows = await db.message.findMany({
+      where: { userId, status: 'done', role: { in: ['user', 'assistant'] } },
+      orderBy: { timestamp: 'asc' },
+      take: MAX_HISTORY,
+    });
+    return rows
+      .filter(m => m.modelUsed !== 'file-docx' && m.modelUsed !== 'file-code')
+      .map(m => ({ role: m.role, content: m.content }));
+  } catch (_) {
+    return [];
   }
 }
+
+async function replyAndSave(db, msg, chatId, reply, modelTag) {
+  await db.message.create({
+    data: { userId: msg.userId, role: 'assistant', content: reply, modelUsed: modelTag, status: 'done' },
+  });
+  await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+  try {
+    await sendTelegram(chatId, reply);
+    console.log(`[${ts()}]   ✅ Replied to ${msg.userId} via ${modelTag}: "${reply.substring(0, 60)}..."`);
+  } catch (e) {
+    console.error(`[${ts()}]   ❌ Telegram send failed: ${e.message.substring(0, 100)}`);
+  }
+}
+
+function chunkText(text, maxLen) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  // Split by sentences then pack
+  const sentences = text.match(/[^.!?؟。\n]+[.!?؟。\n]*/g) || [text];
+  let cur = '';
+  for (const s of sentences) {
+    if ((cur + s).length > maxLen) {
+      if (cur) chunks.push(cur.trim());
+      // If single sentence is too long, hard-split
+      if (s.length > maxLen) {
+        for (let i = 0; i < s.length; i += maxLen) {
+          chunks.push(s.substring(i, i + maxLen));
+        }
+        cur = '';
+      } else {
+        cur = s;
+      }
+    } else {
+      cur += s;
+    }
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks;
+}
+
+// Convert WAV to OGG/OPUS for Telegram voice messages
+function convertWavToOgg(wavPath, oggPath) {
+  try {
+    execSync(`ffmpeg -y -i "${wavPath}" -c:a libopus -b:a 32k "${oggPath}" 2>/dev/null`, { stdio: 'ignore' });
+    return fs.existsSync(oggPath);
+  } catch (_) {
+    return false;
+  }
+}
+
+// === Main Loop ===
 
 async function tick() {
   let db;
@@ -322,24 +845,20 @@ async function tick() {
       await processMessage(msg, db, pollinationsEnabled);
     } catch (e) {
       console.error(`[${ts()}]   ❌ Failed msg ${msg.id}: ${e.message.substring(0, 100)}`);
-      // Mark as done to avoid infinite retry loop
       try {
-        await db.message.update({
-          where: { id: msg.id },
-          data: { status: 'done' },
-        });
+        await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
       } catch (_) {}
     }
   }
 }
 
 async function main() {
-  console.log(`[${ts()}] 🚀 MoodChat Worker started`);
+  console.log(`[${ts()}] 🚀 MoodChat Worker v2 started (full Z-AI SDK capabilities)`);
   console.log(`[${ts()}]    Bot token: ...${BOT_TOKEN.slice(-8)}`);
-  console.log(`[${ts()}]    Z-AI chat: (decoupled - no specific chat_id)`);
+  console.log(`[${ts()}]    Z-AI base: ${ZAI_BASE_URL}`);
+  console.log(`[${ts()}]    Capabilities: chat, web_search, page_reader, image_gen, TTS, VLM, ASR`);
   console.log(`[${ts()}]    Poll interval: ${POLL_INTERVAL_MS}ms`);
 
-  // Run forever
   while (true) {
     try {
       await tick();
@@ -350,7 +869,6 @@ async function main() {
   }
 }
 
-// Handle signals gracefully
 process.on('SIGINT', async () => {
   console.log(`[${ts()}] Received SIGINT, shutting down...`);
   await resetDb();
