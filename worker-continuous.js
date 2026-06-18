@@ -2011,9 +2011,123 @@ async function handleTelegramUpdate(update, db) {
   // Upsert user
   await upsertTelegramUser(db, message.from);
 
-  // Admin commands that need immediate action (mirror the webhook handler)
+  // /start and /help — send the welcome/help message directly from worker
   if (text === '/start' || text === '/help') {
-    // Skip — let Vercel handle these when it's reachable. Or just send a minimal reply.
+    const isAdm = isAdminUser(userId);
+    const helpText = isAdm
+      ? `👑 **أهلاً بك يا مدير!**
+
+بوت **مود شات** جاهز للعمل! 🚀
+
+**🧠 القدرات الأساسية:**
+💬 محادثة ذكية - يتذكر آخر 30 رسالة
+🌐 متعدد اللغات - أي لغة تطلبها
+📎 معالجة الملفات: PDF/DOCX/Excel/كود/صور/صوت/فيديو
+
+**🤖 القدرات المتقدمة:**
+🤖 /agent [سؤال] - وكيل ذكي يبحث في الويب تلقائياً
+🧠 /think [سؤال] - تفكير عميق خطوة بخطوة
+🧠🤖 /thinkagent [سؤال] - تفكير + بحث معاً
+
+**🎨 القدرات الكاملة:**
+🔍 /search [سؤال] - بحث مباشر في الويب
+🔗 /read [رابط] - قراءة وتلخيص أي صفحة
+🎨 /draw [وصف] - توليد الصور بالذكاء الاصطناعي
+🎤 /tts [نص] - تحويل النص إلى صوت
+📸 تحليل الصور - أرسل صورة وسأحللها
+📄 /doc [موضوع] - إنشاء ملف Word
+💻 /code [لغة] [مطلوب] - إنشاء ملف كود
+
+💡 يمكنك أيضاً كتابة الأوامر كأوامر مسبقة: agent: think: tts: draw: read:
+
+**أوامر المدير:** 👑
+/stats - الإحصائيات
+/users - قائمة المستخدمين
+/aistatus - حالة الذكاء الاصطناعي
+/broadcast [رسالة] - إرسال للجميع
+/settings - إعدادات البوت
+
+**أوامر عامة:** /clear /help`
+      : `أهلاً بك في بوت **مود شات**! 🎉
+
+🧠 ذاكرة ذكية | 🌍 متعدد اللغات
+
+**الأوامر المتاحة:**
+/clear - مسح الذاكرة
+/help - المساعدة
+/start - إعادة البدء
+
+اكتب رسالتك مباشرة وسأرد عليك فوراً! 💬`;
+    try {
+      await sendTelegram(chatId, helpText);
+      console.log(`[${ts()}]   ✅ Sent ${text} help to ${userId}`);
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ Failed to send /start help: ${e.message.substring(0, 100)}`);
+    }
+    return true;
+  }
+
+  // /clear — clear conversation memory for this user
+  if (text === '/clear') {
+    try {
+      await db._sql`INSERT INTO "BotConfig" (key, value) VALUES (${'clear_marker_' + userId}, ${'1'}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+      await sendTelegram(chatId, '🗑️ تم مسح ذاكرة المحادثة. اكتب رسالة جديدة للبدء.');
+      console.log(`[${ts()}]   ✅ Cleared memory for ${userId}`);
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ /clear failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, '❌ تعذّر مسح الذاكرة، حاول مرة أخرى.');
+    }
+    return true;
+  }
+
+  // /stats — admin stats
+  if (text === '/stats' && isAdminUser(userId)) {
+    try {
+      const stats = await db._sql`
+        SELECT
+          (SELECT COUNT(*) FROM "TelegramUser") AS total_users,
+          (SELECT COUNT(*) FROM "TelegramUser" WHERE "isApproved" = true) AS approved,
+          (SELECT COUNT(*) FROM "TelegramUser" WHERE "isBlocked" = true) AS blocked,
+          (SELECT COUNT(*) FROM "Message") AS total_messages,
+          (SELECT COUNT(*) FROM "Message" WHERE status = 'pending') AS pending
+      `;
+      const s = stats[0] || {};
+      await sendTelegram(chatId,
+        `📊 **إحصائيات البوت**\n\n` +
+        `👥 إجمالي المستخدمين: ${s.total_users || 0}\n` +
+        `✅ مفعلين: ${s.approved || 0}\n` +
+        `🚫 محظورين: ${s.blocked || 0}\n` +
+        `📨 إجمالي الرسائل: ${s.total_messages || 0}\n` +
+        `⏳ رسائل معلقة: ${s.pending || 0}`
+      );
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ /stats failed: ${e.message.substring(0, 100)}`);
+      await sendTelegram(chatId, '❌ تعذّر جلب الإحصائيات.');
+    }
+    return true;
+  }
+
+  // /aistatus — quick AI status check
+  if (text === '/aistatus' && isAdminUser(userId)) {
+    try {
+      const startT = Date.now();
+      await callZAIChat(
+        [{ role: 'user', content: 'قل: OK' }],
+        { model: DEFAULT_MODEL, maxTokens: 10, timeoutMs: 10000 }
+      );
+      const elapsed = Date.now() - startT;
+      await sendTelegram(chatId,
+        `🤖 **حالة الذكاء الاصطناعي**\n\n` +
+        `✅ يعمل (${elapsed}ms)\n` +
+        `🧠 النموذج: ${DEFAULT_MODEL}\n` +
+        `📡 القاعدة: ${ZAI_BASE_URL}`
+      );
+    } catch (e) {
+      await sendTelegram(chatId,
+        `🤖 **حالة الذكاء الاصطناعي**\n\n` +
+        `❌ غير متاح: ${e.message.substring(0, 80)}`
+      );
+    }
     return true;
   }
 
