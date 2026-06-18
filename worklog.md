@@ -117,3 +117,76 @@ Stage Summary:
 - ✅ PM2 auto-start mechanism installed (bashrc hook + optional systemd unit)
 - ⏳ Still TODO: user should re-upload exercise.pdf to confirm end-to-end via Telegram
 - ⚠️  Note: ZAI_CHAT_ID is still the same as the conversation chat_id (not changed yet)
+
+---
+Task ID: 4
+Agent: main
+Task: Fix stopped bot + make it never go down during updates (zero-downtime reload)
+
+Work Log:
+- Diagnosed root cause of user's "البوت واقف" (bot is stopped):
+  • PM2 worker was actually running (PID 5585), DB connected
+  • Real problem: 8 stuck pending updates at Telegram causing 504s
+  • The 504s came from Vercel webhook doing synchronous Telegram API calls
+    ("جاري المعالجة..." messages) inside the request handler, pushing past 30s timeout
+- Cleared 8 stuck pending Telegram updates:
+  • deleteWebhook?drop_pending_updates=true → flushed the queue
+  • Re-set webhook with max_connections=10 + allowed_updates filter
+- Made the worker truly never die during updates:
+  • Added graceful shutdown to worker-continuous.js:
+    - isShuttingDown flag prevents picking up new messages
+    - inFlightCount tracks active message processing
+    - gracefulShutdown() waits up to 25s for in-flight messages
+    - process.send('ready') signals PM2 the new process is ready
+  • Updated ecosystem.config.js with:
+    - wait_ready: true
+    - shutdown_with_message: true
+    - listen_timeout: 30000 / kill_timeout: 35000
+    - max_restarts: 100 (worker always comes back after crash)
+    - exp_backoff_restart_delay: 200
+- Found and fixed a PM2 env pollution bug:
+  • Shell env had DATABASE_URL=file:...sqlite (from .env leaking somewhere)
+  • `pm2 reload --update-env` would pick that up and break the worker
+  • Fix: NEVER use --update-env. Added `unset DATABASE_URL` to ~/.bashrc
+  • Verified: pm2 env 0 now shows correct postgresql://... URL
+- Tested zero-downtime reload end-to-end:
+  • Sent "اكتب لي قصة طويلة عن المغامرة" (long message, takes ~30s to process)
+  • Ran `pm2 reload moodchat-worker` mid-processing
+  • Old process logged: "Shutdown complete ✅" (graceful)
+  • New process started within 1s, picked up the pending message
+  • Result: zero message loss, zero downtime ✅
+- Created scripts/update-bot.sh:
+  • Standardized zero-downtime update wrapper
+  • Syntax-checks new code BEFORE touching running process
+  • Uses `pm2 reload` (not restart) - preserves in-flight messages
+  • Verifies new process comes online within 30s
+- Created scripts/worker-watchdog.sh:
+  • Background process checks PM2 every 30s
+  • If worker in 'errored'/'stopped'/'not_found' state → restarts it
+  • If PM2 daemon dead → resurrects from ~/.pm2/dump.pm2
+  • Auto-trims its own log file (max 200 lines)
+  • Started in background (PID 7123)
+- Updated ~/.bashrc to auto-start both watchdog and worker on shell open:
+  • Unsets DATABASE_URL (prevents PM2 env pollution)
+  • Resurrects PM2 from saved state if daemon missing
+  • Starts worker from ecosystem.config.js if not in PM2
+  • Starts watchdog in background if not already running
+- Made Vercel webhook faster (avoid 504s):
+  • Added sendMessageBackground() - fire-and-forget Telegram API calls
+  • Replaced 12 "await sendMessage('جاري المعالجة...')" with sendMessageBackground
+  • Webhook now returns 200 OK immediately after DB write
+  • Deployed to Vercel production: https://my-project-two-nu-94.vercel.app
+- Final test: /search اختبار السرعة → webhook replied in 9s (under 30s limit),
+  worker processed search → AI reply in ~17s. Telegram: 0 pending, no errors.
+
+Stage Summary:
+- ✅ Bot is back online and stable
+- ✅ Zero-downtime updates: `pm2 reload moodchat-worker` finishes in-flight
+  messages, then swaps to new process. No message loss, no downtime.
+- ✅ Use `/home/z/my-project/scripts/update-bot.sh` for safe updates
+- ✅ Watchdog (PID 7123) auto-restarts worker if it ever dies
+- ✅ ~/.bashrc auto-resurrects PM2 + watchdog on container/shell restart
+- ✅ Webhook responds in ~9s (was timing out at 30s+ before)
+- ✅ Telegram: 0 pending updates, no errors
+- 📝 For future updates: NEVER use `pm2 restart` or `pm2 reload --update-env`.
+  Always use `./scripts/update-bot.sh` which uses `pm2 reload` (no env pollution)

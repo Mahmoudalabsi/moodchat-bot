@@ -150,6 +150,17 @@ async function sendMessage(chatId: number, text: string, extra?: Record<string, 
   return telegramAPI('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...extra });
 }
 
+// Fire-and-forget variant: doesn't block the caller.
+// Use this for non-critical messages (e.g., "جاري المعالجة...") so the webhook
+// can return 200 OK to Telegram within the 30s Vercel timeout window.
+function sendMessageBackground(chatId: number, text: string, extra?: Record<string, unknown>) {
+  // Intentionally NOT awaited - the promise resolves in the background.
+  // Errors are caught and logged to avoid unhandledRejection.
+  sendMessage(chatId, text, extra).catch(err => {
+    console.error('[sendMessageBackground] Error:', err?.message?.substring(0, 80));
+  });
+}
+
 async function sendChatAction(chatId: number) {
   return telegramAPI('sendChatAction', { chat_id: chatId, action: 'typing' });
 }
@@ -626,7 +637,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `search:${q}`, modelUsed: 'bot-search', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🔍 جاري البحث في الويب... ⏳");
+        sendMessageBackground(chatId, "🔍 جاري البحث في الويب... ⏳");
         return { ok: true, mode: 'search-pending' };
       }
       // /draw - توليد صورة
@@ -639,7 +650,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `draw:${prompt}`, modelUsed: 'bot-draw', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🎨 جاري توليد الصورة... ⏳");
+        sendMessageBackground(chatId, "🎨 جاري توليد الصورة... ⏳");
         return { ok: true, mode: 'draw-pending' };
       }
       // /tts - تحويل نص إلى صوت
@@ -652,7 +663,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `tts:${ttsText}`, modelUsed: 'bot-tts', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🎤 جاري تحويل النص إلى صوت... ⏳");
+        sendMessageBackground(chatId, "🎤 جاري تحويل النص إلى صوت... ⏳");
         return { ok: true, mode: 'tts-pending' };
       }
       // /read - قراءة محتوى رابط
@@ -665,7 +676,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `read:${url}`, modelUsed: 'bot-read', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🔗 جاري قراءة الصفحة... ⏳");
+        sendMessageBackground(chatId, "🔗 جاري قراءة الصفحة... ⏳");
         return { ok: true, mode: 'read-pending' };
       }
       // /doc - إنشاء ملف Word
@@ -678,7 +689,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
+        sendMessageBackground(chatId, "📄 جاري إنشاء ملف Word... ⏳");
         return { ok: true, mode: 'file-pending' };
       }
       // أمر /code - إنشاء ملف كود
@@ -691,7 +702,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
+        sendMessageBackground(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
         return { ok: true, mode: 'file-pending' };
       }
     }
@@ -779,7 +790,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `search:${q}`, modelUsed: 'bot-search', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🔍 جاري البحث في الويب... ⏳");
+        sendMessageBackground(chatId, "🔍 جاري البحث في الويب... ⏳");
         return { ok: true, mode: 'search-pending' };
       }
       // /draw - توليد صورة
@@ -792,7 +803,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `draw:${prompt}`, modelUsed: 'bot-draw', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🎨 جاري توليد الصورة... ⏳");
+        sendMessageBackground(chatId, "🎨 جاري توليد الصورة... ⏳");
         return { ok: true, mode: 'draw-pending' };
       }
       // /tts - تحويل نص إلى صوت
@@ -805,7 +816,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `tts:${ttsText}`, modelUsed: 'bot-tts', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🎤 جاري تحويل النص إلى صوت... ⏳");
+        sendMessageBackground(chatId, "🎤 جاري تحويل النص إلى صوت... ⏳");
         return { ok: true, mode: 'tts-pending' };
       }
       // /read - قراءة محتوى رابط
@@ -818,7 +829,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `read:${url}`, modelUsed: 'bot-read', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "🔗 جاري قراءة الصفحة... ⏳");
+        sendMessageBackground(chatId, "🔗 جاري قراءة الصفحة... ⏳");
         return { ok: true, mode: 'read-pending' };
       }
       // أمر /doc - إنشاء ملف Word
@@ -831,7 +842,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `📄 إنشاء ملف Word عن: ${docTopic}`, modelUsed: 'file-docx', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "📄 جاري إنشاء ملف Word... ⏳");
+        sendMessageBackground(chatId, "📄 جاري إنشاء ملف Word... ⏳");
         return { ok: true, mode: 'file-pending' };
       }
       // أمر /code - إنشاء ملف كود
@@ -844,7 +855,7 @@ export async function handleTelegramUpdate(update: {
         await db.message.create({
           data: { userId, role: 'user', content: `💻 إنشاء كود: ${codeRequest}`, modelUsed: 'file-code', status: 'pending', chatId },
         });
-        await sendMessage(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
+        sendMessageBackground(chatId, "💻 جاري إنشاء ملف الكود... ⏳");
         return { ok: true, mode: 'file-pending' };
       }
     }

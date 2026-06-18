@@ -1300,7 +1300,13 @@ function convertWavToOgg(wavPath, oggPath) {
 
 // === Main Loop ===
 
+// Graceful shutdown state
+let isShuttingDown = false;
+let inFlightCount = 0;
+let tickResolve; // for await-current-tick during shutdown
+
 async function tick() {
+  if (isShuttingDown) return;  // Don't pick up new work while shutting down
   let db;
   try {
     db = await getDb();
@@ -1335,6 +1341,8 @@ async function tick() {
   console.log(`[${ts()}] Processing ${pending.length} pending message(s)`);
 
   for (const msg of pending) {
+    if (isShuttingDown) break;  // Stop picking up new messages during shutdown
+    inFlightCount++;
     try {
       await processMessage(msg, db, pollinationsEnabled);
     } catch (e) {
@@ -1342,6 +1350,8 @@ async function tick() {
       try {
         await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
       } catch (_) {}
+    } finally {
+      inFlightCount--;
     }
   }
 }
@@ -1353,7 +1363,12 @@ async function main() {
   console.log(`[${ts()}]    Capabilities: chat, web_search, page_reader, image_gen, TTS, VLM, ASR`);
   console.log(`[${ts()}]    Poll interval: ${POLL_INTERVAL_MS}ms`);
 
-  while (true) {
+  // Signal PM2 that we're ready (used with `wait_ready: true`)
+  if (typeof process.send === 'function') {
+    try { process.send('ready'); } catch (_) {}
+  }
+
+  while (!isShuttingDown) {
     try {
       await tick();
     } catch (e) {
@@ -1361,17 +1376,35 @@ async function main() {
     }
     await sleep(POLL_INTERVAL_MS);
   }
+  console.log(`[${ts()}] Main loop exited (shutdown complete)`);
 }
 
-process.on('SIGINT', async () => {
-  console.log(`[${ts()}] Received SIGINT, shutting down...`);
+// Graceful shutdown: stop accepting new work, finish in-flight, then exit
+async function gracefulShutdown(signal) {
+  console.log(`[${ts()}] Received ${signal}, shutting down gracefully...`);
+  console.log(`[${ts()}]    in-flight messages: ${inFlightCount}`);
+  isShuttingDown = true;
+
+  // Wait up to 25 seconds for in-flight messages to finish (Vercel/PM2 default timeout is 30s)
+  const deadline = Date.now() + 25000;
+  while (inFlightCount > 0 && Date.now() < deadline) {
+    console.log(`[${ts()}]    waiting for ${inFlightCount} in-flight message(s)...`);
+    await sleep(500);
+  }
+  if (inFlightCount > 0) {
+    console.warn(`[${ts()}]    ⚠️ ${inFlightCount} message(s) still in flight, force-exiting`);
+  }
+
   await resetDb();
+  console.log(`[${ts()}] Shutdown complete ✅`);
   process.exit(0);
-});
-process.on('SIGTERM', async () => {
-  console.log(`[${ts()}] Received SIGTERM, shutting down...`);
-  await resetDb();
-  process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+// PM2 sends 'message' with 'shutdown' event when using `pm2 reload` with `shutdown_with_message: true`
+process.on('message', (msg) => {
+  if (msg === 'shutdown') gracefulShutdown('PM2-shutdown');
 });
 
 main().catch(e => {
