@@ -1929,6 +1929,261 @@ async function writeHeartbeat(db) {
   }
 }
 
+// === Telegram Polling Mode ===
+// Bypasses the Vercel webhook (which 504s on long messages) by polling
+// Telegram directly. Incoming updates are inserted into the DB as pending
+// messages, then the regular tick() loop processes them.
+
+const ADMIN_IDS_LIST = (process.env.ADMIN_IDS || '1429407129').split(',').map(s => parseInt(s.trim())).filter(Number.isFinite);
+let telegramLastUpdateId = 0;
+let telegramPollingActive = false;
+
+// Minimal subset of Telegram update shapes we care about
+function isAdminUser(userId) { return ADMIN_IDS_LIST.includes(userId); }
+
+// Insert a Telegram user (upsert) — keeps DB consistent for foreign keys
+async function upsertTelegramUser(db, u) {
+  try {
+    // Try INSERT ... ON CONFLICT first
+    await db._sql`
+      INSERT INTO "TelegramUser" ("userId", username, "firstName", "lastName", "languageCode", "isBot", "totalMessages", "isApproved", "approvedAt", "waitingForPassword", "firstSeen", "lastActive", "joinAttempts", "photoUrl")
+      VALUES (${u.id}, ${u.username || null}, ${u.first_name || null}, ${u.last_name || null}, ${u.language_code || null}, ${u.is_bot || false}, 1, ${isAdminUser(u.id)}, ${isAdminUser(u.id) ? new Date().toISOString() : null}, false, NOW(), NOW(), 0, null)
+      ON CONFLICT ("userId") DO UPDATE SET
+        "lastActive" = NOW(),
+        "totalMessages" = "TelegramUser"."totalMessages" + 1,
+        username = EXCLUDED.username,
+        "firstName" = EXCLUDED."firstName",
+        "lastName" = EXCLUDED."lastName"
+    `;
+  } catch (e) {
+    // Fallback: SELECT + UPDATE/INSERT (in case ON CONFLICT fails due to schema)
+    try {
+      const existing = await db._sql`SELECT "userId" FROM "TelegramUser" WHERE "userId" = ${u.id}`;
+      if (existing.length > 0) {
+        await db._sql`UPDATE "TelegramUser" SET "lastActive" = NOW(), "totalMessages" = "totalMessages" + 1 WHERE "userId" = ${u.id}`;
+      } else {
+        await db._sql`
+          INSERT INTO "TelegramUser" ("userId", username, "firstName", "lastName", "languageCode", "isBot", "totalMessages", "isApproved", "approvedAt", "waitingForPassword", "firstSeen", "lastActive", "joinAttempts")
+          VALUES (${u.id}, ${u.username || null}, ${u.first_name || null}, ${u.last_name || null}, ${u.language_code || null}, ${u.is_bot || false}, 1, ${isAdminUser(u.id)}, ${isAdminUser(u.id) ? new Date().toISOString() : null}, false, NOW(), NOW(), 0)
+        `;
+      }
+    } catch (e2) {
+      console.error(`[${ts()}]   ⚠️ upsertTelegramUser failed: ${e2.message.substring(0, 80)}`);
+    }
+  }
+}
+
+// Insert a message row directly via SQL (bypasses PrismaShim's create() since we need chatId + imageUrl)
+async function insertPendingMessage(db, data) {
+  const id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  try {
+    await db._sql`
+      INSERT INTO "Message" (id, "userId", "chatId", role, content, "modelUsed", status, "timestamp", "imageUrl", "fileType", "mimeType", "fileName")
+      VALUES (${id}, ${data.userId}, ${data.chatId}, ${data.role}, ${data.content}, ${data.modelUsed}, 'pending', NOW(), ${data.imageUrl || null}, ${data.fileType || null}, ${data.mimeType || null}, ${data.fileName || null})
+    `;
+    return id;
+  } catch (e) {
+    console.error(`[${ts()}]   ⚠️ insertPendingMessage failed: ${e.message.substring(0, 100)}`);
+    return null;
+  }
+}
+
+// Handle a single Telegram update — saves it as a pending Message in DB.
+// Returns true if a message was inserted (so caller can update lastUpdateId).
+async function handleTelegramUpdate(update, db) {
+  const message = update.message;
+  if (!message?.from) return false;
+
+  const userId = message.from.id;
+  const chatId = message.chat?.id || userId;
+  const text = (message.text || message.caption || '').trim();
+  const hasPhoto = !!(message.photo && message.photo.length > 0);
+  const hasDocument = !!message.document;
+  const hasVoice = !!message.voice;
+  const hasAudio = !!message.audio;
+  const hasVideo = !!(message.video || message.video_note);
+  const hasSticker = !!message.sticker;
+  const hasFile = hasPhoto || hasDocument || hasVoice || hasAudio || hasVideo || hasSticker;
+  if (!text && !hasFile) return false;
+
+  // Upsert user
+  await upsertTelegramUser(db, message.from);
+
+  // Admin commands that need immediate action (mirror the webhook handler)
+  if (text === '/start' || text === '/help') {
+    // Skip — let Vercel handle these when it's reachable. Or just send a minimal reply.
+    return true;
+  }
+
+  // For regular messages: insert into DB as pending
+  let modelUsed = 'moodchat';
+  let content = text;
+  let imageUrl = null;
+  let fileType = null;
+  let mimeType = null;
+  let fileName = null;
+
+  // Photos → VLM
+  if (hasPhoto) {
+    const biggest = message.photo[message.photo.length - 1];
+    imageUrl = biggest.file_id;
+    fileType = 'image';
+    modelUsed = 'vlm';
+    content = message.caption?.trim() || '📷 [صورة]';
+  }
+  // Documents
+  else if (hasDocument) {
+    imageUrl = message.document.file_id;
+    fileName = message.document.file_name || 'document';
+    mimeType = message.document.mime_type || 'application/octet-stream';
+    fileType = mimeType.startsWith('image/') ? 'image' : 'document';
+    modelUsed = mimeType.startsWith('image/') ? 'vlm' : 'file-analyze';
+    content = message.caption?.trim() || `📎 [ملف: ${fileName}]`;
+  }
+  // Voice messages
+  else if (hasVoice) {
+    imageUrl = message.voice.file_id;
+    mimeType = message.voice.mime_type || 'audio/ogg';
+    fileType = 'voice';
+    modelUsed = 'voice-analyze';
+    content = message.caption?.trim() || '🎤 [رسالة صوتية]';
+  }
+  // Audio files
+  else if (hasAudio) {
+    imageUrl = message.audio.file_id;
+    mimeType = message.audio.mime_type || 'audio/mpeg';
+    fileType = 'audio';
+    modelUsed = 'audio-analyze';
+    content = message.caption?.trim() || `🎵 [ملف صوتي: ${message.audio.title || ''}]`;
+  }
+  // Videos
+  else if (hasVideo) {
+    const v = message.video || message.video_note;
+    imageUrl = v.file_id;
+    mimeType = v.mime_type || 'video/mp4';
+    fileType = 'video';
+    modelUsed = 'video-analyze';
+    content = message.caption?.trim() || '🎬 [فيديو]';
+  }
+  // Stickers
+  else if (hasSticker) {
+    imageUrl = message.sticker.file_id;
+    fileType = 'sticker';
+    modelUsed = 'vlm';
+    content = message.sticker.emoji || '🏷️ [ملصق]';
+  }
+  // Text commands with prefix
+  else if (text) {
+    // /search, /draw, /tts, /read, /agent, /think, /thinkagent, etc.
+    if (text.startsWith('/search ')) { modelUsed = 'bot-search'; content = text.replace(/^\/search\s+/, ''); }
+    else if (text.startsWith('/draw ') || text.startsWith('/img ')) { modelUsed = 'bot-draw'; content = text.replace(/^\/(draw|img)\s+/, ''); }
+    else if (text.startsWith('/tts ')) { modelUsed = 'bot-tts'; content = text.replace(/^\/tts\s+/, ''); }
+    else if (text.startsWith('/read ')) { modelUsed = 'bot-read'; content = text.replace(/^\/read\s+/, ''); }
+    else if (text.startsWith('/agent ')) { modelUsed = 'bot-agent'; content = text.replace(/^\/agent\s+/, ''); }
+    else if (text.startsWith('/think ')) { modelUsed = 'bot-think'; content = text.replace(/^\/think\s+/, ''); }
+    else if (text.startsWith('/thinkagent ') || text.startsWith('/think agent ')) {
+      modelUsed = 'bot-thinkagent';
+      content = text.replace(/^\/thinkagent\s+/, '').replace(/^\/think\s+agent\s+/, '');
+    }
+    // Strip leading slash for /start /help /clear etc. - let them through as plain chat
+    // but they should already be handled above
+  }
+
+  const id = await insertPendingMessage(db, {
+    userId, chatId, role: 'user',
+    content, modelUsed, imageUrl, fileType, mimeType, fileName,
+  });
+
+  if (id) {
+    console.log(`[${ts()}] 📨 Telegram update: uid=${userId} model=${modelUsed} content="${content.substring(0, 50)}..."`);
+    // Send a quick "typing..." indicator so the user knows the bot received it
+    sendTyping(chatId);
+  }
+  return true;
+}
+
+// Long-poll Telegram for updates. Runs as a separate async loop in parallel
+// with the DB tick() loop. Inserts new updates as pending messages.
+async function telegramPollLoop() {
+  if (telegramPollingActive) return;
+  telegramPollingActive = true;
+  console.log(`[${ts()}] 📡 Telegram polling started (replaces Vercel webhook)`);
+
+  // 1. Delete the Vercel webhook so polling can work
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/deleteWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ drop_pending_updates: false }),
+    });
+    const d = await r.json();
+    console.log(`[${ts()}] 📡 Webhook deleted: ${d.ok ? 'OK' : d.description}`);
+  } catch (e) {
+    console.error(`[${ts()}] 📡 deleteWebhook failed: ${e.message.substring(0, 80)}`);
+  }
+  await sleep(1500);
+
+  // 2. Long-polling loop
+  while (!isShuttingDown) {
+    try {
+      const db = await getDb().catch(() => null);
+      if (!db) {
+        await sleep(2000);
+        continue;
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 35000);  // 35s hard cap
+      let data;
+      try {
+        const res = await fetch(
+          `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${telegramLastUpdateId + 1}&timeout=30&limit=10`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ allowed_updates: ['message'] }),
+            signal: controller.signal,
+          }
+        );
+        data = await res.json();
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (data?.ok && data.result?.length > 0) {
+        for (const update of data.result) {
+          if (update.update_id > telegramLastUpdateId) {
+            telegramLastUpdateId = update.update_id;
+          }
+          try {
+            await handleTelegramUpdate(update, db);
+          } catch (e) {
+            console.error(`[${ts()}] 📡 Update handler error: ${e.message.substring(0, 100)}`);
+          }
+        }
+      } else if (data && !data.ok) {
+        // Conflict = another getUpdates call is running (likely a stale Vercel call)
+        // Don't log spam — just wait briefly and try again
+        if (data.description && data.description.includes('Conflict')) {
+          await sleep(2000);
+        } else {
+          console.error(`[${ts()}] 📡 getUpdates error: ${data.description || 'unknown'}`);
+          await sleep(3000);
+        }
+      }
+      // Loop immediately — long polling already waits 30s server-side
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        // Timeout — normal for long polling, loop again
+      } else {
+        console.error(`[${ts()}] 📡 Telegram poll error: ${e.message.substring(0, 100)}`);
+        await sleep(3000);
+      }
+    }
+  }
+  telegramPollingActive = false;
+  console.log(`[${ts()}] 📡 Telegram polling stopped`);
+}
+
 async function main() {
   console.log(`[${ts()}] 🚀 MoodChat Worker v2 started (full Z-AI SDK capabilities)`);
   console.log(`[${ts()}]    Bot token: ...${BOT_TOKEN.slice(-8)}`);
@@ -1940,6 +2195,12 @@ async function main() {
   if (typeof process.send === 'function') {
     try { process.send('ready'); } catch (_) {}
   }
+
+  // Start Telegram polling loop in parallel with the DB tick loop.
+  // This bypasses the Vercel webhook (which 504s on slow messages).
+  telegramPollLoop().catch(e => {
+    console.error(`[${ts()}] 📡 Telegram poll loop crashed: ${e.message}`);
+  });
 
   while (!isShuttingDown) {
     try {
