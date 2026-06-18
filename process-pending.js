@@ -28,7 +28,7 @@ async function getDb(retries = 5, delayMs = 1500) {
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
-const ZAI_CHAT_ID = process.env.ZAI_CHAT_ID || 'chat-c2ae3234-5685-4053-8998-96e9a664f658';
+// NOTE: ZAI_CHAT_ID intentionally NOT used — bot is decoupled from z.ai web chat
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '014c4da7-4f7f-4efa-9157-9091a73a3570';
 const ZAI_TOKEN = process.env.ZAI_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0';
 const MAX_HISTORY = 30;
@@ -59,10 +59,10 @@ async function fetchWithRetry(url, options, retries = 3) {
 }
 
 async function callZAI(messages) {
+  // Decoupled from any specific Z.ai web chat — no X-Chat-Id header
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
-    'X-Chat-Id': ZAI_CHAT_ID,
     'X-User-Id': ZAI_USER_ID,
     'X-Token': ZAI_TOKEN,
     'X-Z-AI-From': 'Z',

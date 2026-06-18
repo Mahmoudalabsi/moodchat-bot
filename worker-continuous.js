@@ -96,14 +96,19 @@ async function fetchWithRetry(url, options, retries = 3) {
 // === AI Providers ===
 
 async function callZAI(messages) {
+  // Decoupled from any specific Z.ai web chat — no X-Chat-Id header
+  // The SDK token alone is enough to authenticate; chat history is managed
+  // locally in our own DB (per-user) instead of relying on Z.ai's chat session.
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${ZAI_API_KEY}`,
-    'X-Chat-Id': ZAI_CHAT_ID,
-    'X-User-Id': ZAI_USER_ID,
     'X-Token': ZAI_TOKEN,
     'X-Z-AI-From': 'Z',
   };
+  if (ZAI_USER_ID) headers['X-User-Id'] = ZAI_USER_ID;
+  // NOTE: deliberately NOT setting X-Chat-Id — keeps bot traffic out of
+  // the user's personal z.ai web chat history.
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
@@ -331,7 +336,7 @@ async function tick() {
 async function main() {
   console.log(`[${ts()}] 🚀 MoodChat Worker started`);
   console.log(`[${ts()}]    Bot token: ...${BOT_TOKEN.slice(-8)}`);
-  console.log(`[${ts()}]    Z-AI chat: ${ZAI_CHAT_ID}`);
+  console.log(`[${ts()}]    Z-AI chat: (decoupled - no specific chat_id)`);
   console.log(`[${ts()}]    Poll interval: ${POLL_INTERVAL_MS}ms`);
 
   // Run forever
