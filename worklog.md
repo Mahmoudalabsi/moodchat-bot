@@ -335,3 +335,35 @@ Stage Summary:
   * /home/z/my-project/src/lib/telegram-bot.ts — +60 lines (3 new slash commands, 2 help message updates)
   * /home/z/my-project/scripts/test-glm52-features.js — new test script
 - Bot continues running with auto-restart wrapper, 300ms poll interval, 0 pending messages.
+
+---
+Task ID: admin-chat-input-heartbeat-fix
+Agent: main (Super Z)
+Task: User asked: (1) add a text input in the admin dashboard to send messages to users from the chat panel, and (2) investigate why something labeled "HP" shows a very large number next to it.
+
+Work Log:
+- Investigated dashboard (src/app/page.tsx) and api/pending-messages/route.ts to understand the "HP" issue. Found that the label the user saw is actually "HB" (Heartbeat, Arabic: نبضة) in the Pending Messages panel — it shows `workerInfo.secondsSinceHeartbeat`.
+- Verified root cause via scripts/check-worker-stats.js: `worker_heartbeat` row was stale (`2026-06-17T16:05:19.352Z` — over 24h old), so `secondsSinceHeartbeat` kept growing every second (reached 86400+). The current worker-continuous.js had removed the heartbeat write call during earlier speed optimization.
+- Added `writeHeartbeat(db)` function in worker-continuous.js (lines ~1895-1930). Throttled to write at most every 10 seconds. Writes both `worker_heartbeat` (ISO timestamp) and `worker_stats` (JSON with totalProcessed, totalFailed, lastActivity).
+- Added `botConfig.upsert()` method to scripts/db-shim.js (PrismaShim). Uses PostgreSQL native `INSERT ... ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value RETURNING ...`. Falls back to separate SELECT+UPDATE/INSERT if the unique constraint is missing.
+- Hooked writeHeartbeat into the main loop so it runs every tick (throttled internally).
+- Incremented `workerProcessedCount` / `workerFailedCount` counters in the message processing loop.
+- Created new API endpoint POST /api/messages/send (src/app/api/messages/send/route.ts) — accepts {userId, text}, sends via Telegram Bot API (sendMessage with Markdown, falls back to plain text on parse errors), then saves to DB as role='assistant', modelUsed='admin-direct', status='done'. Returns {ok, messageId, telegramMessageId}.
+- Added UI in page.tsx (lines ~1760-1807): a textarea + Send button at the bottom of the chat panel, visible only when a user is selected. Enter sends the message, Shift+Enter inserts a newline. Shows sending state (spinner) and errors. Auto-refreshes the conversation after send and scrolls to bottom.
+- Added state: adminMessageText, sendingMessage, sendError.
+- Added sendAdminMessage() callback and handleAdminInputKeyDown() handler.
+- Restarted worker (PID 7874). Verified via check-worker-stats.js that worker_heartbeat is now fresh (8 seconds old instead of 86400+).
+- Validated TypeScript via `npx tsc --noEmit` — no errors in page.tsx or new API route.
+- Committed and pushed to GitHub (commit 07a6a7c) — Vercel will auto-deploy the dashboard changes.
+
+Stage Summary:
+- ✅ "HP"/"HB" big number issue fixed: heartbeat now updates every 10s, dashboard shows a small fresh number (1-15s) instead of an ever-growing stale value.
+- ✅ Text input added to chat panel: admin can type a message and press Enter (or click Send) to deliver it directly to the user's Telegram. Message is saved in DB as `admin-direct` assistant message.
+- ✅ Both changes are deployed: worker-continuous.js is live (PID 7874), dashboard will be live on Vercel after auto-deploy.
+- Bonus: smart intent router (from previous task) is also working — verified by log lines showing `🎨 Intent: generate_image → bot-draw` and `🔍 Intent: web_search → bot-search` for natural-language requests without prefixes.
+- Files modified:
+  * /home/z/my-project/worker-continuous.js — +60 lines (writeHeartbeat, counters, main loop hook)
+  * /home/z/my-project/scripts/db-shim.js — +30 lines (botConfig.upsert)
+  * /home/z/my-project/src/app/api/messages/send/route.ts — new (90 lines)
+  * /home/z/my-project/src/app/page.tsx — +60 lines (state, sendAdminMessage, UI)
+  * /home/z/my-project/scripts/check-worker-stats.js — new debug helper
