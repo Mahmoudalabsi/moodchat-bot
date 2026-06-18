@@ -247,6 +247,144 @@ async function executeToolCall(name, args) {
   }
 }
 
+// === GLM-5.2 Smart Intent Router ===
+// One quick call to GLM-5.2 with function calling to detect user intent
+// from natural language (no prefix needed). Routes to TTS / draw / search / read / think.
+// Returns null on failure (caller falls back to plain_chat).
+const INTENT_ROUTER_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'text_to_speech',
+      description: 'حول نص معين إلى صوت مسموع. استخدمه فقط عندما يطلب المستخدم صراحة تحويل النص إلى صوت أو نطق النص أو قراءته بصوت عالٍ. أمثلة: "حول النص لصوت: مرحبا"، "انطق: بسم الله"، "اقرأ بصوت عالٍ".',
+      parameters: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'النص المراد تحويله إلى صوت (النص نفسه وليس وصفاً له)' },
+        },
+        required: ['text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'generate_image',
+      description: 'ارسم أو ولّد صورة من وصف نصي. استخدمه فقط عندما يطلب المستخدم صراحة رسم أو توليد أو إنشاء صورة. أمثلة: "ارسم قطة"، "ولّد صورة غروب الشمس"، "صورة لجبل".',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'وصف الصورة - يفضّل بالإنجليزية لجودة أعلى، لكن اقبل العربي أيضاً' },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'ابحث في الإنترنت عن معلومات حديثة. استخدمه فقط للأسئلة عن أحداث جارية، أسعار اليوم، أخبار، نتائج رياضية، أو معلومات تحتاج تحديثاً زمنياً. أمثلة: "ما سعر البيتكوين اليوم"، "من فاز في مباراة البارحة".',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'استعلام البحث المختصر' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_webpage',
+      description: 'اقرأ محتوى صفحة ويب من رابط محدد. استخدمه فقط عندما يقدم المستخدم رابط URL صريح ويريد قراءة محتواه.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'رابط الصفحة الكامل' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'deep_think',
+      description: 'فكّر بعمق في سؤال رياضي أو منطقي معقد. استخدمه فقط لأسئلة الرياضيات المعقدة، التحليل المنطقي متعدد الخطوات، أو عندما يطلب المستخدم صراحة التفكير العميق. أمثلة: "احسب 17×24 بخطوات"، "فكر بعمق في سبب الكسوف".',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'السؤال المراد التفكير فيه' },
+        },
+        required: ['question'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'plain_chat',
+      description: 'الرد كمحادثة عادية. استخدمه دائماً في الحالات الافتراضية - أي رسالة لا تطلب صراحة ميزة محددة (TTS/صورة/بحث/قراءة/تفكير عميق). القاعدة الذهبية: عند الشك، استخدم plain_chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'رسالة المستخدم الأصلية كما هي' },
+        },
+        required: ['message'],
+      },
+    },
+  },
+];
+
+// Quick intent classification via GLM-5.2 function calling.
+// Returns {name, args} or null on failure.
+async function detectIntent(content) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);  // 7s — fast classification
+    const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: zaiHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: AGENT_MODEL,  // glm-5.2
+        messages: [
+          {
+            role: 'system',
+            content: 'أنت موّجه نوايا (intent router). مهمتك الوحيدة هي تصنيف نية المستخدم وتحديد الأداة المناسبة. لا ترد على المحتوى، فقط اختر الأداة المناسبة بإرجاع tool_call. القاعدة الذهبية: إذا لم يطلب المستخدم صراحة تحويل/نطق/رسم/توليد/بحث/قراءة/تفكير عميق، فاختر plain_chat. لا تخمن النية - كن متحفظاً.',
+          },
+          { role: 'user', content },
+        ],
+        temperature: 0.0,  // deterministic classification
+        max_tokens: 250,
+        tools: INTENT_ROUTER_TOOLS,
+        tool_choice: 'auto',
+        thinking: { type: 'disabled' },
+      }),
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.log(`[${ts()}]   ⚠️ Intent router HTTP ${res.status} → plain_chat`);
+      return null;
+    }
+    const data = await res.json();
+    const msg = data.choices?.[0]?.message || {};
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      const tc = msg.tool_calls[0];
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch (_) {}
+      return { name: tc.function.name, args };
+    }
+    // Model didn't call a tool → default to plain_chat
+    return { name: 'plain_chat', args: { message: content } };
+  } catch (e) {
+    console.log(`[${ts()}]   ⚠️ Intent router failed (${e.message.substring(0, 60)}) → plain_chat`);
+    return null;
+  }
+}
+
 // === GLM-5.2 Agent mode with multi-step tool calling ===
 // Implements the agent loop:
 //   1. Call GLM-5.2 with tools available
@@ -1068,7 +1206,7 @@ async function zaiVLMBase64(prompt, base64Image, mimeType = 'image/jpeg') {
 
 async function processMessage(msg, db, pollinationsEnabled) {
   const chatId = msg.chatId || msg.userId;
-  const content = msg.content || '';
+  let content = msg.content || '';
   let modelUsed = msg.modelUsed || '';
 
   sendTyping(chatId);  // ⚡ Fire-and-forget, no await
@@ -1101,6 +1239,45 @@ async function processMessage(msg, db, pollinationsEnabled) {
     } else if (trimmed.startsWith('think:')) {
       modelUsed = 'bot-think';
       console.log(`[${ts()}]   🧠 Auto-routed think: prefix → bot-think`);
+    }
+  }
+
+  // ============================================================
+  // 0b. Smart intent detection via GLM-5.2 function calling
+  // Catches natural-language requests like "حول النص لصوت" or "ارسم قطة"
+  // without requiring a prefix. Only runs when no prefix was matched
+  // AND no URL is present (URLs are handled by the moodchat branch below).
+  // ============================================================
+  if (modelUsed === 'moodchat' || modelUsed === '' || modelUsed === null) {
+    const hasUrl = /https?:\/\/[^\s]+/.test(content);
+    const trimmedLen = content.trim().length;
+    // Only run router for reasonably-sized messages and skip if URL present
+    if (!hasUrl && trimmedLen > 0 && trimmedLen < 2000) {
+      const intent = await detectIntent(content);
+      if (intent) {
+        if (intent.name === 'text_to_speech' && intent.args.text) {
+          modelUsed = 'bot-tts';
+          content = intent.args.text;
+          console.log(`[${ts()}]   🎤 Intent: text_to_speech → bot-tts ("${content.substring(0, 40)}...")`);
+        } else if (intent.name === 'generate_image' && intent.args.prompt) {
+          modelUsed = 'bot-draw';
+          content = intent.args.prompt;
+          console.log(`[${ts()}]   🎨 Intent: generate_image → bot-draw ("${content.substring(0, 40)}...")`);
+        } else if (intent.name === 'web_search' && intent.args.query) {
+          modelUsed = 'bot-search';
+          content = intent.args.query;
+          console.log(`[${ts()}]   🔍 Intent: web_search → bot-search ("${content.substring(0, 40)}...")`);
+        } else if (intent.name === 'read_webpage' && intent.args.url) {
+          modelUsed = 'bot-read';
+          content = intent.args.url;
+          console.log(`[${ts()}]   🔗 Intent: read_webpage → bot-read`);
+        } else if (intent.name === 'deep_think' && intent.args.question) {
+          modelUsed = 'bot-think';
+          content = intent.args.question;
+          console.log(`[${ts()}]   🧠 Intent: deep_think → bot-think`);
+        }
+        // plain_chat → fall through to default chat
+      }
     }
   }
 
