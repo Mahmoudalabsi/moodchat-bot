@@ -132,24 +132,31 @@ function zaiHeaders() {
 
 // === Z-AI Providers ===
 
-async function callZAIChat(messages) {
+// Default chat model — GLM-5.2 (newest, smartest).
+const DEFAULT_MODEL = 'glm-5.2';
+const VISION_MODEL = 'glm-5.2';
+const AGENT_MODEL = 'glm-5.2';
+
+async function callZAIChat(messages, options = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);  // ⚡ 12s instead of 25s
+  const timeoutMs = options.timeoutMs || 20000;  // ⚡ allow up to 20s for GLM-5.2
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: zaiHeaders(),
       signal: controller.signal,
       body: JSON.stringify({
+        model: options.model || DEFAULT_MODEL,
         messages,
-        temperature: 0.7,
-        max_tokens: 1500,  // ⚡ Smaller for faster response
-        thinking: { type: 'disabled' },
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens || 2000,
+        thinking: options.thinking ? { type: 'enabled' } : { type: 'disabled' },
       }),
     });
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
-      throw new Error(`Z-AI ${res.status}: ${errBody.substring(0, 100)}`);
+      throw new Error(`Z-AI ${res.status}: ${errBody.substring(0, 120)}`);
     }
     const data = await res.json();
     const reply = data.choices?.[0]?.message?.content;
@@ -158,6 +165,179 @@ async function callZAIChat(messages) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// === GLM-5.2 Thinking mode (deep reasoning, no tools) ===
+// Use for math, logic, multi-step reasoning. Slower but smarter.
+async function callZAIChatThinking(messages, options = {}) {
+  return callZAIChat(messages, {
+    model: AGENT_MODEL,
+    thinking: true,
+    temperature: 0.3,        // less creative for reasoning
+    maxTokens: options.maxTokens || 4000,
+    timeoutMs: 45000,         // thinking can take longer
+  });
+}
+
+// === Tool definitions for GLM-5.2 agent ===
+const AGENT_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'ابحث في الإنترنت عن معلومات حديثة. استخدمه للأسئلة عن الأحداث الجارية، الأسعار، الأخبار، أو أي معلومة تحتاج تحديثاً.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'استعلام البحث - يفضل بالعربية أو الإنجليزية حسب الموضوع' },
+          num: { type: 'integer', description: 'عدد النتائج (افتراضي 6)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'page_reader',
+      description: 'اقرأ محتوى صفحة ويب من رابط URL. استخدمه للحصول على تفاصيل من مقال أو صفحة محددة.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'الرابط الكامل للصفحة' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+];
+
+// === Execute a single tool call ===
+// Returns a string (JSON) suitable for the tool result message.
+async function executeToolCall(name, args) {
+  console.log(`[${ts()}]   🔧 Tool call: ${name}(${JSON.stringify(args).substring(0, 80)})`);
+  try {
+    if (name === 'web_search') {
+      const query = args.query || args.q || '';
+      const num = args.num || 6;
+      if (!query) return JSON.stringify({ error: 'empty query' });
+      const results = await zaiWebSearch(query, num);
+      // Compact: only keep the most useful fields
+      const compact = (results || []).slice(0, num).map((r, i) => ({
+        i: i + 1,
+        title: r.name || '',
+        url: r.url || '',
+        host: r.host_name || '',
+        snippet: (r.snippet || '').substring(0, 300),
+        date: r.date || '',
+      }));
+      return JSON.stringify({ query, count: compact.length, results: compact });
+    }
+    if (name === 'page_reader') {
+      const url = args.url || '';
+      if (!url) return JSON.stringify({ error: 'empty url' });
+      const page = await zaiPageReader(url);
+      const text = htmlToText(page.html).substring(0, 5000);
+      return JSON.stringify({ url, title: page.title, content: text });
+    }
+    return JSON.stringify({ error: `unknown tool: ${name}` });
+  } catch (e) {
+    console.error(`[${ts()}]   ⚠️ Tool ${name} failed: ${e.message.substring(0, 80)}`);
+    return JSON.stringify({ error: e.message.substring(0, 200) });
+  }
+}
+
+// === GLM-5.2 Agent mode with multi-step tool calling ===
+// Implements the agent loop:
+//   1. Call GLM-5.2 with tools available
+//   2. If model returns tool_calls, execute them in parallel
+//   3. Append tool results as role:'tool' messages
+//   4. Repeat until model returns final content (finish_reason='stop')
+//   5. Max 6 iterations to prevent infinite loops
+//
+// options:
+//   thinking: bool  — enable reasoning mode (slower but smarter)
+//   maxIterations: number — default 6
+async function callZAIChatAgent(messages, options = {}) {
+  const maxIters = options.maxIterations || 6;
+  const thinking = !!options.thinking;
+  let iterCount = 0;
+  let toolCallCount = 0;
+  // Working copy of messages — we'll append tool calls + results
+  const work = [...messages];
+
+  while (iterCount < maxIters) {
+    iterCount++;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), thinking ? 45000 : 25000);
+    let data;
+    try {
+      const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: zaiHeaders(),
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: AGENT_MODEL,
+          messages: work,
+          temperature: 0.5,
+          max_tokens: thinking ? 4000 : 2500,
+          thinking: thinking ? { type: 'enabled' } : { type: 'disabled' },
+          tools: AGENT_TOOLS,
+          tool_choice: 'auto',
+        }),
+      });
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '');
+        throw new Error(`Z-AI agent ${res.status}: ${errBody.substring(0, 120)}`);
+      }
+      data = await res.json();
+    } catch (e) {
+      throw new Error(`Agent iter ${iterCount} failed: ${e.message.substring(0, 100)}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const choice = data.choices?.[0];
+    if (!choice) throw new Error('No choice in agent response');
+    const msg = choice.message || {};
+    const finish = choice.finish_reason;
+
+    // If model returned final content (no tool calls) → we're done
+    if (!msg.tool_calls || msg.tool_calls.length === 0) {
+      const content = (msg.content || '').trim();
+      if (content) {
+        console.log(`[${ts()}]   🤖 Agent done after ${iterCount} iter(s), ${toolCallCount} tool call(s)`);
+        return content;
+      }
+      throw new Error('Agent returned empty content with no tool calls');
+    }
+
+    // Append the assistant message (with tool_calls) to working history
+    work.push({
+      role: 'assistant',
+      content: msg.content || '',
+      tool_calls: msg.tool_calls,
+    });
+
+    // Execute all tool calls in parallel
+    const toolResults = await Promise.all(
+      msg.tool_calls.map(tc => executeToolCall(tc.function.name, JSON.parse(tc.function.arguments || '{}')))
+    );
+    toolCallCount += msg.tool_calls.length;
+
+    // Append each tool result
+    for (let i = 0; i < msg.tool_calls.length; i++) {
+      work.push({
+        role: 'tool',
+        tool_call_id: msg.tool_calls[i].id,
+        content: toolResults[i],
+      });
+    }
+
+    // Loop continues: GLM-5.2 will see the tool results and either call more tools or produce final answer
+  }
+
+  throw new Error(`Agent exceeded ${maxIters} iterations without producing final answer`);
 }
 
 // ❌ Removed: callPollinations — user requested Z AI SDK only, no third-party chat providers
@@ -313,6 +493,7 @@ async function zaiVLM(prompt, imageUrl) {
       headers: zaiHeaders(),
       signal: controller.signal,
       body: JSON.stringify({
+        model: VISION_MODEL,
         messages: [
           {
             role: 'user',
@@ -854,6 +1035,7 @@ async function zaiVLMBase64(prompt, base64Image, mimeType = 'image/jpeg') {
       headers: zaiHeaders(),
       signal: controller.signal,
       body: JSON.stringify({
+        model: VISION_MODEL,
         messages: [
           {
             role: 'user',
@@ -894,6 +1076,7 @@ async function processMessage(msg, db, pollinationsEnabled) {
   // ============================================================
   // 0. Auto-route prefix commands typed as plain text
   // (so user can type "tts:hello" or "draw:cat" without needing /slash)
+  // Also: agent:, think:, think agent: → GLM-5.2 agent/thinking modes
   // ============================================================
   if (modelUsed === 'moodchat' || modelUsed === '' || modelUsed === null) {
     const trimmed = content.trim().toLowerCase();
@@ -909,6 +1092,92 @@ async function processMessage(msg, db, pollinationsEnabled) {
     } else if (trimmed.startsWith('read:')) {
       modelUsed = 'bot-read';
       console.log(`[${ts()}]   🔗 Auto-routed read: prefix → bot-read`);
+    } else if (trimmed.startsWith('think agent:') || trimmed.startsWith('agent think:') || trimmed.startsWith('thinkagent:')) {
+      modelUsed = 'bot-thinkagent';
+      console.log(`[${ts()}]   🧠🤖 Auto-routed think agent: prefix → bot-thinkagent`);
+    } else if (trimmed.startsWith('agent:')) {
+      modelUsed = 'bot-agent';
+      console.log(`[${ts()}]   🤖 Auto-routed agent: prefix → bot-agent`);
+    } else if (trimmed.startsWith('think:')) {
+      modelUsed = 'bot-think';
+      console.log(`[${ts()}]   🧠 Auto-routed think: prefix → bot-think`);
+    }
+  }
+
+  // ============================================================
+  // 1a. GLM-5.2 Agent mode (multi-step tool calling)
+  // The model autonomously decides when to call web_search / page_reader.
+  // ============================================================
+  if (modelUsed === 'bot-agent' || modelUsed === 'bot-thinkagent') {
+    const useThinking = modelUsed === 'bot-thinkagent';
+    const strippedContent = content
+      .replace(/^think\s*agent:\s*/i, '')
+      .replace(/^agent\s*think:\s*/i, '')
+      .replace(/^thinkagent:\s*/i, '')
+      .replace(/^agent:\s*/i, '')
+      .trim() || content;
+    try {
+      const history = await getHistory(db, msg.userId);
+      const messages = [
+        { role: 'system', content: SYSTEM_PROMPT + '\n\nأنت وكيل ذكي. يمكنك استخدام أدوات web_search و page_reader للحصول على معلومات حديثة. استخدم الأدوات فقط عند الحاجة - للأسئلة عن الأحداث الجارية، الأسعار، الأخبار. للأسئلة العامة، أجب مباشرة.' },
+        ...history,
+        { role: 'user', content: strippedContent },
+      ];
+      const reply = await callZAIChatAgent(messages, { thinking: useThinking });
+      await replyAndSave(db, msg, chatId, reply, useThinking ? 'moodchat-thinkagent' : 'moodchat-agent');
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ Agent failed: ${e.message.substring(0, 120)}`);
+      // Fallback to regular chat
+      try {
+        const history = await getHistory(db, msg.userId);
+        const messages = [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...history,
+          { role: 'user', content: strippedContent },
+        ];
+        const reply = await callZAIChat(messages);
+        await replyAndSave(db, msg, chatId, reply + '\n\n_(تنبيه: وضع الوكيل فشل، تم الرد بالوضع العادي)_', 'moodchat-agent-fallback');
+      } catch (e2) {
+        await sendTelegram(chatId, `❌ فشل الوكيل: ${e.message.substring(0, 200)}`);
+        await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      }
+      return;
+    }
+  }
+
+  // ============================================================
+  // 1b. GLM-5.2 Thinking mode (deep reasoning, no tools)
+  // ============================================================
+  if (modelUsed === 'bot-think') {
+    const strippedContent = content.replace(/^think:\s*/i, '').trim() || content;
+    try {
+      const history = await getHistory(db, msg.userId);
+      const messages = [
+        { role: 'system', content: SYSTEM_PROMPT + '\n\nفكّر خطوة بخطوة قبل الإجابة. قدّم تحليلاً منطقياً واضحاً.' },
+        ...history,
+        { role: 'user', content: strippedContent },
+      ];
+      const reply = await callZAIChatThinking(messages);
+      await replyAndSave(db, msg, chatId, reply, 'moodchat-think');
+      return;
+    } catch (e) {
+      console.error(`[${ts()}]   ❌ Thinking failed: ${e.message.substring(0, 120)}`);
+      // Fallback to regular chat
+      try {
+        const history = await getHistory(db, msg.userId);
+        const messages = [
+          { role: 'system', content: SYSTEM_PROMPT },
+          ...history,
+          { role: 'user', content: strippedContent },
+        ];
+        const reply = await callZAIChat(messages);
+        await replyAndSave(db, msg, chatId, reply, 'moodchat-think-fallback');
+      } catch (e2) {
+        await sendTelegram(chatId, `❌ فشل وضع التفكير: ${e.message.substring(0, 200)}`);
+        await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
+      }
+      return;
     }
   }
 

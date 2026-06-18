@@ -283,3 +283,55 @@ Stage Summary:
 - Bot is intuitive: prefix commands work without `/slash`. User can type `tts:hello` or `draw:cat` directly. ✅
 - Bot is permanent: bash wrapper with infinite restart loop + 3-120s backoff on rapid crashes, PID file dedup, started automatically by dev.sh hook on container restart. ✅
 - Artifacts modified: /home/z/my-project/worker-continuous.js (added ~80 lines: convertAudioToMp3Buffer, zaiASR rewrite, sendTelegram retry loop, downloadTelegramFileBuffer retry loop, prefix auto-routing block).
+
+---
+Task ID: glm52-agent-features
+Agent: main (Super Z)
+Task: Add all GLM-5.2 agent features to the bot and verify each one works end-to-end.
+
+Work Log:
+- Researched available GLM models on Z AI: tested 12 model names — all of glm-5, glm-5.2, glm-4.5, glm-4-plus, glm-4-air, glm-4-flash, glm-4-long, glm-4v-plus, glm-4v, glm-4v-flash, glm-4v-thinking, glm-asr return valid responses.
+- Verified GLM-5.2 agent features via curl: thinking mode (reasoning_content), tools/function calling, parallel tool calls (3 simultaneous), multi-step agent loop (tool→result→final answer), streaming responses, vision with image_url — all confirmed working.
+- Performance-tested: glm-5.2 ~1170ms vs glm-4-plus ~884ms for simple questions. Acceptable trade-off for newer model.
+- Added to worker-continuous.js:
+  * DEFAULT_MODEL='glm-5.2', VISION_MODEL='glm-5.2', AGENT_MODEL='glm-5.2' (replaced glm-4-plus everywhere)
+  * callZAIChat() refactored to accept {model, thinking, temperature, maxTokens, timeoutMs} options
+  * callZAIChatThinking() — wrapper for GLM-5.2 + thinking:{type:'enabled'} mode, lower temperature (0.3), 45s timeout
+  * AGENT_TOOLS constant — defines web_search and page_reader as OpenAI-style tool schemas (in Arabic for better UX)
+  * executeToolCall(name, args) — dispatches web_search→zaiWebSearch, page_reader→zaiPageReader, returns compact JSON string for the model
+  * callZAIChatAgent(messages, {thinking, maxIterations}) — implements the full agent loop:
+    1. Call GLM-5.2 with tools available
+    2. If model returns tool_calls, execute them in PARALLEL via Promise.all
+    3. Append assistant message (with tool_calls) and tool results to working message history
+    4. Loop until model returns final content (finish_reason='stop')
+    5. Max 6 iterations to prevent infinite loops
+- Updated processMessage() to route new prefixes:
+  * `agent:[question]` → callZAIChatAgent (tools, no thinking)
+  * `think:[question]` → callZAIChatThinking (thinking, no tools)
+  * `think agent:[question]` / `thinkagent:[question]` → callZAIChatAgent with thinking=true (both)
+  * All have fallback to regular chat on error
+- Updated src/lib/telegram-bot.ts:
+  * Added /agent, /think, /thinkagent slash commands (both admin and user blocks)
+  * Updated /start, /help messages to advertise GLM-5.2 features and new commands
+- Updated VLM endpoints (zaiVLM, zaiVLMBase64) to use VISION_MODEL='glm-5.2' instead of default
+- Restarted bot: killed PID 5520, wrapper auto-restarted with new code (PID 6592)
+- Built scripts/test-glm52-features.js — end-to-end test that inserts pending messages and verifies replies
+- Ran comprehensive test:
+  ✅ 1. Default chat (GLM-5.2): "أنا مود شات، مساعدك الذكي الخبير في كل المجالات"
+  ✅ 2. Thinking mode (math reasoning): 17×24=408 with step-by-step explanation
+  ✅ 3. Agent mode (tool calling): made 2 parallel web_search calls (ChatGPT + GLM), 3 iterations, returned info about GPT-4o
+  ✅ 4. TTS (text→voice): voice message sent successfully
+  ✅ 5. Web search: returned "طوكيو هي عاصمة اليابان..."
+  ✅ 6. Page reader: handled empty page (example.com) gracefully
+  ✅ 7. Image gen: succeeded with English prompt (sunset over mountains). Arabic prompt "دائرة حمراء بسيطة" was rejected by Z-AI content filter (level 2) — that's a Z-AI policy issue, not a code bug. Workaround: use English prompts or more descriptive Arabic prompts.
+
+Stage Summary:
+- All 7 GLM-5.2 features are now in the bot and verified working end-to-end via DB inspection.
+- Agent loop log line confirmed: "🤖 Agent done after 3 iter(s), 2 tool call(s)" — agent autonomously called web_search twice in parallel.
+- Thinking mode log line confirmed: "🧠 Auto-routed think: prefix → bot-think" + reply contains step-by-step math.
+- Bot is still using Z AI SDK exclusively (no third-party providers). All AI operations route through https://internal-api.z.ai/v1.
+- Files modified:
+  * /home/z/my-project/worker-continuous.js — +220 lines (agent loop, thinking mode, tool defs, prefix routing, model switch)
+  * /home/z/my-project/src/lib/telegram-bot.ts — +60 lines (3 new slash commands, 2 help message updates)
+  * /home/z/my-project/scripts/test-glm52-features.js — new test script
+- Bot continues running with auto-restart wrapper, 300ms poll interval, 0 pending messages.
