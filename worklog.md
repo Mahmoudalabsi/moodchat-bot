@@ -1,36 +1,34 @@
 
 ---
-Task ID: switch-to-new-bot-token
+Task ID: implement-commands-in-worker
 Agent: main (Super Z)
-Task: تبديل التوكن إلى بوت جديد أنشأه المستخدم: @moodchatbot (ID 8877954741) — بوت نظيف بدون خدمات خارجية تُحقن إعلانات.
+Task: إصلاح عدم عمل أوامر /start و /help والأوامر الأخرى في البوت — كانت تُتجاهل تماماً.
 
 Work Log:
-- استلمت التوكن الجديد: 8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM
-- تحققت من صحة التوكن: getMe → {"id":8877954741,"username":"moodchatbot","first_name":"CHATBOT"} ✅
-- استبدلت التوكن القديم (8401809931) بالجديد في 20 ملف:
-  * worker-continuous.js, run-bot-permanent.sh, worker-persistent.sh
-  * ecosystem.config.js, process-pending.js
-  * src/lib/telegram-bot.ts, src/ai-worker.ts, src/whatsapp-bot.ts
-  * src/app/api/messages/send/route.ts, process-pending/route.ts
-  * src/app/api/tg-auto-process/route.ts, dashboard/route.ts
-  * src/app/api/photo-proxy/route.ts, file-proxy/route.ts, profile-photos/route.ts
-  * src/app/api/test-tg-file/route.ts, test-vlm/route.ts, debug/route.ts
-  * scripts/test-send-voice.js, scripts/test-send-voice2.js
-- commit c68a8d9 + push to origin/main (Vercel سيعيد البناء تلقائياً).
-- فحصت البوت الجديد على Telegram: لا webhook مفعّل، لا أوامر مضمنة، لا descriptions.
-- المشكلة التي ظهرت: الـ worker كان يموت عند انتهاء جلسة الـ bash التي أطلقته (SIGHUP).
-- الحل: أنشأت scripts/start-bot-detached.sh يستخدم setsid+nohup+disown للفصل الكامل.
-- شغّلت البوت بالـ launcher الجديد:
-  * Bash wrapper PID 10930 ✅
-  * Node worker PID 10937 ✅
+- اكتشفت أن الـ container أُعيد تشغيله من snapshot قديم — كل التغييرات السابقة اختفت محلياً.
+- نفّذت `git reset --hard origin/main` لاستعادة آخر commit (3ec3299) من GitHub.
+- تحققت أن كل التعديلات السابقة موجودة: التوكن الجديد، scripts/start-bot-detached.sh، run-bot-permanent.sh، fix upsertTelegramUser.
+- فحص كود worker-continuous.js ووجدت السبب الحقيقي:
+  * السطور 2015-2018: `if (text === '/start' || text === '/help') { return true; }` — يتجاهل الأمر بدون رد!
+  * السبب: تعليق قديم "let Vercel handle these" لكن Vercel webhook معطّل — فقط الـ worker يعالج الرسائل.
+- أضفت معالجة كاملة للأوامر في worker-continuous.js:
+  * `/start` و `/help` → رد كامل بقائمة الأوامر (نسختان: admin/user)
+  * `/clear` → يمسح ذاكرة المحادثة (DB marker)
+  * `/stats` (admin) → إحصائيات DB (users, messages, pending)
+  * `/aistatus` (admin) → ping Z-AI + رد بالحالة
+- الأوامر الأخرى (`/search`, `/draw`, `/tts`, `/read`, `/agent`, `/think`, `/thinkagent`) كانت تعمل مسبقاً عبر startsWith() — لم تحتاج تعديل.
+- commit ca1ba0c + push to origin/main (Vercel سيعيد البناء تلقائياً).
+- شغّلت البوت عبر scripts/start-bot-detached.sh:
+  * Bash wrapper PID 1342 ✅
+  * Node worker PID 1349 ✅
   * Bot token: ...43n3QJDM ✅
   * Webhook deleted: OK ✅
   * DB connected ✅
-  * مستقر بعد 55+ ثانية بدون أي خطأ ✅
+  * لا أخطاء ✅
 
 Stage Summary:
-- البوت الجديد @moodchatbot (8877954741) يعمل الآن بكودنا مباشرة.
-- لا إعلانات، لا خدمات خارجية، لا تضارب.
-- Vercel سيعيد نشر الـ API routes بالتوكن الجديد تلقائياً خلال دقيقة.
-- للمستخدم: جرّب إرسال /start إلى @moodchatbot — يجب أن يعمل فوراً وبدون إعلان A_ToolsX.
-- للحفاظ على استقرار البوت في الجلسات القادمة: استخدم `bash /home/z/my-project/scripts/start-bot-detached.sh` بعد إعادة تشغيل الـ VPS.
+- البوت الآن يعالج كل الأوامر مباشرة بدون الحاجة لـ Vercel:
+  /start, /help, /clear, /stats, /aistatus (جديدة)
+  /search, /draw, /tts, /read, /agent, /think, /thinkagent (موجودة مسبقاً)
+- المستخدم يجب أن يجرب: /start → سيرى قائمة الأوامر الكاملة.
+- لوحة الإدارة على Vercel ستعمل تلقائياً بعد إعادة البناء (~60s).
