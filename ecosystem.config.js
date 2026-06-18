@@ -20,7 +20,7 @@ module.exports = {
     // === Environment ===
     env: {
       DATABASE_URL: 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require',
-      TELEGRAM_BOT_TOKEN: '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g',
+      TELEGRAM_BOT_TOKEN: '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM',
       ADMIN_IDS: '1429407129',
       ZAI_BASE_URL: 'https://internal-api.z.ai/v1',
       ZAI_API_KEY: 'Z.ai',

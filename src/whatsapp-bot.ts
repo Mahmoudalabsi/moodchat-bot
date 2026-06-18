@@ -29,7 +29,7 @@ import { PrismaClient } from '@prisma/client';
 // Configuration
 // ============================
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
 const ADMIN_PHONE = process.env.ADMIN_PHONE || '970599123456'; // ضع رقمك هنا بصيغة دولية بدون +
 const JOIN_PASSWORD = process.env.JOIN_PASSWORD || 'MOOD2026';
 const MAX_HISTORY = 20;

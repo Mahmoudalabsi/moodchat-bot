@@ -9,7 +9,7 @@ async function test() {
 
   console.log('Headers:', form.getHeaders());
 
-  const res = await fetch('https://api.telegram.org/bot8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g/sendVoice', {
+  const res = await fetch('https://api.telegram.org/bot8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM/sendVoice', {
     method: 'POST',
     headers: form.getHeaders(),
     body: form,

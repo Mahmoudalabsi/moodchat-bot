@@ -5,7 +5,7 @@ export async function GET() {
 
   // فحص التوكن
   const envToken = process.env.TELEGRAM_BOT_TOKEN || '';
-  const NEW_TOKEN = '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
+  const NEW_TOKEN = '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
   const OLD_TOKEN = '8057917472:AAG7jNGQVw9M9tXLiLVUu4rTYfNCTKPUTCk';
   const activeToken = (envToken === OLD_TOKEN || !envToken) ? NEW_TOKEN : envToken;
   results.token = {
