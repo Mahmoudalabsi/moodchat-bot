@@ -25,7 +25,7 @@ async function getDb(retries = 5, delayMs = 1500) {
   }
 }
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
 // NOTE: ZAI_CHAT_ID intentionally NOT used — bot is decoupled from z.ai web chat

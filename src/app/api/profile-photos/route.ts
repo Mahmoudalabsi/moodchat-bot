@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 
 // استخدام التوكن مباشرة - متغير البيئة قد يكون خاطئاً على Vercel
-const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 
 async function getUserProfilePhotoUrl(userId: number, debug?: boolean): Promise<{ url: string | null; debug?: any }> {
   try {

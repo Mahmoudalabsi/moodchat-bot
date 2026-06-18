@@ -7,7 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 
 // كاش موحد - 15 ثانية
 let dashCache: { data: unknown; timestamp: number } | null = null;

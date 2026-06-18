@@ -35,7 +35,7 @@ const POLL_INTERVAL_MS = 300;
 const MAX_PER_BATCH = 10;
 const MAX_HISTORY = 15;
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 const ZAI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1';
 const ZAI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai';
 const ZAI_USER_ID = process.env.ZAI_USER_ID || '014c4da7-4f7f-4efa-9157-9091a73a3570';

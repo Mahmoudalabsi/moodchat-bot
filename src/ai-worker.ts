@@ -16,7 +16,7 @@ import {
   AlignmentType, BorderStyle, TableRow, TableCell, Table,
   WidthType, PageBreak, ShadingType,
 } from 'docx';
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 const ADMIN_IDS: number[] = (process.env.ADMIN_IDS || '1429407129').split(',').map(Number);
 const MAX_HISTORY = 20;
 const POLL_INTERVAL = 2000;

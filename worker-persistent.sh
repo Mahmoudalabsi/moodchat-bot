@@ -4,7 +4,7 @@
 
 cd /home/z/my-project
 export DATABASE_URL="postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require"
-export TELEGRAM_BOT_TOKEN="8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8"
+export TELEGRAM_BOT_TOKEN="8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g"
 export ADMIN_IDS="1429407129"
 export ZAI_BASE_URL="https://internal-api.z.ai/v1"
 export ZAI_API_KEY="Z.ai"

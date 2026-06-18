@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 export async function GET() {
-  const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+  const BOT_TOKEN = '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
   const fileId = 'AgACAgQAAxkDAANiajBXO6JyNkzzp-68CrRnaqKIRZ0AAhi2MRsCU-1R3omf4u1ncYIBAAMCAAN4AAM8BA';
   
   try {

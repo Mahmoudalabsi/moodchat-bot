@@ -36,7 +36,7 @@ const ZAI_TOKEN = process.env.ZAI_TOKEN || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
 
 const MAX_HISTORY = 20;
 const CRON_SECRET = process.env.CRON_SECRET;
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 
 // VPS worker heartbeat detection
 const VPS_WORKER_HEARTBEAT_KEY = 'worker_heartbeat';

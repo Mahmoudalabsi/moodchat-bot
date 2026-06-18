@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const BOT_TOKEN = '8643651729:AAGnHfMAE73I1AJqdPsmpRtyeA4tw4oM_l8';
+const BOT_TOKEN = '8401809931:AAF3-GTJlr0R58VbDHENcsMP6yNg0mOol3g';
 
 // Cache for file_id → file_path mappings (avoids repeated getFile calls)
 const filePathCache = new Map<string, { path: string; expires: number }>();
