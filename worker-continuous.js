@@ -1943,11 +1943,13 @@ function isAdminUser(userId) { return ADMIN_IDS_LIST.includes(userId); }
 
 // Insert a Telegram user (upsert) — keeps DB consistent for foreign keys
 async function upsertTelegramUser(db, u) {
+  // Generate a stable id (cuid-like) — schema requires NOT NULL "id" text column with no default.
+  const id = `tu_${u.id}_${Date.now().toString(36)}`;
   try {
     // Try INSERT ... ON CONFLICT first
     await db._sql`
-      INSERT INTO "TelegramUser" ("userId", username, "firstName", "lastName", "languageCode", "isBot", "totalMessages", "isApproved", "approvedAt", "waitingForPassword", "firstSeen", "lastActive", "joinAttempts", "photoUrl")
-      VALUES (${u.id}, ${u.username || null}, ${u.first_name || null}, ${u.last_name || null}, ${u.language_code || null}, ${u.is_bot || false}, 1, ${isAdminUser(u.id)}, ${isAdminUser(u.id) ? new Date().toISOString() : null}, false, NOW(), NOW(), 0, null)
+      INSERT INTO "TelegramUser" (id, "userId", username, "firstName", "lastName", "languageCode", "isBot", "totalMessages", "isApproved", "approvedAt", "waitingForPassword", "firstSeen", "lastActive", "joinAttempts", "photoUrl")
+      VALUES (${id}, ${u.id}, ${u.username || null}, ${u.first_name || null}, ${u.last_name || null}, ${u.language_code || null}, ${u.is_bot || false}, 1, ${isAdminUser(u.id)}, ${isAdminUser(u.id) ? new Date().toISOString() : null}, false, NOW(), NOW(), 0, null)
       ON CONFLICT ("userId") DO UPDATE SET
         "lastActive" = NOW(),
         "totalMessages" = "TelegramUser"."totalMessages" + 1,
@@ -1963,8 +1965,8 @@ async function upsertTelegramUser(db, u) {
         await db._sql`UPDATE "TelegramUser" SET "lastActive" = NOW(), "totalMessages" = "totalMessages" + 1 WHERE "userId" = ${u.id}`;
       } else {
         await db._sql`
-          INSERT INTO "TelegramUser" ("userId", username, "firstName", "lastName", "languageCode", "isBot", "totalMessages", "isApproved", "approvedAt", "waitingForPassword", "firstSeen", "lastActive", "joinAttempts")
-          VALUES (${u.id}, ${u.username || null}, ${u.first_name || null}, ${u.last_name || null}, ${u.language_code || null}, ${u.is_bot || false}, 1, ${isAdminUser(u.id)}, ${isAdminUser(u.id) ? new Date().toISOString() : null}, false, NOW(), NOW(), 0)
+          INSERT INTO "TelegramUser" (id, "userId", username, "firstName", "lastName", "languageCode", "isBot", "totalMessages", "isApproved", "approvedAt", "waitingForPassword", "firstSeen", "lastActive", "joinAttempts")
+          VALUES (${id}, ${u.id}, ${u.username || null}, ${u.first_name || null}, ${u.last_name || null}, ${u.language_code || null}, ${u.is_bot || false}, 1, ${isAdminUser(u.id)}, ${isAdminUser(u.id) ? new Date().toISOString() : null}, false, NOW(), NOW(), 0)
         `;
       }
     } catch (e2) {
