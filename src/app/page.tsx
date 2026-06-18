@@ -213,6 +213,11 @@ export default function Dashboard() {
   // Chat scroll ref
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Admin direct message input state
+  const [adminMessageText, setAdminMessageText] = useState('');
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
   // Login handler
   const handleLogin = async () => {
     setLoginLoading(true);
@@ -340,6 +345,45 @@ export default function Dashboard() {
     } catch { /* ignore */ }
     setLoadingMoreMessages(false);
   }, [selectedUserId, userMessagesHasMore, userMessages]);
+
+  // Send a direct message from the admin panel to a Telegram user
+  const sendAdminMessage = useCallback(async () => {
+    if (!selectedUserId) return;
+    const text = adminMessageText.trim();
+    if (!text) return;
+    setSendingMessage(true);
+    setSendError(null);
+    try {
+      const r = await fetch('/api/messages/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: selectedUserId, text }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
+      // Clear input and refresh the conversation so the new assistant message shows up
+      setAdminMessageText('');
+      await fetchUserMessages(selectedUserId);
+      // Scroll to bottom
+      setTimeout(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 100);
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSendingMessage(false);
+    }
+  }, [selectedUserId, adminMessageText, fetchUserMessages]);
+
+  // Enter key handler — send on Enter (without Shift), allow Shift+Enter for newline
+  const handleAdminInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendAdminMessage();
+    }
+  };
 
   // Fetch config
   const fetchConfig = useCallback(async () => {
@@ -1712,6 +1756,55 @@ export default function Dashboard() {
                     )}
                   </ScrollArea>
                 </div>
+
+                {/* Admin Direct Message Input — sends to the selected user via Telegram */}
+                {selectedUserId && (
+                  <div className="border-t border-border/50 p-3 bg-muted/20">
+                    <div className="flex gap-2 items-end">
+                      <textarea
+                        value={adminMessageText}
+                        onChange={(e) => setAdminMessageText(e.target.value)}
+                        onKeyDown={handleAdminInputKeyDown}
+                        placeholder={lang === 'ar'
+                          ? `اكتب رسالة لإرسالها إلى المستخدم #${selectedUserId}... (Enter للإرسال، Shift+Enter لسطر جديد)`
+                          : `Type a message to send to user #${selectedUserId}... (Enter to send, Shift+Enter for newline)`
+                        }
+                        rows={2}
+                        disabled={sendingMessage}
+                        dir={t.dir}
+                        className="flex-1 resize-none rounded-lg border border-border/50 bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-50"
+                      />
+                      <Button
+                        onClick={sendAdminMessage}
+                        disabled={sendingMessage || !adminMessageText.trim()}
+                        size="sm"
+                        className="bg-primary hover:bg-primary/90 text-primary-foreground gap-1.5 h-10 px-4"
+                      >
+                        {sendingMessage ? (
+                          <RefreshCw size={14} className="animate-spin" />
+                        ) : (
+                          <Send size={14} />
+                        )}
+                        <span className="text-xs font-semibold">
+                          {sendingMessage
+                            ? (lang === 'ar' ? 'إرسال...' : 'Sending...')
+                            : (lang === 'ar' ? 'إرسال' : 'Send')}
+                        </span>
+                      </Button>
+                    </div>
+                    {sendError && (
+                      <p className="text-xs text-red-500 mt-1.5 flex items-center gap-1">
+                        <AlertTriangle size={11} />
+                        {sendError}
+                      </p>
+                    )}
+                    <p className="text-[10px] text-muted-foreground mt-1.5">
+                      {lang === 'ar'
+                        ? '✉️ تُرسل الرسالة مباشرة إلى تيليجرام وتُحفظ في المحادثة كرسالة من المساعد.'
+                        : '✉️ Message is sent directly to Telegram and saved in the conversation as an assistant message.'}
+                    </p>
+                  </div>
+                )}
               </Card>
             </div>
           </TabsContent>

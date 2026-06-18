@@ -1879,7 +1879,9 @@ async function tick() {
     inFlightCount++;
     try {
       await processMessage(msg, db, pollinationsEnabled);
+      workerProcessedCount++;
     } catch (e) {
+      workerFailedCount++;
       console.error(`[${ts()}]   ❌ Failed msg ${msg.id}: ${e.message.substring(0, 100)}`);
       try {
         await db.message.update({ where: { id: msg.id }, data: { status: 'done' } });
@@ -1887,6 +1889,43 @@ async function tick() {
     } finally {
       inFlightCount--;
     }
+  }
+}
+
+// === Worker heartbeat writer ===
+// Writes worker_heartbeat + worker_stats to BotConfig every 10 seconds
+// so the admin dashboard shows a fresh "seconds since heartbeat" (small number)
+// instead of an ever-growing stale value.
+let workerProcessedCount = 0;
+let workerFailedCount = 0;
+let lastHeartbeatWrite = 0;
+
+async function writeHeartbeat(db) {
+  const now = Date.now();
+  // Throttle: write at most every 10 seconds
+  if (now - lastHeartbeatWrite < 10000) return;
+  lastHeartbeatWrite = now;
+  try {
+    const iso = new Date().toISOString();
+    // Upsert worker_heartbeat
+    await db.botConfig.upsert({
+      where: { key: 'worker_heartbeat' },
+      update: { value: iso },
+      create: { key: 'worker_heartbeat', value: iso },
+    });
+    // Upsert worker_stats
+    const statsJson = JSON.stringify({
+      totalProcessed: workerProcessedCount,
+      totalFailed: workerFailedCount,
+      lastActivity: iso,
+    });
+    await db.botConfig.upsert({
+      where: { key: 'worker_stats' },
+      update: { value: statsJson },
+      create: { key: 'worker_stats', value: statsJson },
+    });
+  } catch (e) {
+    // Silent fail — heartbeat is best-effort
   }
 }
 
@@ -1904,7 +1943,10 @@ async function main() {
 
   while (!isShuttingDown) {
     try {
+      const db = await getDb().catch(() => null);
       await tick();
+      // Write heartbeat every loop iteration (throttled internally to 10s)
+      if (db) await writeHeartbeat(db);
     } catch (e) {
       console.error(`[${ts()}] Tick error: ${e.message}`);
     }

@@ -127,6 +127,30 @@ class PrismaShim {
         const rows = await this._sql`SELECT * FROM "BotConfig" WHERE key = ${where.key} LIMIT 1`;
         return rows[0] || null;
       },
+      async upsert({ where, update, create }) {
+        // Supports key + value only (sufficient for worker_heartbeat / worker_stats)
+        const key = where.key || create.key;
+        const value = update.value !== undefined ? update.value : create.value;
+        try {
+          // PostgreSQL native upsert — requires unique constraint on `key`
+          const rows = await this._sql`
+            INSERT INTO "BotConfig" (key, value)
+            VALUES (${key}, ${value})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            RETURNING key, value
+          `;
+          return rows[0] || { key, value };
+        } catch (e) {
+          // Fallback: separate SELECT + UPDATE/INSERT
+          const existing = await this._sql`SELECT key FROM "BotConfig" WHERE key = ${key} LIMIT 1`;
+          if (existing.length > 0) {
+            await this._sql`UPDATE "BotConfig" SET value = ${value} WHERE key = ${key}`;
+          } else {
+            await this._sql`INSERT INTO "BotConfig" (key, value) VALUES (${key}, ${value})`;
+          }
+          return { key, value };
+        }
+      },
     };
   }
 
