@@ -337,20 +337,13 @@ async function processSingleMessage(msg: any, phone: string, senderName: string)
     return;
   }
 
-  // فحص الموافقة
-  if (!user.isApproved && phone !== WA_CONFIG.adminPhone) {
-    const text = msg.text?.body || '';
-    if (text.trim().toUpperCase() === WA_CONFIG.joinPassword) {
-      await db.telegramUser.update({
-        where: { userId: user.userId },
-        data: { isApproved: true, approvedAt: new Date() },
-      });
-      await sendWhatsAppMessage(phone, '✅ تمت الموافقة على انضمامك!\n\nمرحباً بك في مود شات - مساعدك الذكي الخبير في كل المجالات.\nكيف يمكنني مساعدتك اليوم؟');
-      return;
-    } else {
-      await sendWhatsAppMessage(phone, '🔐 هذا البوت خاص ويحتاج كلمة مرور للانضمام.\n\nأرسل كلمة المرور للمتابعة.');
-      return;
-    }
+  // الموافقة التلقائية على جميع مستخدمي الواتساب (وضع التطوير)
+  if (!user.isApproved) {
+    await db.telegramUser.update({
+      where: { userId: user.userId },
+      data: { isApproved: true, approvedAt: new Date() },
+    });
+    console.log(`[WA-Cloud] ✅ تمت الموافقة التلقائية على ${phone}`);
   }
 
   // أوامر المدير
