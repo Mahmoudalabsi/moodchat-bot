@@ -372,10 +372,17 @@ function userIdToPhone(userId) {
 async function processPendingMessages() {
   let pendingMessages = [];
   try {
+    // ⚠️ مهم: نفلتر فقط رسائل مستخدمي واتساب (username يبدأ بـ "wa_")
+    // لتفادي معالجة رسائل تيليجرام بالخطأ
     pendingMessages = await db.message.findMany({
-      where: { status: 'pending', role: 'user' },
+      where: {
+        status: 'pending',
+        role: 'user',
+        user: { username: { startsWith: 'wa_' } }
+      },
       orderBy: { timestamp: 'asc' },
       take: 5,
+      include: { user: true },
     });
   } catch (e) {
     errLog(`DB query error: ${String(e?.message || e).substring(0, 100)}`);
@@ -384,23 +391,12 @@ async function processPendingMessages() {
 
   if (pendingMessages.length === 0) return;
 
-  log(`Found ${pendingMessages.length} pending message(s)`);
+  log(`Found ${pendingMessages.length} pending WA message(s)`);
 
   for (const msg of pendingMessages) {
     try {
-      // تعليم الرسالة كـ "processing" بتحديث modelUsed
-      // (لا يوجد حقل status=processing، فقط pending/done)
-      // لذلك سنعالجها مباشرة
-
-      // الحصول على رقم هاتف المستخدم - نحتاج لتخزينه في imageUrl
-      // في الـ webhook قمنا بتخزين mediaId في imageUrl للصور
-      // لكن للرسائل النصية، نحتاج لمعرفة الهاتف
-      // الحل: نضيف رقم الهاتف في بداية content كـ metadata مخفية
-      // لكن هذا غير مرغوب فيه. الأفضل: نحدّث schema أو نستخدم username
-
-      const user = await db.telegramUser.findUnique({
-        where: { userId: msg.userId },
-      });
+      // user مُضمّن من الاستعلام (include: { user: true })
+      const user = msg.user;
 
       if (!user) {
         errLog(`User not found for userId=${msg.userId}, marking message as done`);
@@ -413,8 +409,8 @@ async function processPendingMessages() {
 
       // استخراج رقم الهاتف من username (المخزّن كـ wa_<phone>)
       const phone = user.username?.replace(/^wa_/, '') || '';
-      if (!phone) {
-        errLog(`No phone for user ${msg.userId}, skipping`);
+      if (!phone || !/^\d+$/.test(phone)) {
+        errLog(`Invalid phone for user ${msg.userId}: "${user.username}", skipping`);
         await db.message.update({
           where: { id: msg.id },
           data: { status: 'done' },
