@@ -29,6 +29,31 @@ const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 
+// Load .env file (overrides already-set env vars so the local file wins)
+try {
+  const envPath = '/home/z/my-project/.env';
+  if (fs.existsSync(envPath)) {
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const key = trimmed.substring(0, eqIdx).trim();
+      let val = trimmed.substring(eqIdx + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.substring(1, val.length - 1);
+      }
+      // Force-override: .env file is the source of truth for the worker
+      process.env[key] = val;
+    }
+    console.log(`[${new Date().toISOString()}] 📁 Loaded .env file (${envPath})`);
+  }
+} catch (e) {
+  console.error(`[${new Date().toISOString()}] ⚠️ Failed to load .env: ${e.message}`);
+}
+
 // === Config ===
 // ⚡ Fast mode: 300ms polling, 10 messages per batch, smaller history for speed
 const POLL_INTERVAL_MS = 300;
