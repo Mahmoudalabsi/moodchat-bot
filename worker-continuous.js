@@ -2117,7 +2117,13 @@ function isGibberishText(text) {
     const vowels = (latinLettersOnly.match(/[aeiouAEIOU]/g) || []).length;
     const uniqueLetters = new Set(latinLettersOnly.split('')).size;
     const repetitionRatio = uniqueLetters / latinLettersOnly.length;
+    const vowelRatio = vowels / latinLettersOnly.length;
+    // 1. No spaces, very few vowels, lots of repetition
     if (!hasSpaces && vowels <= 1 && repetitionRatio < 0.6 && latinLettersOnly.length >= 5) return true;
+    // 2. No spaces, very low vowel ratio (< 17%) — real English has ~38% vowels
+    if (!hasSpaces && vowelRatio < 0.17 && latinLettersOnly.length >= 5) return true;
+    // 3. No spaces, all consonants (no vowels at all) and 5+ letters
+    if (!hasSpaces && vowels === 0 && latinLettersOnly.length >= 5) return true;
   }
 
   return false;

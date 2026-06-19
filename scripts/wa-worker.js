@@ -620,7 +620,10 @@ function isGibberishText(text) {
     const vowels = (latinLettersOnly.match(/[aeiouAEIOU]/g) || []).length;
     const uniqueLetters = new Set(latinLettersOnly.split('')).size;
     const repetitionRatio = uniqueLetters / latinLettersOnly.length;
+    const vowelRatio = vowels / latinLettersOnly.length;
     if (!hasSpaces && vowels <= 1 && repetitionRatio < 0.6 && latinLettersOnly.length >= 5) return true;
+    if (!hasSpaces && vowelRatio < 0.17 && latinLettersOnly.length >= 5) return true;
+    if (!hasSpaces && vowels === 0 && latinLettersOnly.length >= 5) return true;
   }
 
   return false;
