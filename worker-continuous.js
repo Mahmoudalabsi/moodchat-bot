@@ -1605,28 +1605,86 @@ async function processMessage(msg, db, pollinationsEnabled) {
       return;
     }
 
-    // Check for URL in content → use web reader automatically
+    // Check for URL in content → use web reader (or web search for social media) automatically
     const urlMatch = content.match(/https?:\/\/[^\s]+/);
     if (urlMatch) {
       const url = urlMatch[0];
-      console.log(`[${ts()}]   🔗 Detected URL, reading page: ${url.substring(0, 80)}`);
-      try {
-        const page = await zaiPageReader(url);
-        const text = htmlToText(page.html).substring(0, 6000);
-        const augmented = `المستخدم سأل: ${content}\n\nتم استخراج المحتوى من ${url}:\nالعنوان: ${page.title}\n\n${text}\n\nبناءً على المحتوى أعلاه، أجب على سؤال المستخدم.`;
+      // Social platforms aggressively block scraping — page_reader returns login walls
+      // or empty content. For these, use web_search instead (find discussions about the post).
+      const SOCIAL_HOSTS = ['instagram.com', 'tiktok.com', 'facebook.com', 'fb.watch',
+                            'twitter.com', 'x.com', 'snapchat.com', 'threads.net',
+                            'youtube.com', 'youtu.be', 'reddit.com'];
+      const isSocialUrl = SOCIAL_HOSTS.some(h => url.toLowerCase().includes(h));
+      console.log(`[${ts()}]   🔗 Detected URL${isSocialUrl ? ' [SOCIAL]' : ''}: ${url.substring(0, 80)}`);
+
+      let pageText = '';
+      let pageTitle = '';
+      let usedSearch = false;
+
+      if (!isSocialUrl) {
+        // Try page_reader for regular websites
+        try {
+          const page = await zaiPageReader(url);
+          pageTitle = page.title || '';
+          pageText = htmlToText(page.html).substring(0, 6000);
+          // If page_reader returned very little content (paywall/JS app), fall back to search
+          if (pageText.length < 200) {
+            console.log(`[${ts()}]   ⚠️ Page reader returned thin content (${pageText.length} chars), falling back to web search`);
+            pageText = '';
+          }
+        } catch (e) {
+          console.error(`[${ts()}]   ⚠️ Page reader failed: ${e.message.substring(0, 80)} - falling back to web search`);
+        }
+      }
+
+      // If page_reader didn't yield useful content (or URL is social), use web_search
+      if (!pageText) {
+        try {
+          // Build a search query: the URL itself + the user's question (without the URL)
+          const userQuestionWithoutUrl = content.replace(url, '').trim().substring(0, 200);
+          const searchQuery = userQuestionWithoutUrl
+            ? `"${url.replace(/https?:\/\//, '')}" ${userQuestionWithoutUrl}`
+            : url;
+          console.log(`[${ts()}]   🔍 Web searching: ${searchQuery.substring(0, 100)}`);
+          const results = await zaiWebSearch(searchQuery, 6);
+          if (Array.isArray(results) && results.length > 0) {
+            const searchSnippets = results.slice(0, 6).map((r, i) =>
+              `### نتيجة ${i+1}: ${r.title || '(بدون عنوان)'}\nURL: ${r.url || r.link || ''}\n${(r.snippet || r.description || r.content || '').substring(0, 500)}`
+            ).join('\n\n');
+            pageText = searchSnippets;
+            pageTitle = `نتائج البحث عن: ${userQuestionWithoutUrl || url.substring(0, 60)}`;
+            usedSearch = true;
+          } else {
+            console.log(`[${ts()}]   ⚠️ Web search returned no results`);
+          }
+        } catch (e) {
+          console.error(`[${ts()}]   ⚠️ Web search failed: ${e.message.substring(0, 80)}`);
+        }
+      }
+
+      // If we got content from either source, generate the reply
+      if (pageText) {
+        const sourceNote = usedSearch
+          ? `تم العثور على نتائج بحث ويب مرتبطة بـ ${url}. استخدم هذه النتائج للإجابة على سؤال المستخدم. إذا كانت النتائج لا تحتوي على الإجابة المباشرة، اشرح للمستخدم أن المحتوى الأصلي محمي ولا يمكن الوصول إليه مباشرة، وقدّم ما استطعت من معلومات مفيدة من نتائج البحث.`
+          : `تم استخراج المحتوى من ${url}. استخدم المحتوى المرفق للإجابة.`;
+        const augmented = `المستخدم سأل: ${content}\n\n${sourceNote}\nالعنوان: ${pageTitle}\n\n${pageText}\n\nبناءً على المحتوى أعلاه، أجب على سؤال المستخدم. اذكر المصدر بصيغة "📚 المصدر: example.com".`;
         const history = await getHistory(db, msg.userId);
         const messages = [
           { role: 'system', content: SYSTEM_PROMPT + '\n\nاستخدم المحتوى المرفق للإجابة، واذكر المصدر.' },
           ...history,
           { role: 'user', content: augmented },
         ];
-        const reply = await callZAIChat(messages);
-        await replyAndSave(db, msg, chatId, reply, 'moodchat-webreader');
-        return;
-      } catch (e) {
-        console.error(`[${ts()}]   ⚠️ Page reader failed: ${e.message.substring(0, 80)} - falling back to chat`);
-        // fall through to normal chat
+        try {
+          const reply = await callZAIChat(messages);
+          await replyAndSave(db, msg, chatId, reply, usedSearch ? 'moodchat-websearch' : 'moodchat-webreader');
+          return;
+        } catch (e) {
+          console.error(`[${ts()}]   ⚠️ AI chat after URL processing failed: ${e.message.substring(0, 80)} - falling back to normal chat`);
+        }
+      } else {
+        console.log(`[${ts()}]   ⚠️ Both page_reader and web_search yielded no content, falling back to normal chat`);
       }
+      // fall through to normal chat if everything failed
     }
 
     // ⚡ Previous-file recall: if the user references "الملف السابق" / "حل البروجكت السابق",
