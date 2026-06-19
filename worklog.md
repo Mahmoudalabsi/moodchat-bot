@@ -100,3 +100,36 @@ Stage Summary:
 - الذكاء الاصطناعي (GLM-4 Plus) يستجيب بنجاح للمستخدمين
 - لا أخطاء حالية — البوت يصغي لتيليجرام polling كل 300ms
 - لوحة الإدارة على Vercel ستعمل بعد بناء تلقائي
+
+---
+Task ID: fix-telegram-bot-db-and-greetings
+Agent: main (Super Z)
+Task: إصلاح بوت تيليجرام الذي ردّ بـ "خطأ في الاتصال بـ Z AI" على رسائل المستخدم العادية (هلا، ليش).
+
+Work Log:
+- شخّصت المشكلة من سجل العامل:
+  "DB connect attempt 1/5 failed: Database connection string format for `neon()` should be: postgresql://user:password@host.tld/dbname?option=value"
+- وجدت السبب الجذري في worker-continuous.js:
+  * الـ .env loader كان يفرض (force-override) كل متغيرات البيئة
+  * ملف .env يحتوي على DATABASE_URL=file:/home/z/my-project/db/custom.db (SQLite للـ Next.js/Prisma)
+  * بالتالي الـ worker يحاول استخدام SQLite URL مع neon() ويفشل
+  * النتيجة: أي عملية DB (تخزين الرسالة، تحميل التاريخ) تفشل → الرد يصبح "خطأ في الاتصال بـ Z AI"
+- اختبارت Z-AI API مباشرة (glm-5.2، glm-4-plus) — كلها تعمل 200 OK، فالمشكلة ليست في Z-AI.
+- الإصلاحات المطبّقة على worker-continuous.js:
+  1. .env loader لم يعد يتجاوز (override) المتغيرات الموجودة مسبقاً في shell (التي يضبطها run-bot-permanent.sh على Neon PostgreSQL URL)
+  2. getDb() يكتشف الآن DATABASE_URL غير PostgreSQL (مثل SQLite) ويستخدم Neon URL احتياطياً
+  3. تحسين SYSTEM_PROMPT: عدم تكرار تعريف النفس، رد طبيعي على "هلا" / "hi"
+- دمجت تحسينات origin/main الجديدة (قواعد التعامل مع الرسائل العشوائية، تحليل الملفات، MAX_HISTORY=40 بدلاً من 15).
+- أنشأت scripts/auto-restart-watchdog.sh — يفحص كل 60s إذا كان البوت حياً ويعيد تشغيله تلقائياً.
+- أضفت hook في ~/.bashrc لإطلاق الـ watchdog تلقائياً عند بدء الـ container.
+- أرسلت رسالة تأكيد للمدير عبر البوت (message_id=196) ✅
+
+Stage Summary:
+- البوت الآن يعمل بشكل كامل:
+  * Worker PID 2055 ✅
+  * Wrapper PID 2048 ✅
+  * Watchdog PID 2225 ✅ (يعيد التشغيل تلقائياً)
+- DB متصل (Neon PostgreSQL) ✅
+- Z-AI (GLM-5.2) يعمل ✅
+- معالجة الرسائل تعمل (نجح في معالجة رسالة Instagram URL مع web reader)
+- الـ watchdog سيُعيد إطلاق البوت تلقائياً بعد أي إعادة تشغيل للحاوية
