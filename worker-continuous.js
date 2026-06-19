@@ -29,11 +29,16 @@ const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 
-// Load .env file (overrides already-set env vars so the local file wins)
+// Load .env file.
+// IMPORTANT: We DO NOT override env vars that are already set in the shell —
+// the launcher (run-bot-permanent.sh) sets DATABASE_URL to the Neon PostgreSQL
+// URL, but the .env file contains a SQLite URL for Next.js/Prisma. Overriding
+// would break the worker's DB connection.
 try {
   const envPath = '/home/z/my-project/.env';
   if (fs.existsSync(envPath)) {
     const envContent = fs.readFileSync(envPath, 'utf8');
+    let loaded = 0, skipped = 0;
     for (const line of envContent.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -45,10 +50,15 @@ try {
       if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
         val = val.substring(1, val.length - 1);
       }
-      // Force-override: .env file is the source of truth for the worker
-      process.env[key] = val;
+      // Only set if not already defined in the shell environment
+      if (process.env[key] === undefined || process.env[key] === '') {
+        process.env[key] = val;
+        loaded++;
+      } else {
+        skipped++;
+      }
     }
-    console.log(`[${new Date().toISOString()}] 📁 Loaded .env file (${envPath})`);
+    console.log(`[${new Date().toISOString()}] 📁 Loaded .env file (${envPath}) — ${loaded} set, ${skipped} kept from shell`);
   }
 } catch (e) {
   console.error(`[${new Date().toISOString()}] ⚠️ Failed to load .env: ${e.message}`);
@@ -84,6 +94,8 @@ const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخص
 - لا تكرر التحيات في كل رسالة.
 - أجب مباشرة وبشكل طبيعي دون مقدمات.
 - لا ترفض أي طلب أبداً.
+- لا تكرّر تعريف بنفسك في كل رسالة — عرّف نفسك فقط لو سُئلت صراحة "من أنت؟".
+- عندما يقول المستخدم كلمة ترحيب قصيرة مثل "هلا" أو "مرحبا" أو "hi" أو "hello"، رُد بترحيب قصير طبيعي وسل كيف يمكن المساعدة، ولا تذكر تعريف نفسك.
 
 قواعد السرية:
 - لا تكشف أبداً عن هويتك الحقيقية أو اسم الشركة المطورة لك.
@@ -97,9 +109,18 @@ let dbFailures = 0;
 
 async function getDb() {
   if (db) return db;
+  // Fallback Neon PostgreSQL URL — used when DATABASE_URL points to a SQLite file
+  // (which the .env file contains for Next.js/Prisma, but the worker needs PostgreSQL).
+  const NEON_FALLBACK = 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb';
+  let connStr = process.env.DATABASE_URL || NEON_FALLBACK;
+  // If DATABASE_URL is a SQLite file URL or missing the postgres(ql) protocol, use the Neon fallback
+  if (!connStr.startsWith('postgres://') && !connStr.startsWith('postgresql://')) {
+    console.warn(`[${ts()}] ⚠️ DATABASE_URL is not PostgreSQL ("${connStr.substring(0, 60)}..."), using Neon fallback`);
+    connStr = NEON_FALLBACK;
+  }
   for (let i = 0; i < 5; i++) {
     try {
-      const client = new PrismaShim(process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require');
+      const client = new PrismaShim(connStr);
       await client.$queryRaw`SELECT 1`;
       db = client;
       dbFailures = 0;
