@@ -35,10 +35,12 @@ const db = new PrismaClient({
 
 // WhatsApp Cloud API credentials
 const WA_CONFIG = {
-  accessToken: process.env.WA_ACCESS_TOKEN || '',
+  accessToken: process.env.WA_TOKEN || process.env.WA_ACCESS_TOKEN || '',
   phoneNumberId: process.env.WA_PHONE_NUMBER_ID || '',
-  verifyToken: process.env.WA_VERIFY_TOKEN || 'moodchat_verify_2026',
-  apiVersion: process.env.WA_API_VERSION || 'v18.0',
+  businessId: process.env.WA_BUSINESS_ID || '',
+  phoneNumber: process.env.WA_PHONE_NUMBER || '',
+  verifyToken: process.env.WA_VERIFY_TOKEN || 'MOOD_BOT_2026_WA',
+  apiVersion: process.env.WA_API_VERSION || 'v21.0',
   adminPhone: process.env.WA_ADMIN_PHONE || '', // رقم المدير بصيغة دولية بدون + (مثال: 970599123456)
   joinPassword: process.env.JOIN_PASSWORD || 'MOOD2026',
 };
@@ -164,7 +166,7 @@ async function analyzeImageWithVLM(
 
 const MAX_MSG_LEN = 3800;
 
-async function sendWhatsAppMessage(phoneNumber: string, text: string): Promise<any> {
+export async function sendWhatsAppMessage(phoneNumber: string, text: string): Promise<any> {
   if (!WA_CONFIG.accessToken || !WA_CONFIG.phoneNumberId) {
     throw new Error('WhatsApp credentials not configured. Set WA_ACCESS_TOKEN and WA_PHONE_NUMBER_ID');
   }
@@ -681,4 +683,4 @@ export async function testWhatsAppConnection(): Promise<{ ok: boolean; message: 
   }
 }
 
-export { WA_CONFIG, sendWhatsAppMessage };
+export { WA_CONFIG, sendWhatsAppMessage, verifyWebhook, verifySignature, handleWhatsAppMessage };
