@@ -47,11 +47,13 @@ const WA_CONFIG = {
 
 const MAX_HISTORY = 20;
 
-// Z-AI SDK Config (نفس إعدادات تيليجرام)
+// Z-AI SDK Config (نفس إعدادات تيليجرام العاملة - بدون chatId لتفادي تضارب الجلسة)
 const ZAI_CONFIG = {
   baseUrl: 'https://internal-api.z.ai/v1',
   apiKey: 'Z.ai',
-  chatId: 'chat-c2ae3234-5685-4053-8998-96e9a664f658',
+  // chatId intentionally omitted — bot operates independently from
+  // any specific z.ai web chat session, so user's personal z.ai chat
+  // history stays clean.
   userId: '014c4da7-4f7f-4efa-9157-9091a73a3570',
   token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
 };
@@ -89,33 +91,40 @@ const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخص
 // ============================
 
 async function callZaiSDK(messages: Array<{ role: string; content: string }>, maxTokens: number = 4000): Promise<string> {
-  const ZAIModule = await import('z-ai-web-dev-sdk');
-  const ZAIClass = ZAIModule.default;
-  const zai = new ZAIClass(ZAI_CONFIG);
+  try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = new ZAIClass(ZAI_CONFIG);
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const completion = await zai.chat.completions.create({
-        messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-        model: 'glm-4-plus',
-        temperature: 0.7,
-        max_tokens: maxTokens,
-        thinking: { type: 'disabled' },
-      });
-      const reply = completion?.choices?.[0]?.message?.content;
-      if (reply?.trim()) return reply.trim();
-      throw new Error('Empty response');
-    } catch (err: any) {
-      const is429 = err?.message?.includes('429') || err?.message?.includes('rate');
-      if (is429 && attempt < 2) {
-        const delay = 2000 * (attempt + 1) + Math.random() * 1000;
-        await new Promise(r => setTimeout(r, delay));
-        continue;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const completion = await zai.chat.completions.create({
+          messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+          model: 'glm-4-plus',
+          temperature: 0.7,
+          max_tokens: maxTokens,
+          thinking: { type: 'disabled' },
+        });
+        const reply = completion?.choices?.[0]?.message?.content;
+        if (reply?.trim()) return reply.trim();
+        throw new Error('Empty response');
+      } catch (err: any) {
+        const errMsg = String(err?.message || err || '');
+        console.error(`[WA-Cloud][ZAI] attempt ${attempt + 1} failed: ${errMsg.substring(0, 200)}`);
+        const is429 = errMsg.includes('429') || errMsg.includes('rate');
+        if (is429 && attempt < 2) {
+          const delay = 2000 * (attempt + 1) + Math.random() * 1000;
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
+    throw new Error('Z-AI SDK failed after retries');
+  } catch (outerErr: any) {
+    console.error('[WA-Cloud][ZAI] Outer error:', String(outerErr?.message || outerErr).substring(0, 200));
+    throw outerErr;
   }
-  throw new Error('Z-AI SDK failed after retries');
 }
 
 async function analyzeImageWithVLM(
