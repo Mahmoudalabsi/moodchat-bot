@@ -1,85 +1,124 @@
-/**
- * Supervisor for worker-continuous.js — restarts on crash with backoff.
- * Logs to /home/z/my-project/worker.log
- */
+// supervisor.js - مشرف موحّد لكل من Telegram و WhatsApp workers
+// يُعيد تشغيل أي بوت إذا توقف، مع سجلات الأخطاء
+
 const { spawn } = require('child_process');
 const fs = require('fs');
 
-const WORKER = '/home/z/my-project/worker-continuous.js';
-const LOG = '/home/z/my-project/worker.log';
-const MAX_BACKOFF = 30000; // 30s max backoff
-const MIN_BACKOFF = 1000;
+const LOG_FILE = '/home/z/my-project/worker.log';
+const CRASH_LOG = '/home/z/my-project/worker-crashes.log';
 
-function ts() { return new Date().toISOString(); }
+// متغيرات البيئة الصحيحة
+const env = {
+  ...process.env,
+  DATABASE_URL: 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require',
+  DIRECT_URL: 'postgresql://neondb_owner:npg_GECe5uDMb1np@ep-solitary-mountain-ahah7oqn-pooler.c-3.us-east-1.aws.neon.tech/neondb?channel_binding=require&sslmode=require',
+  TELEGRAM_BOT_TOKEN: '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM',
+  NODE_OPTIONS: '--max-old-space-size=512',
+};
 
-function log(line) {
-  const out = `[${ts()}] ${line}`;
-  console.log(out);
-  try { fs.appendFileSync(LOG, out + '\n'); } catch (_) {}
+const workers = [
+  {
+    name: 'Telegram',
+    script: 'worker-continuous.js',
+    crashCount: 0,
+    lastCrashTime: 0,
+    child: null,
+  },
+  {
+    name: 'WhatsApp',
+    script: 'scripts/wa-worker.js',
+    crashCount: 0,
+    lastCrashTime: 0,
+    child: null,
+  },
+];
+
+const MAX_CRASHES_PER_MIN = 10;
+
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  fs.appendFileSync(LOG_FILE, line + '\n');
 }
 
-let crashCount = 0;
-let lastStart = 0;
+function startWorker(worker) {
+  log(`🔄 [${worker.name}] Spawning ${worker.script}...`);
 
-function spawnWorker() {
-  log('🔄 [Telegram] Spawning worker-continuous.js...');
-  lastStart = Date.now();
-  const child = spawn('node', [WORKER], {
+  const child = spawn('node', [worker.script], {
     cwd: '/home/z/my-project',
-    env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
   });
 
-  child.stdout.on('data', d => {
-    const lines = d.toString().split('\n').filter(Boolean);
-    for (const l of lines) {
-      try { fs.appendFileSync(LOG, l + '\n'); } catch (_) {}
-      console.log(l);
+  worker.child = child;
+
+  child.stdout.on('data', (data) => {
+    const text = data.toString();
+    fs.appendFileSync(LOG_FILE, `[${worker.name}] ${text}`);
+    // إذا كان wa-worker، انسخ السجل أيضاً إلى /tmp/wa-worker.log
+    if (worker.name === 'WhatsApp') {
+      fs.appendFileSync('/tmp/wa-worker.log', text);
     }
   });
-  child.stderr.on('data', d => {
-    const lines = d.toString().split('\n').filter(Boolean);
-    for (const l of lines) {
-      try { fs.appendFileSync(LOG, '[stderr] ' + l + '\n'); } catch (_) {}
-      console.error('[stderr]', l);
+  child.stderr.on('data', (data) => {
+    fs.appendFileSync(LOG_FILE, `[${worker.name}][stderr] ${data.toString()}`);
+    if (worker.name === 'WhatsApp') {
+      fs.appendFileSync('/tmp/wa-worker.log', `[stderr] ${data.toString()}`);
     }
   });
 
   child.on('exit', (code, signal) => {
-    const uptime = Date.now() - lastStart;
-    log(`⚠️ [Telegram] Worker exited: code=${code} signal=${signal} (uptime ${(uptime/1000).toFixed(0)}s)`);
-    if (uptime > 60000) {
-      // Long-lived run — reset crash count
-      crashCount = 0;
+    log(`⚠️ [${worker.name}] Worker exited: code=${code} signal=${signal}`);
+
+    const now = Date.now();
+    if (now - worker.lastCrashTime < 60000) {
+      worker.crashCount++;
     } else {
-      crashCount++;
+      worker.crashCount = 1;
     }
-    const backoff = Math.min(MIN_BACKOFF * Math.pow(2, Math.min(crashCount, 5)), MAX_BACKOFF);
-    log(`🔄 [Telegram] Restarting in ${(backoff/1000).toFixed(1)}s... (crash count: ${crashCount})`);
-    setTimeout(spawnWorker, backoff);
+    worker.lastCrashTime = now;
+
+    fs.appendFileSync(CRASH_LOG, `[${new Date().toISOString()}] [${worker.name}] exit code=${code} signal=${signal} crash#${worker.crashCount}\n`);
+
+    if (worker.crashCount > MAX_CRASHES_PER_MIN) {
+      log(`⛔ [${worker.name}] Too many crashes (${worker.crashCount}/min). Cooling down 30s...`);
+      setTimeout(() => startWorker(worker), 30000);
+      worker.crashCount = 0;
+      return;
+    }
+
+    log(`🔄 [${worker.name}] Restarting in 2s...`);
+    setTimeout(() => startWorker(worker), 2000);
   });
 
-  child.on('error', err => {
-    log(`❌ [Telegram] Spawn error: ${err.message}`);
-    setTimeout(spawnWorker, 5000);
+  child.on('error', (err) => {
+    log(`❌ [${worker.name}] Spawn error: ${err.message}`);
+    setTimeout(() => startWorker(worker), 2000);
   });
 
-  log(`✅ [Telegram] Worker spawned with PID ${child.pid}`);
-  return child;
+  log(`✅ [${worker.name}] Worker spawned with PID ${child.pid}`);
 }
 
-// Handle SIGTERM/SIGINT to forward to child
-let currentChild = null;
-process.on('SIGTERM', () => {
-  log('Supervisor received SIGTERM, forwarding to worker...');
-  if (currentChild) currentChild.kill('SIGTERM');
-  setTimeout(() => process.exit(0), 2000);
-});
-process.on('SIGINT', () => {
-  log('Supervisor received SIGINT, forwarding to worker...');
-  if (currentChild) currentChild.kill('SIGINT');
-  setTimeout(() => process.exit(0), 2000);
-});
+// بدء جميع البوتات
+log('🚀 Supervisor started - managing both Telegram and WhatsApp bots');
+for (const w of workers) {
+  startWorker(w);
+}
 
-log('🚀 [Telegram] Supervisor started — managing worker-continuous.js');
-currentChild = spawnWorker();
+// Handle SIGTERM/SIGINT gracefully
+function shutdown(signal) {
+  log(`📤 Supervisor received ${signal}, killing all workers...`);
+  for (const w of workers) {
+    if (w.child) {
+      try { w.child.kill('SIGTERM'); } catch (_) {}
+    }
+  }
+  setTimeout(() => process.exit(0), 1000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Keep alive
+setInterval(() => {}, 1000);

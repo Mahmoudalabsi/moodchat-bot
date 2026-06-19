@@ -35,21 +35,25 @@ const db = new PrismaClient({
 
 // WhatsApp Cloud API credentials
 const WA_CONFIG = {
-  accessToken: process.env.WA_ACCESS_TOKEN || '',
+  accessToken: process.env.WA_TOKEN || process.env.WA_ACCESS_TOKEN || '',
   phoneNumberId: process.env.WA_PHONE_NUMBER_ID || '',
-  verifyToken: process.env.WA_VERIFY_TOKEN || 'moodchat_verify_2026',
-  apiVersion: process.env.WA_API_VERSION || 'v18.0',
+  businessId: process.env.WA_BUSINESS_ID || '',
+  phoneNumber: process.env.WA_PHONE_NUMBER || '',
+  verifyToken: process.env.WA_VERIFY_TOKEN || 'MOOD_BOT_2026_WA',
+  apiVersion: process.env.WA_API_VERSION || 'v21.0',
   adminPhone: process.env.WA_ADMIN_PHONE || '', // رقم المدير بصيغة دولية بدون + (مثال: 970599123456)
   joinPassword: process.env.JOIN_PASSWORD || 'MOOD2026',
 };
 
 const MAX_HISTORY = 20;
 
-// Z-AI SDK Config (نفس إعدادات تيليجرام)
+// Z-AI SDK Config (نفس إعدادات تيليجرام العاملة - بدون chatId لتفادي تضارب الجلسة)
 const ZAI_CONFIG = {
   baseUrl: 'https://internal-api.z.ai/v1',
   apiKey: 'Z.ai',
-  chatId: 'chat-c2ae3234-5685-4053-8998-96e9a664f658',
+  // chatId intentionally omitted — bot operates independently from
+  // any specific z.ai web chat session, so user's personal z.ai chat
+  // history stays clean.
   userId: '014c4da7-4f7f-4efa-9157-9091a73a3570',
   token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDE0YzRkYTctNGY3Zi00ZWZhLTkxNTctOTA5MWE3M2EzNTcwIiwiY2hhdF9pZCI6ImNoYXQtYzJhZTMyMzQtNTY4NS00MDUzLTg5OTgtOTZlOWE2NjRmNjU4IiwicGxhdGZvcm0iOiJ6YWkifQ.az264PV1n9Z8hUkRR3TDrFJJTIOwx65wZfVuf5D1gN0',
 };
@@ -87,33 +91,40 @@ const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخص
 // ============================
 
 async function callZaiSDK(messages: Array<{ role: string; content: string }>, maxTokens: number = 4000): Promise<string> {
-  const ZAIModule = await import('z-ai-web-dev-sdk');
-  const ZAIClass = ZAIModule.default;
-  const zai = new ZAIClass(ZAI_CONFIG);
+  try {
+    const ZAIModule = await import('z-ai-web-dev-sdk');
+    const ZAIClass = ZAIModule.default;
+    const zai = new ZAIClass(ZAI_CONFIG);
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const completion = await zai.chat.completions.create({
-        messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-        model: 'glm-4-plus',
-        temperature: 0.7,
-        max_tokens: maxTokens,
-        thinking: { type: 'disabled' },
-      });
-      const reply = completion?.choices?.[0]?.message?.content;
-      if (reply?.trim()) return reply.trim();
-      throw new Error('Empty response');
-    } catch (err: any) {
-      const is429 = err?.message?.includes('429') || err?.message?.includes('rate');
-      if (is429 && attempt < 2) {
-        const delay = 2000 * (attempt + 1) + Math.random() * 1000;
-        await new Promise(r => setTimeout(r, delay));
-        continue;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const completion = await zai.chat.completions.create({
+          messages: messages as Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+          model: 'glm-4-plus',
+          temperature: 0.7,
+          max_tokens: maxTokens,
+          thinking: { type: 'disabled' },
+        });
+        const reply = completion?.choices?.[0]?.message?.content;
+        if (reply?.trim()) return reply.trim();
+        throw new Error('Empty response');
+      } catch (err: any) {
+        const errMsg = String(err?.message || err || '');
+        console.error(`[WA-Cloud][ZAI] attempt ${attempt + 1} failed: ${errMsg.substring(0, 200)}`);
+        const is429 = errMsg.includes('429') || errMsg.includes('rate');
+        if (is429 && attempt < 2) {
+          const delay = 2000 * (attempt + 1) + Math.random() * 1000;
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
+    throw new Error('Z-AI SDK failed after retries');
+  } catch (outerErr: any) {
+    console.error('[WA-Cloud][ZAI] Outer error:', String(outerErr?.message || outerErr).substring(0, 200));
+    throw outerErr;
   }
-  throw new Error('Z-AI SDK failed after retries');
 }
 
 async function analyzeImageWithVLM(
@@ -164,7 +175,7 @@ async function analyzeImageWithVLM(
 
 const MAX_MSG_LEN = 3800;
 
-async function sendWhatsAppMessage(phoneNumber: string, text: string): Promise<any> {
+export async function sendWhatsAppMessage(phoneNumber: string, text: string): Promise<any> {
   if (!WA_CONFIG.accessToken || !WA_CONFIG.phoneNumberId) {
     throw new Error('WhatsApp credentials not configured. Set WA_ACCESS_TOKEN and WA_PHONE_NUMBER_ID');
   }
@@ -278,6 +289,7 @@ async function getOrCreateUser(phone: string, name?: string) {
     where: { userId },
     update: {
       firstName: name || `WA ${phone}`,
+      username: `wa_${phone}`, // مهم: تحديث username دائماً لتفادي فقدان رقم الهاتف
       lastActive: new Date(),
     },
     create: {
@@ -335,20 +347,13 @@ async function processSingleMessage(msg: any, phone: string, senderName: string)
     return;
   }
 
-  // فحص الموافقة
-  if (!user.isApproved && phone !== WA_CONFIG.adminPhone) {
-    const text = msg.text?.body || '';
-    if (text.trim().toUpperCase() === WA_CONFIG.joinPassword) {
-      await db.telegramUser.update({
-        where: { userId: user.userId },
-        data: { isApproved: true, approvedAt: new Date() },
-      });
-      await sendWhatsAppMessage(phone, '✅ تمت الموافقة على انضمامك!\n\nمرحباً بك في مود شات - مساعدك الذكي الخبير في كل المجالات.\nكيف يمكنني مساعدتك اليوم؟');
-      return;
-    } else {
-      await sendWhatsAppMessage(phone, '🔐 هذا البوت خاص ويحتاج كلمة مرور للانضمام.\n\nأرسل كلمة المرور للمتابعة.');
-      return;
-    }
+  // الموافقة التلقائية على جميع مستخدمي الواتساب (وضع التطوير)
+  if (!user.isApproved) {
+    await db.telegramUser.update({
+      where: { userId: user.userId },
+      data: { isApproved: true, approvedAt: new Date() },
+    });
+    console.log(`[WA-Cloud] ✅ تمت الموافقة التلقائية على ${phone}`);
   }
 
   // أوامر المدير
@@ -412,7 +417,7 @@ async function processSingleMessage(msg: any, phone: string, senderName: string)
       text = `[رسالة من نوع: ${msg.type}]`;
   }
 
-  // حفظ رسالة المستخدم
+  // حفظ رسالة المستخدم كـ "pending" — سيتم معالجتها من قبل الـ worker المحلي
   const displayContent = hasImage ? `📷 [صورة] ${text}`.trim()
     : hasDocument ? `📎 [ملف: ${docName}] ${text}`.trim()
     : text;
@@ -424,79 +429,33 @@ async function processSingleMessage(msg: any, phone: string, senderName: string)
       role: 'user',
       content: displayContent,
       modelUsed: hasImage ? 'image-analyze' : hasDocument ? 'file-analyze' : 'text',
-      status: 'done',
+      status: 'pending', // ⚡ معلّق - ينتظر الـ worker المحلي
+      imageUrl: hasImage ? imageMediaId : null,
+      fileName: hasDocument ? docName : null,
+      fileType: hasImage ? 'image' : hasDocument ? 'document' : null,
+      mimeType: hasImage ? imageMimeType : hasDocument ? docMime : null,
     },
   });
 
-  // جلب تاريخ المحادثة
-  const allHistory = await db.message.findMany({
-    where: { userId: user.userId, status: 'done' },
-    orderBy: { timestamp: 'asc' },
-    take: MAX_HISTORY * 2,
-    select: { role: true, content: true },
-  });
-  const recentHistory = filterDuplicateReplies(allHistory).slice(-MAX_HISTORY);
+  console.log(`[WA-Cloud] ✅ تم استلام رسالة من ${senderName} (${phone}) - مخزّنة كـ pending للمعالجة المحلية`);
 
-  let reply: string;
-
+  // إرسال رسالة "جاري المعالجة" فوراً للمستخدم
   try {
-    if (hasImage && imageMediaId) {
-      const imageBuffer = await downloadMedia(imageMediaId, imageMimeType);
-      if (!imageBuffer) {
-        reply = '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.';
-      } else {
-        const base64 = imageBuffer.toString('base64');
-        reply = await analyzeImageWithVLM(base64, imageMimeType, text, recentHistory);
-      }
-    } else if (hasDocument && docMediaId) {
-      const docBuffer = await downloadMedia(docMediaId, docMime);
-      if (!docBuffer) {
-        reply = '❌ لم أتمكن من تحميل الملف. حاول مرة أخرى.';
-      } else {
-        reply = await analyzeDocument(docBuffer, docName, docMime, text, recentHistory);
-      }
-    } else {
-      // رد نصي عادي
-      const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...recentHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        { role: 'user', content: text },
-      ];
-      reply = await callZaiSDK(aiMessages);
-
-      // حماية anti-loop
-      if (isLoopingResponse(reply, recentHistory, 2)) {
-        console.log(`[WA-Cloud] ⚠️ Loop detected! Retrying...`);
-        const antiLoopMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: text },
-          { role: 'assistant', content: reply },
-          { role: 'user', content: '⚠️ لا تكرر نفس الرد السابق. أجب بشكل مختلف.' },
-        ];
-        const variedReply = await callZaiSDK(antiLoopMessages);
-        if (variedReply !== reply) reply = variedReply;
-      }
-    }
-  } catch (err: any) {
-    console.error(`[WA-Cloud] AI error: ${err?.message?.substring(0, 100)}`);
-    reply = '❌ حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى.';
+    await sendWhatsAppMessage(phone, '⏳ جاري معالجة رسالتك...');
+  } catch (e) {
+    // تجاهل الأخطاء
   }
 
-  // حفظ رد المساعد
-  await db.message.create({
-    data: {
-      userId: user.userId,
-      chatId: user.userId,
-      role: 'assistant',
-      content: reply,
-      modelUsed: 'moodchat-wa-cloud',
-      status: 'done',
-    },
+  // تحديث نبضة الحياة
+  await db.botConfig.upsert({
+    where: { key: 'wa_cloud_heartbeat' },
+    update: { value: new Date().toISOString() },
+    create: { key: 'wa_cloud_heartbeat', value: new Date().toISOString() },
   });
 
-  // إرسال الرد
-  await sendWhatsAppMessage(phone, reply);
-  console.log(`[WA-Cloud] ✅ تم الرد على ${senderName}`);
+  // ملاحظة: لا نقوم بمعالجة AI هنا لأن Z-AI SDK لا يعمل على Vercel
+  // المعالجة تتم من خلال الـ worker المحلي الذي يقرأ الرسائل "pending" ويرد عليها
+  return;
 }
 
 // ============================
@@ -681,4 +640,4 @@ export async function testWhatsAppConnection(): Promise<{ ok: boolean; message: 
   }
 }
 
-export { WA_CONFIG, sendWhatsAppMessage };
+export { WA_CONFIG, sendWhatsAppMessage, verifyWebhook, verifySignature, handleWhatsAppMessage };

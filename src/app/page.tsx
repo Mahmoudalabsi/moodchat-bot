@@ -794,6 +794,7 @@ export default function Dashboard() {
               { v: 'stats', l: t.tabStats, i: BarChart3 },
               { v: 'users', l: t.tabUsers, i: Users },
               { v: 'messages', l: t.tabMessages, i: MessageSquare },
+              { v: 'whatsapp', l: lang === 'ar' ? 'واتساب' : 'WhatsApp', i: MessageCircle },
               { v: 'settings', l: t.tabSettings, i: Settings },
             ].map(tab => (
               <TabsTrigger
@@ -1809,6 +1810,11 @@ export default function Dashboard() {
             </div>
           </TabsContent>
 
+          {/* ========== WHATSAPP TAB ========== */}
+          <TabsContent value="whatsapp" className="animate-fade-in mt-6">
+            <WhatsAppTab lang={lang} />
+          </TabsContent>
+
           {/* ========== SETTINGS TAB ========== */}
           <TabsContent value="settings" className="animate-fade-in mt-6">
             <div className="max-w-3xl space-y-6">
@@ -2285,6 +2291,262 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================
+// WhatsApp Tab Component
+// ============================
+function WhatsAppTab({ lang }: { lang: string }) {
+  const [status, setStatus] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testPhone, setTestPhone] = useState('');
+  const [testMessage, setTestMessage] = useState('مرحباً من بوت مود شات! 🤖');
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await fetch('/api/whatsapp-status');
+      const data = await res.json();
+      setStatus(data);
+    } catch (e) {
+      console.error('WhatsApp status error:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 15000); // Refresh every 15s
+    return () => clearInterval(interval);
+  }, [fetchStatus]);
+
+  const handleTestSend = async () => {
+    if (!testPhone.trim()) {
+      setTestResult(lang === 'ar' ? '❌ أدخل رقم هاتف صحيح' : '❌ Enter a valid phone number');
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/whatsapp/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${status?.verifyToken || 'MOOD_BOT_2026_WA'}`,
+        },
+        body: JSON.stringify({
+          phone: testPhone.replace(/\D/g, ''),
+          message: testMessage,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setTestResult(lang === 'ar' ? '✅ تم إرسال الرسالة بنجاح!' : '✅ Message sent successfully!');
+      } else {
+        setTestResult(`❌ ${data.error || 'Send failed'}`);
+      }
+    } catch (e: any) {
+      setTestResult(`❌ ${e.message}`);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const ar = lang === 'ar';
+
+  return (
+    <div className="max-w-4xl space-y-6">
+      {/* Status Card */}
+      <Card className="border-border/50">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <MessageCircle size={20} className="text-green-500" />
+            {ar ? 'حالة بوت واتساب' : 'WhatsApp Bot Status'}
+          </CardTitle>
+          <CardDescription>
+            {ar ? 'WhatsApp Cloud API الرسمي من Meta' : 'Official WhatsApp Cloud API by Meta'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {loading ? (
+            <div className="space-y-2">
+              <Skeleton className="h-6 w-full" />
+              <Skeleton className="h-6 w-3/4" />
+              <Skeleton className="h-6 w-1/2" />
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-card border border-border/50 rounded-lg p-3 text-center">
+                  <div className={`text-xl font-bold ${status?.configured ? 'text-green-500' : 'text-red-500'}`}>
+                    {status?.configured ? '✓' : '✗'}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-1">
+                    {ar ? 'مُهيأ' : 'Configured'}
+                  </div>
+                </div>
+                <div className="bg-card border border-border/50 rounded-lg p-3 text-center">
+                  <div className={`text-xl font-bold ${status?.connected ? 'text-green-500' : 'text-yellow-500'}`}>
+                    {status?.connected ? '✓' : '○'}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-1">
+                    {ar ? 'متصل' : 'Connected'}
+                  </div>
+                </div>
+                <div className="bg-card border border-border/50 rounded-lg p-3 text-center">
+                  <div className="text-xl font-bold text-blue-500">
+                    {status?.stats?.users ?? 0}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-1">
+                    {ar ? 'مستخدمين' : 'Users'}
+                  </div>
+                </div>
+                <div className="bg-card border border-border/50 rounded-lg p-3 text-center">
+                  <div className="text-xl font-bold text-purple-500">
+                    {status?.stats?.messages ?? 0}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground mt-1">
+                    {ar ? 'رسائل' : 'Messages'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="text-xs text-muted-foreground space-y-1 pt-2 border-t border-border/30">
+                <div className="flex justify-between">
+                  <span>{ar ? 'Phone Number ID:' : 'Phone Number ID:'}</span>
+                  <span className="font-mono">{status?.phoneNumberId || '—'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>{ar ? 'Verify Token:' : 'Verify Token:'}</span>
+                  <span className="font-mono">{status?.verifyToken || '—'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>{ar ? 'Webhook URL:' : 'Webhook URL:'}</span>
+                  <span className="font-mono">{status?.webhookUrl || '/api/whatsapp/webhook'}</span>
+                </div>
+                {status?.lastHeartbeat && (
+                  <div className="flex justify-between">
+                    <span>{ar ? 'آخر نبضة:' : 'Last heartbeat:'}</span>
+                    <span className="font-mono">{status.lastHeartbeat}</span>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Test Send Card */}
+      <Card className="border-border/50">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Send size={18} className="text-primary" />
+            {ar ? 'اختبار إرسال رسالة' : 'Test Send Message'}
+          </CardTitle>
+          <CardDescription>
+            {ar
+              ? 'أرسل رسالة اختبار إلى رقم واتساب (يجب أن يكون مضافاً في Test Recipients)'
+              : 'Send a test message to a WhatsApp number (must be added in Test Recipients)'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div>
+            <Label className="text-xs">
+              {ar ? 'رقم الهاتف (بدون + أو مسافات)' : 'Phone number (no + or spaces)'}
+            </Label>
+            <Input
+              value={testPhone}
+              onChange={(e) => setTestPhone(e.target.value)}
+              placeholder="970599123456"
+              className="mt-1 font-mono"
+              dir="ltr"
+            />
+          </div>
+          <div>
+            <Label className="text-xs">{ar ? 'الرسالة' : 'Message'}</Label>
+            <textarea
+              value={testMessage}
+              onChange={(e) => setTestMessage(e.target.value)}
+              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+              rows={3}
+              dir={ar ? 'rtl' : 'ltr'}
+            />
+          </div>
+          <Button
+            onClick={handleTestSend}
+            disabled={testing || !status?.configured}
+            className="w-full"
+          >
+            {testing ? (
+              <>
+                <RefreshCw size={16} className="animate-spin ml-2" />
+                {ar ? 'جاري الإرسال...' : 'Sending...'}
+              </>
+            ) : (
+              <>
+                <Send size={16} className="ml-2" />
+                {ar ? 'إرسال' : 'Send'}
+              </>
+            )}
+          </Button>
+          {testResult && (
+            <div className={`text-xs p-3 rounded-md ${
+              testResult.startsWith('✅')
+                ? 'bg-green-500/10 text-green-600'
+                : 'bg-red-500/10 text-red-600'
+            }`}>
+              {testResult}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Setup Instructions */}
+      <Card className="border-border/50">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Settings size={18} className="text-muted-foreground" />
+            {ar ? 'تعليمات ضبط الـ Webhook' : 'Webhook Setup Instructions'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-muted-foreground">
+          <p className="font-semibold text-foreground">
+            {ar ? 'لتفعيل استقبال رسائل الواتساب:' : 'To enable receiving WhatsApp messages:'}
+          </p>
+          <ol className="list-decimal list-inside space-y-2 text-xs">
+            <li>
+              {ar ? 'اذهب إلى' : 'Go to'}{' '}
+              <a
+                href="https://developers.facebook.com/apps/1337248955274773/whatsapp-getting-started/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary underline"
+              >
+                {ar ? 'صفحة WhatsApp في Meta' : 'Meta WhatsApp page'}
+              </a>
+            </li>
+            <li>{ar ? 'اضغط "Configure Webhooks"' : 'Click "Configure Webhooks"'}</li>
+            <li>
+              {ar ? 'الـ Callback URL:' : 'Callback URL:'}{' '}
+              <code className="bg-card px-1.5 py-0.5 rounded text-foreground">
+                https://YOUR-DOMAIN/api/whatsapp/webhook
+              </code>
+            </li>
+            <li>
+              {ar ? 'الـ Verify Token:' : 'Verify Token:'}{' '}
+              <code className="bg-card px-1.5 py-0.5 rounded text-foreground">
+                {status?.verifyToken || 'MOOD_BOT_2026_WA'}
+              </code>
+            </li>
+            <li>{ar ? 'اشترك في الأحداث: messages, message_status' : 'Subscribe to: messages, message_status'}</li>
+          </ol>
+        </CardContent>
+      </Card>
     </div>
   );
 }

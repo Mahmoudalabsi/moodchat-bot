@@ -1,0 +1,18 @@
+#!/bin/bash
+TOKEN="EAATAOIj0lhUBRyaqztvEJKfPCxs5ykyWQ9pUHB8pEJaC7jhh9g6RyJa2qFwKldM40hfxZBaYPWWmrGtHAlgGg5GNOgAAPeNXs5UxSHF8gbQAb9S50vUTVUVUoi2hUDeamx5ZB5ZA2JQjdhYe0jyeh4ens4HGWlNZBmMOAcm2xAUuYStngMY58uLnhv0eos0ZC9wZDZD"
+
+echo "=== App details ==="
+curl -s "https://graph.facebook.com/v21.0/1337248955274773?access_token=$TOKEN"
+echo ""
+echo ""
+echo "=== Try via /whatsapp_business_management ==="
+curl -s "https://graph.facebook.com/v21.0/1337248955274773?fields=whatsapp_business_account&access_token=$TOKEN"
+echo ""
+echo ""
+echo "=== Try /v21.0/whatsapp_business_management ==="
+curl -s "https://graph.facebook.com/v21.0/whatsapp_business_management?access_token=$TOKEN"
+echo ""
+echo ""
+echo "=== Try GET /me?fields=ids_for_business ==="
+curl -s "https://graph.facebook.com/v21.0/me?fields=ids_for_business&access_token=$TOKEN"
+echo ""
