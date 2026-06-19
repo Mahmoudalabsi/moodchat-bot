@@ -289,6 +289,7 @@ async function getOrCreateUser(phone: string, name?: string) {
     where: { userId },
     update: {
       firstName: name || `WA ${phone}`,
+      username: `wa_${phone}`, // مهم: تحديث username دائماً لتفادي فقدان رقم الهاتف
       lastActive: new Date(),
     },
     create: {
@@ -416,7 +417,7 @@ async function processSingleMessage(msg: any, phone: string, senderName: string)
       text = `[رسالة من نوع: ${msg.type}]`;
   }
 
-  // حفظ رسالة المستخدم
+  // حفظ رسالة المستخدم كـ "pending" — سيتم معالجتها من قبل الـ worker المحلي
   const displayContent = hasImage ? `📷 [صورة] ${text}`.trim()
     : hasDocument ? `📎 [ملف: ${docName}] ${text}`.trim()
     : text;
@@ -428,79 +429,33 @@ async function processSingleMessage(msg: any, phone: string, senderName: string)
       role: 'user',
       content: displayContent,
       modelUsed: hasImage ? 'image-analyze' : hasDocument ? 'file-analyze' : 'text',
-      status: 'done',
+      status: 'pending', // ⚡ معلّق - ينتظر الـ worker المحلي
+      imageUrl: hasImage ? imageMediaId : null,
+      fileName: hasDocument ? docName : null,
+      fileType: hasImage ? 'image' : hasDocument ? 'document' : null,
+      mimeType: hasImage ? imageMimeType : hasDocument ? docMime : null,
     },
   });
 
-  // جلب تاريخ المحادثة
-  const allHistory = await db.message.findMany({
-    where: { userId: user.userId, status: 'done' },
-    orderBy: { timestamp: 'asc' },
-    take: MAX_HISTORY * 2,
-    select: { role: true, content: true },
-  });
-  const recentHistory = filterDuplicateReplies(allHistory).slice(-MAX_HISTORY);
+  console.log(`[WA-Cloud] ✅ تم استلام رسالة من ${senderName} (${phone}) - مخزّنة كـ pending للمعالجة المحلية`);
 
-  let reply: string;
-
+  // إرسال رسالة "جاري المعالجة" فوراً للمستخدم
   try {
-    if (hasImage && imageMediaId) {
-      const imageBuffer = await downloadMedia(imageMediaId, imageMimeType);
-      if (!imageBuffer) {
-        reply = '❌ لم أتمكن من تحميل الصورة. حاول مرة أخرى.';
-      } else {
-        const base64 = imageBuffer.toString('base64');
-        reply = await analyzeImageWithVLM(base64, imageMimeType, text, recentHistory);
-      }
-    } else if (hasDocument && docMediaId) {
-      const docBuffer = await downloadMedia(docMediaId, docMime);
-      if (!docBuffer) {
-        reply = '❌ لم أتمكن من تحميل الملف. حاول مرة أخرى.';
-      } else {
-        reply = await analyzeDocument(docBuffer, docName, docMime, text, recentHistory);
-      }
-    } else {
-      // رد نصي عادي
-      const aiMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...recentHistory.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        { role: 'user', content: text },
-      ];
-      reply = await callZaiSDK(aiMessages);
-
-      // حماية anti-loop
-      if (isLoopingResponse(reply, recentHistory, 2)) {
-        console.log(`[WA-Cloud] ⚠️ Loop detected! Retrying...`);
-        const antiLoopMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: text },
-          { role: 'assistant', content: reply },
-          { role: 'user', content: '⚠️ لا تكرر نفس الرد السابق. أجب بشكل مختلف.' },
-        ];
-        const variedReply = await callZaiSDK(antiLoopMessages);
-        if (variedReply !== reply) reply = variedReply;
-      }
-    }
-  } catch (err: any) {
-    console.error(`[WA-Cloud] AI error: ${err?.message?.substring(0, 100)}`);
-    reply = '❌ حدث خطأ أثناء معالجة رسالتك. حاول مرة أخرى.';
+    await sendWhatsAppMessage(phone, '⏳ جاري معالجة رسالتك...');
+  } catch (e) {
+    // تجاهل الأخطاء
   }
 
-  // حفظ رد المساعد
-  await db.message.create({
-    data: {
-      userId: user.userId,
-      chatId: user.userId,
-      role: 'assistant',
-      content: reply,
-      modelUsed: 'moodchat-wa-cloud',
-      status: 'done',
-    },
+  // تحديث نبضة الحياة
+  await db.botConfig.upsert({
+    where: { key: 'wa_cloud_heartbeat' },
+    update: { value: new Date().toISOString() },
+    create: { key: 'wa_cloud_heartbeat', value: new Date().toISOString() },
   });
 
-  // إرسال الرد
-  await sendWhatsAppMessage(phone, reply);
-  console.log(`[WA-Cloud] ✅ تم الرد على ${senderName}`);
+  // ملاحظة: لا نقوم بمعالجة AI هنا لأن Z-AI SDK لا يعمل على Vercel
+  // المعالجة تتم من خلال الـ worker المحلي الذي يقرأ الرسائل "pending" ويرد عليها
+  return;
 }
 
 // ============================
