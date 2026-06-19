@@ -65,3 +65,4 @@ bot.pid
 bot.log
 bot-polling.log
 watchdog.log
+evolution-api/

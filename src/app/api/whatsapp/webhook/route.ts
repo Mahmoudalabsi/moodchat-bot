@@ -1,54 +1,53 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyWebhook, verifySignature, handleWhatsAppMessage } from '@/whatsapp-cloud';
+import { handleWhatsAppMessage } from '@/whatsapp-evolution';
 
 /**
- * WhatsApp Webhook - GET /api/whatsapp/webhook
- * Verification endpoint called by Meta to verify webhook ownership
+ * WhatsApp Webhook (Evolution API) - GET /api/whatsapp/webhook
+ *
+ * Evolution API doesn't use Meta's hub.mode/hub.verify_token flow.
+ * The webhook is registered directly via the API key when creating/connecting an instance.
+ * We keep this GET endpoint for backward compatibility and health checks.
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const mode = searchParams.get('hub.mode');
-  const token = searchParams.get('hub.verify_token');
-  const challenge = searchParams.get('hub.challenge');
-
-  if (!mode || !token || !challenge) {
-    return NextResponse.json({ error: 'Missing parameters' }, { status: 400 });
-  }
-
-  const result = verifyWebhook(mode, token, challenge);
-  if (result !== null) {
-    // إرجاع challenge كـ نص (مطلوب من Meta)
-    return new NextResponse(result, {
+  // If Evolution API sends a verification token, accept it
+  const token = searchParams.get('token') || searchParams.get('hub.verify_token');
+  if (token) {
+    return new NextResponse(token, {
       status: 200,
       headers: { 'Content-Type': 'text/plain' },
     });
   }
-
-  return NextResponse.json({ error: 'Verification failed' }, { status: 403 });
+  return NextResponse.json({
+    ok: true,
+    message: 'MoodChat WhatsApp webhook (Evolution API)',
+    timestamp: new Date().toISOString(),
+  });
 }
 
 /**
- * WhatsApp Webhook - POST /api/whatsapp/webhook
- * Receives messages and status updates from WhatsApp
+ * WhatsApp Webhook (Evolution API) - POST /api/whatsapp/webhook
+ *
+ * Receives events from Evolution API in the format:
+ * {
+ *   event: 'MESSAGES_UPSERT' | 'CONNECTION_UPDATE' | 'QRCODE_UPDATED' | ...,
+ *   instance: 'moodchat',
+ *   data: { ... event-specific data ... }
+ * }
  */
 export async function POST(request: NextRequest) {
   try {
     const rawBody = await request.text();
-    const signature = request.headers.get('x-hub-signature-256') || '';
-
-    // تحقق من التوقيع (أمان)
-    // ملاحظة: في وضع التطوير يمكن تعطيل هذا التحقق
-    // const isValid = verifySignature(rawBody, signature);
-    // if (!isValid) {
-    //   return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
-    // }
-
     const payload = JSON.parse(rawBody);
+
+    // Log incoming events for debugging
+    console.log(`[WA-Webhook] Received event: ${payload?.event || 'unknown'}`);
+
     await handleWhatsAppMessage(payload);
 
     return NextResponse.json({ ok: true });
   } catch (error: any) {
-    console.error('[WhatsApp Webhook] Error:', error?.message?.substring(0, 100));
+    console.error('[WA-Webhook] Error:', error?.message?.substring(0, 200));
     return NextResponse.json({ error: 'Webhook error' }, { status: 500 });
   }
 }
