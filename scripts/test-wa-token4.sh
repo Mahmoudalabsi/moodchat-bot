@@ -1,0 +1,18 @@
+#!/bin/bash
+TOKEN="EAATAOIj0lhUBRyaqztvEJKfPCxs5ykyWQ9pUHB8pEJaC7jhh9g6RyJa2qFwKldM40hfxZBaYPWWmrGtHAlgGg5GNOgAAPeNXs5UxSHF8gbQAb9S50vUTVUVUoi2hUDeamx5ZB5ZA2JQjdhYe0jyeh4ens4HGWlNZBmMOAcm2xAUuYStngMY58uLnhv0eos0ZC9wZDZD"
+
+echo "=== Try App's WABA ==="
+curl -s "https://graph.facebook.com/v21.0/1337248955274773/whatsapp_business_account?access_token=$TOKEN"
+echo ""
+echo ""
+echo "=== Try /me?fields=whatsapp_business_accounts ==="
+curl -s "https://graph.facebook.com/v21.0/me?fields=whatsapp_business_accounts&access_token=$TOKEN"
+echo ""
+echo ""
+echo "=== Try /me/business_users ==="
+curl -s "https://graph.facebook.com/v21.0/me/business_users?access_token=$TOKEN"
+echo ""
+echo ""
+echo "=== Try /me?metadata=default ==="
+curl -s "https://graph.facebook.com/v21.0/me?metadata=default&access_token=$TOKEN"
+echo ""
