@@ -133,3 +133,32 @@ Stage Summary:
 - Z-AI (GLM-5.2) يعمل ✅
 - معالجة الرسائل تعمل (نجح في معالجة رسالة Instagram URL مع web reader)
 - الـ watchdog سيُعيد إطلاق البوت تلقائياً بعد أي إعادة تشغيل للحاوية
+
+---
+Task ID: fix-instagram-url-handling
+Agent: main (Super Z)
+Task: إصلاح عدم قدرة البوت على الإجابة عن أسئلة تتعلق بروابط Instagram (وغيرها من شبكات التواصل).
+
+Work Log:
+- شخّصت المشكلة من المحادثة: المستخدم أرسل رابط Instagram وسأل "ما اسم الاغنية"، البوت رد بـ "لا أستطيع الوصول إلى Instagram".
+- السبب: البوت يستخدم zaiPageReader لكل الروابط، لكن Instagram/TikTok/Facebook/X يحجبون الـ scrapers ويعرضون login wall → page_reader يرجع HTML فارغ → الذكاء الاصطناعي يعتذر عن الإجابة.
+- الحل المُطبَّق في worker-continuous.js:
+  1. قائمة SOCIAL_HOSTS = instagram, tiktok, facebook, twitter, x, snapchat, threads, youtube, reddit
+  2. إذا كان URL من شبكة اجتماعية: تخطّي page_reader تماماً، استخدم web_search مباشرة
+  3. لغير الشبكات الاجتماعية: جرّب page_reader أولاً، وإذا رجع أقل من 200 حرف (paywall/SPA) فارجع إلى web_search
+  4. البحث يستخدم الـ URL نفسه + سؤال المستخدم كـ query
+  5. نتائج البحث تُمرَّر للذكاء الاصطناعي كـ context مع تعليمات باستخدامها للإجابة
+- اختبار web_search API مباشرة:
+  * query = "instagram.com/p/DZvkmdgzMxS" ما اسم الاغنية
+  * عاد 6 نتائج ذات صلة ✅
+- إعادة تشغيل البوت:
+  * Worker PID 2484 ✅
+  * Wrapper PID 2477 ✅
+  * Watchdog PID 2225 ✅
+  * DB متصل ✅
+- commit 44f1d33 + push to origin/main
+
+Stage Summary:
+- البوت الآن قادر على الإجابة عن أسئلة المستخدمين حول روابط شبكات التواصل الاجتماعي
+- آلية fallback ذكية: page_reader → web_search → normal chat
+- المُستخدم سيحصل على معلومات من نتائج البحث بدلاً من "لا أستطيع الوصول"
