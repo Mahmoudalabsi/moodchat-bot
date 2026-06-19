@@ -48,17 +48,20 @@ try { fs.mkdirSync(TMP_DIR, { recursive: true }); } catch (_) {}
 const SYSTEM_PROMPT = `أنت مساعد ذكي وخبير متعدد التخصصات اسمك **مود شات**. أنت خبير في كل المجالات: البرمجة والتصميم والطب والهندسة والقانون والمالية والأدب والعلوم والتكنولوجيا وكل شيء يطلبه المستخدم.
 
 قواعد أساسية:
-1- أنت خبير مطلق - لا تقول أبداً "لا أستطيع" أو "لا أقدر" أو "لا أعرف". بدلاً من ذلك قدّم أفضل إجابة ممكنة واشرح من زاوية خبير.
+1- أنت خبير مطلق - لا تقول أبداً "لا أستطيع" أو "لا أقدر" أو "لا أعرف" أو "لم أر" أو "لم أقرأ". بدلاً من ذلك قدّم أفضل إجابة ممكنة واشرح من زاوية خبير.
 2- تجيب بوضوح ودقة وبأسلوب ودي ومحترف وخبير.
 3- تتحدث بأي لغة يطلبها المستخدم.
-4- تتذكر كل شيء قاله المستخدم في المحادثة السابقة.
+4- تتذكر كل شيء قاله المستخدم في المحادثة السابقة، بما في ذلك الملفات التي أرسلها والتحليلات التي قدمتها. عندما يقول المستخدم "الملف السابق" أو "حل البروجكت السابق"، ارجع للملفات والتحليلات السابقة في المحادثة واستخدمها.
 5- كن مختصراً في الإجابات إلا إذا طُلب منك التفصيل.
+6- إذا أرسل المستخدم رسالة قصيرة جداً (مثل "هلا"، "سلام"، "ه")، أجب بإجابة قصيرة وطبيعية تليق بالمحادثة، ولا تكرر نفسك أبداً.
+7- لا تكرر أبداً نفس الرد الذي قلته في الرسائل السابقة. كل رد يجب أن يكون فريداً ومرتبطاً بالسياق الحالي.
 
 قواعد صارمة:
 - لا تبدأ أبداً ردك بكلمة السلام أو وعليكم السلام، أجب مباشرة.
 - لا تكرر التحيات في كل رسالة.
 - أجب مباشرة وبشكل طبيعي دون مقدمات.
 - لا ترفض أي طلب أبداً.
+- إذا سألك المستخدم عن شيء بناءً على سياق سابق، استخدم السياق من المحادثة بدلاً من الادعاء بعدم المعرفة.
 
 قواعد السرية:
 - لا تكشف أبداً عن هويتك الحقيقية أو اسم الشركة المطورة لك.
@@ -998,6 +1001,166 @@ function extractTextFromPlain(buffer) {
   }
 }
 
+// === استخراج محتوى الملفات المضغوطة (ZIP, RAR) ===
+async function extractArchiveContent(buffer, fileName, ext) {
+  const TMP_ARCHIVE_DIR = path.join(TMP_DIR, `archive_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const archivePath = path.join(TMP_DIR, `archive_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`);
+
+  try {
+    fs.mkdirSync(TMP_ARCHIVE_DIR, { recursive: true });
+    fs.writeFileSync(archivePath, buffer);
+    console.log(`[${ts()}]   📦 Extracting archive: ${fileName} (${ext})`);
+
+    let extractedFiles = [];
+
+    if (ext === 'zip') {
+      // استخدام unzip لاستخراج ZIP
+      try {
+        execSync(`unzip -o -q "${archivePath}" -d "${TMP_ARCHIVE_DIR}"`, {
+          stdio: 'ignore',
+          timeout: 30000,
+        });
+      } catch (e) {
+        // تجربة بديلة باستخدام Node.js
+        try {
+          const AdmZip = require('adm-zip');
+          const zip = new AdmZip(archivePath);
+          zip.extractAllTo(TMP_ARCHIVE_DIR, true);
+        } catch (_) {
+          return `[ملف مضغوط ZIP تعذّر فكه: ${fileName}]`;
+        }
+      }
+    } else if (ext === 'rar') {
+      // استخدام unrar لاستخراج RAR
+      try {
+        execSync(`unrar x -o+ -y "${archivePath}" "${TMP_ARCHIVE_DIR}/"`, {
+          stdio: 'ignore',
+          timeout: 30000,
+        });
+      } catch (e) {
+        return `[ملف RAR تعذّر فكه: ${fileName}. قد تحتاج إلى تثبيت unrar.]`;
+      }
+    } else if (ext === '7z') {
+      try {
+        execSync(`7z x -y -o"${TMP_ARCHIVE_DIR}" "${archivePath}"`, {
+          stdio: 'ignore',
+          timeout: 30000,
+        });
+      } catch (_) {
+        return `[ملف 7z تعذّر فكه: ${fileName}]`;
+      }
+    } else if (ext === 'tar' || ext === 'gz' || ext === 'bz2' || ext === 'xz') {
+      try {
+        execSync(`tar -xf "${archivePath}" -C "${TMP_ARCHIVE_DIR}"`, {
+          stdio: 'ignore',
+          timeout: 30000,
+        });
+      } catch (_) {
+        return `[ملف مضغوط تعذّر فكه: ${fileName}]`;
+      }
+    }
+
+    // قراءة جميع الملفات المستخرجة
+    const allFiles = walkDirectory(TMP_ARCHIVE_DIR);
+    console.log(`[${ts()}]   📦 Extracted ${allFiles.length} files from ${fileName}`);
+
+    const MAX_TOTAL_CHARS = 30000;
+    let totalChars = 0;
+    const fileContents = [];
+    let fileIndex = 0;
+
+    for (const filePath of allFiles) {
+      if (totalChars >= MAX_TOTAL_CHARS) {
+        fileContents.push(`\n\n[... تم تجاوز الحد الأقصى للمحتوى. إجمالي الملفات: ${allFiles.length} ...]`);
+        break;
+      }
+
+      const relativePath = path.relative(TMP_ARCHIVE_DIR, filePath);
+      const fileExt = (filePath.split('.').pop() || '').toLowerCase();
+      const stats = fs.statSync(filePath);
+
+      // تخطي الملفات الكبيرة جداً
+      if (stats.size > 5 * 1024 * 1024) {
+        fileContents.push(`\n\n=== [${fileIndex + 1}] ${relativePath} ===\n[ملف كبير: ${(stats.size / 1024 / 1024).toFixed(1)}MB - تم تخطيه]`);
+        fileIndex++;
+        continue;
+      }
+
+      try {
+        const fileBuffer = fs.readFileSync(filePath);
+        let content = '';
+
+        // استخراج المحتوى حسب نوع الملف
+        if (['pdf'].includes(fileExt)) {
+          content = await extractTextFromPDF(fileBuffer);
+        } else if (['docx'].includes(fileExt)) {
+          content = await extractTextFromDOCX(fileBuffer);
+        } else if (['xlsx', 'xls'].includes(fileExt)) {
+          content = await extractTextFromExcel(fileBuffer);
+        } else if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(fileExt)) {
+          content = `[ملف صورة: ${relativePath}]`;
+        } else if (['mp3', 'ogg', 'wav', 'm4a', 'mp4', 'avi', 'mov', 'mkv'].includes(fileExt)) {
+          content = `[ملف ميديا: ${relativePath}]`;
+        } else {
+          // ملف نصي أو كود
+          try {
+            content = fileBuffer.toString('utf-8');
+            const nullCount = (content.match(/\0/g) || []).length;
+            if (content.length < 5 || nullCount > content.length * 0.05) {
+              content = `[ملف ثنائي: ${relativePath}]`;
+            }
+          } catch {
+            content = `[ملف غير قابل للقراءة: ${relativePath}]`;
+          }
+        }
+
+        // اقتطاع المحتوى الطويل جداً
+        const maxFileChars = 8000;
+        if (content.length > maxFileChars) {
+          content = content.substring(0, maxFileChars) + '\n[... اقتطاع ...]';
+        }
+
+        fileContents.push(`\n\n=== [${fileIndex + 1}] ${relativePath} (${stats.size} bytes) ===\n${content}`);
+        totalChars += content.length;
+        fileIndex++;
+      } catch (e) {
+        fileContents.push(`\n\n=== [${fileIndex + 1}] ${relativePath} ===\n[خطأ في القراءة: ${e.message.substring(0, 60)}]`);
+        fileIndex++;
+      }
+    }
+
+    const header = `📦 محتوى الملف المضغوط: ${fileName}\nعدد الملفات: ${allFiles.length}\nالحجم الإجمالي المستخرج: ${totalChars} حرف\n\n=== بداية المحتوى ===`;
+    const fullText = header + fileContents.join('') + '\n\n=== نهاية المحتوى ===';
+    return fullText;
+  } catch (e) {
+    console.error(`[${ts()}]   ❌ Archive extraction failed: ${e.message.substring(0, 100)}`);
+    return `[ملف مضغوط: ${fileName} - خطأ في الاستخراج: ${e.message.substring(0, 80)}]`;
+  } finally {
+    // تنظيف الملفات المؤقتة
+    try {
+      if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath);
+      if (fs.existsSync(TMP_ARCHIVE_DIR)) fs.rmSync(TMP_ARCHIVE_DIR, { recursive: true, force: true });
+    } catch (_) {}
+  }
+}
+
+// يقرأ جميع الملفات في مجلد بشكل متكرر
+function walkDirectory(dir) {
+  let results = [];
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        results = results.concat(walkDirectory(fullPath));
+      } else if (entry.isFile()) {
+        results.push(fullPath);
+      }
+    }
+  } catch (_) {}
+  return results;
+}
+
 // === Dispatch file to appropriate extractor ===
 // Returns { text, isImage, isAudio, isVideo }
 async function extractTextFromFile(buffer, fileName, mimeType) {
@@ -1063,10 +1226,11 @@ async function extractTextFromFile(buffer, fileName, mimeType) {
     return { text: '[ملف DOC قديم - يُنصح بتحويله إلى DOCX]', isImage: false, isAudio: false, isVideo: false };
   }
 
-  // Archives
+  // Archives - استخراج المحتوى الكامل
   const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'];
   if (archiveExts.includes(ext)) {
-    return { text: `[ملف مضغوط: ${fileName} - ${mimeType}]`, isImage: false, isAudio: false, isVideo: false };
+    const extractedText = await extractArchiveContent(buffer, fileName, ext);
+    return { text: extractedText, isImage: false, isAudio: false, isVideo: false };
   }
 
   // Unknown — try as text
@@ -1388,6 +1552,7 @@ async function processMessage(msg, db, pollinationsEnabled) {
 
     // Normal chat
     const history = await getHistory(db, msg.userId);
+    const recentReplies = await getRecentAssistantReplies(db, msg.userId, 3);
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...history,
@@ -1409,6 +1574,28 @@ async function processMessage(msg, db, pollinationsEnabled) {
         if (attempt < 1) await sleep(500);  // small backoff before retry
       }
     }
+
+    // ⚡ Anti-loop: إذا كان الرد مكرراً، حاول مرة أخرى مع تحذير صريح
+    if (reply && isRepetitiveReply(reply, recentReplies)) {
+      console.log(`[${ts()}]   ⚠️ Repetitive reply detected, regenerating...`);
+      try {
+        const antiLoopMessages = [
+          { role: 'system', content: SYSTEM_PROMPT + '\n\n⚠️ مهم: لا تكرر نفس الرد الذي قلته للتو. أجب بشكل مختلف تماماً وبشكل طبيعي مناسب للسياق الحالي.' },
+          ...history.slice(-6),
+          { role: 'user', content },
+          { role: 'assistant', content: reply },
+          { role: 'user', content: '⚠️ ردك السابق كان مكرراً ولا يخدم المحادثة. أجب الآن بإجابة جديدة ومختلفة تماماً ومناسبة لرسالتي.' },
+        ];
+        const variedReply = await callZAIChat(antiLoopMessages);
+        if (variedReply && !isRepetitiveReply(variedReply, [...recentReplies, reply])) {
+          reply = variedReply;
+          modelTag = 'moodchat-zai-antiloop';
+        }
+      } catch (e) {
+        console.error(`[${ts()}]   Anti-loop retry failed: ${e.message.substring(0, 80)}`);
+      }
+    }
+
     if (!reply) {
       reply = "عذراً، واجهت خطأ في الاتصال بـ Z AI. حاول مرة أخرى بعد قليل 🙏";
       modelTag = 'moodchat-error';
@@ -1749,10 +1936,11 @@ async function processMessage(msg, db, pollinationsEnabled) {
   }
 
   // ============================================================
-  // Fallback - treat as regular chat
+  // Fallback - treat as regular chat (with anti-loop)
   // ============================================================
   console.log(`[${ts()}]   Unknown modelUsed='${modelUsed}', treating as chat`);
   const history = await getHistory(db, msg.userId);
+  const recentReplies = await getRecentAssistantReplies(db, msg.userId, 3);
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     ...history,
@@ -1761,6 +1949,23 @@ async function processMessage(msg, db, pollinationsEnabled) {
   let reply;
   try {
     reply = await callZAIChat(messages);
+    // ⚡ Anti-loop في fallback
+    if (reply && isRepetitiveReply(reply, recentReplies)) {
+      console.log(`[${ts()}]   ⚠️ Fallback repetitive reply detected, regenerating...`);
+      try {
+        const antiLoopMessages = [
+          { role: 'system', content: SYSTEM_PROMPT + '\n\n⚠️ مهم: لا تكرر نفس الرد الذي قلته للتو. أجب بشكل مختلف تماماً وبشكل طبيعي مناسب للسياق الحالي.' },
+          ...history.slice(-6),
+          { role: 'user', content },
+          { role: 'assistant', content: reply },
+          { role: 'user', content: '⚠️ ردك السابق كان مكرراً. أجب الآن بإجابة جديدة ومختلفة تماماً ومناسبة لرسالتي.' },
+        ];
+        const variedReply = await callZAIChat(antiLoopMessages);
+        if (variedReply && !isRepetitiveReply(variedReply, [...recentReplies, reply])) {
+          reply = variedReply;
+        }
+      } catch (_) {}
+    }
   } catch (e) {
     reply = "عذراً، واجهت خطأ. حاول مرة أخرى 🙏";
   }
@@ -1776,12 +1981,51 @@ async function getHistory(db, userId) {
       orderBy: { timestamp: 'asc' },
       take: MAX_HISTORY,
     });
-    return rows
-      .filter(m => m.modelUsed !== 'file-docx' && m.modelUsed !== 'file-code')
-      .map(m => ({ role: m.role, content: m.content }));
+    // نُبقي تحليلات الملفات والصور في الذاكرة لأنها ضرورية للسياق
+    // ("حل الملف السابق"، "اقرا كل شيء"، إلخ)
+    return rows.map(m => ({ role: m.role, content: m.content }));
   } catch (_) {
     return [];
   }
+}
+
+// يلتقط آخر ردود المساعد لاكتشاف التكرار
+async function getRecentAssistantReplies(db, userId, count = 3) {
+  try {
+    const rows = await db.message.findMany({
+      where: { userId, status: 'done', role: 'assistant' },
+      orderBy: { timestamp: 'desc' },
+      take: count,
+    });
+    return rows.map(r => r.content).reverse();
+  } catch (_) {
+    return [];
+  }
+}
+
+// يكتشف التكرار: نفس الرد بالضبط أو ردود متشابهة جداً
+function isRepetitiveReply(reply, recentReplies) {
+  if (!reply || !recentReplies || recentReplies.length === 0) return false;
+  const normalizedReply = reply.trim().toLowerCase().substring(0, 500);
+  for (const prev of recentReplies) {
+    const normalizedPrev = prev.trim().toLowerCase().substring(0, 500);
+    // نفس الرد بالضبط
+    if (normalizedReply === normalizedPrev) return true;
+    // ردود متشابهة جداً (90% من المحتوى)
+    if (normalizedReply.length > 50 && normalizedPrev.length > 50) {
+      const shorter = Math.min(normalizedReply.length, normalizedPrev.length);
+      let matches = 0;
+      for (let i = 0; i < shorter; i++) {
+        if (normalizedReply[i] === normalizedPrev[i]) matches++;
+      }
+      if (matches / shorter > 0.85) return true;
+    }
+    // نفس أول 100 حرف (تكرار في المقدمة)
+    if (normalizedReply.length > 100 && normalizedPrev.length > 100) {
+      if (normalizedReply.substring(0, 100) === normalizedPrev.substring(0, 100)) return true;
+    }
+  }
+  return false;
 }
 
 async function replyAndSave(db, msg, chatId, reply, modelTag) {
