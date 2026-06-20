@@ -1,8 +1,9 @@
 // التحقق من حالة الـ Webhook على Meta وإرسال رسالة اختبار
-const WA_TOKEN = 'EAATAOIj0lhUBRzbHLZBv1GfU1u4He8oOSudvwXyOLNsXFXv1EZCIMmRHPDmaepbZCL2Hy1LpwF7ssYC6b3ilBXPZB253foCdiZBZBNdGVZAj5SBr4t7UZAhswitEpFREUdBi5O64WL1x8Y1tnGTZBtD1XyAoDoZCVI1ZCnUy8PtNqAwGbWpjIVKbBLC4eVpgwQjTDRO3QaZA4re3K8kunHoQBiZBtPq8ViG9RdKu0sX7DzLEMsvKK2YoI6cZA9leDxyKkTh4lCQg6DxZAoPtPW6ZA6WWjWZBencPb';
-const WABA_ID = '995700279847597';
-const PHONE_NUMBER_ID = '1180359958489968';
-const API_VERSION = 'v21.0';
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
+const WA_TOKEN = process.env.WA_TOKEN;
+const WABA_ID = process.env.WA_BUSINESS_ID;
+const PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
+const API_VERSION = process.env.WA_API_VERSION || 'v25.0';
 
 async function checkWebhookSubscriptions() {
   console.log('=== فحص اشتراكات الـ Webhook على Meta ===\n');

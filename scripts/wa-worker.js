@@ -24,10 +24,12 @@ const db = new PrismaClient({
   },
 });
 
-// === WhatsApp Cloud API ===
-const WA_TOKEN = process.env.WA_TOKEN || 'EAATAOIj0lhUBRzbHLZBv1GfU1u4He8oOSudvwXyOLNsXFXv1EZCIMmRHPDmaepbZCL2Hy1LpwF7ssYC6b3ilBXPZB253foCdiZBZBNdGVZAj5SBr4t7UZAhswitEpFREUdBi5O64WL1x8Y1tnGTZBtD1XyAoDoZCVI1ZCnUy8PtNqAwGbWpjIVKbBLC4eVpgwQjTDRO3QaZA4re3K8kunHoQBiZBtPq8ViG9RdKu0sX7DzLEMsvKK2YoI6cZA9leDxyKkTh4lCQg6DxZAoPtPW6ZA6WWjWZBencPb';
-const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID || '1180359958489968';
-const WA_API_VERSION = process.env.WA_API_VERSION || 'v21.0';
+// === WhatsApp Cloud API (loaded from .env) ===
+// Load dotenv if not already loaded
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
+const WA_TOKEN = process.env.WA_TOKEN;
+const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
+const WA_API_VERSION = process.env.WA_API_VERSION || 'v25.0';
 
 // === Z-AI SDK ===
 const ZAI_CONFIG = {
