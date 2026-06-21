@@ -3,6 +3,12 @@
     "src/app/api/telegram/route.ts": {
       "maxDuration": 10
     },
+    "src/app/api/tg-auto-process/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/process-pending/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/**/*.ts": {
       "maxDuration": 60
     }
