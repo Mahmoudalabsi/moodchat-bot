@@ -4,9 +4,15 @@
       "maxDuration": 10
     },
     "src/app/api/**/*.ts": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   },
+  "crons": [
+    {
+      "path": "/api/tg-auto-process",
+      "schedule": "* * * * *"
+    }
+  ],
   "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss 2>/dev/null; next build",
   "installCommand": "bun install",
   "framework": "nextjs"

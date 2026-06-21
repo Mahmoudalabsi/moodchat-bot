@@ -137,9 +137,13 @@ async function sendChatAction(chatId: number): Promise<void> {
 // ============================
 
 async function callZAI(messages: Array<{ role: string; content: any }>, maxTokens = 2500): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25000);
+  // Provider chain: Z-AI → Pollinations → smart fallback
+  // Z-AI may be unreachable from Vercel (internal API), so we have fallbacks
+
+  // === Provider 1: Z-AI (try, but tolerate failure) ===
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -158,17 +162,44 @@ async function callZAI(messages: Array<{ role: string; content: any }>, maxToken
         thinking: { type: 'disabled' },
       }),
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Z-AI HTTP ${res.status}: ${text.slice(0, 200)}`);
-    }
-    const data = await res.json();
-    const reply = data?.choices?.[0]?.message?.content?.trim();
-    if (!reply) throw new Error('Empty AI response');
-    return reply;
-  } finally {
     clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      const reply = data?.choices?.[0]?.message?.content?.trim();
+      if (reply) return reply;
+    }
+  } catch {}
+
+  // === Provider 2: Pollinations (public, works from Vercel) ===
+  try {
+    const controller2 = new AbortController();
+    const timeout2 = setTimeout(() => controller2.abort(), 15000);
+    const pollRes = await fetch('https://text.pollinations.ai/openai/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller2.signal,
+      body: JSON.stringify({
+        messages,
+        model: 'openai',
+        temperature: 0.7,
+        max_tokens: maxTokens,
+      }),
+    });
+    clearTimeout(timeout2);
+    if (pollRes.ok) {
+      const pollData = await pollRes.json();
+      const pollReply = pollData?.choices?.[0]?.message?.content?.trim();
+      if (pollReply) return pollReply;
+    }
+  } catch {}
+
+  // === Provider 3: Smart fallback ===
+  const lastUser = messages.filter(m => m.role === 'user').pop();
+  const userText = typeof lastUser?.content === 'string' ? lastUser.content : '';
+  if (/^(hi|hello|hey|مرحبا|هلا|السلام|سلام)/i.test(userText.trim())) {
+    return 'مرحباً! كيف يمكنني مساعدتك اليوم؟';
   }
+  return 'أعتذر، أواجه مشكلة مؤقتة في الاتصال بالخدمة. يرجى المحاولة مرة أخرى بعد لحظات.';
 }
 
 // ============================
