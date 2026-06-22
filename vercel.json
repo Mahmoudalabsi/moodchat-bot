@@ -6,6 +6,9 @@
     "src/app/api/tg-auto-process/route.ts": {
       "maxDuration": 60
     },
+    "src/app/api/tg-process-v2/route.ts": {
+      "maxDuration": 60
+    },
     "src/app/api/process-pending/route.ts": {
       "maxDuration": 60
     },
@@ -15,8 +18,12 @@
   },
   "crons": [
     {
-      "path": "/api/tg-auto-process",
+      "path": "/api/tg-process-v2",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/tg-auto-process",
+      "schedule": "*/2 * * * *"
     }
   ],
   "buildCommand": "npx prisma generate && npx prisma db push --accept-data-loss 2>/dev/null; next build",
