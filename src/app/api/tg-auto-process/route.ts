@@ -363,6 +363,8 @@ async function handleRequest(req: NextRequest): Promise<NextResponse> {
     // if (vpsAlive) { ... yield ... }
     const vpsAlive = false;
 
+    // BUILD MARKER v2 — if you see this in response, Vercel has deployed the new code
+
     await updateAutoProcHeartbeat();
 
     // Process up to 3 messages per cron invocation (within 60s limit)
