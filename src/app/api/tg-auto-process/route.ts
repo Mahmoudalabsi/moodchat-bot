@@ -38,7 +38,7 @@ const MAX_HISTORY = 20;
 const CRON_SECRET = process.env.CRON_SECRET;
 const BOT_TOKEN = '8877954741:AAFFyxnxBmtXhctV_wBCzdFgros43n3QJDM';
 
-// VPS worker heartbeat detection
+// VPS worker heartbeat detection (kept for backward compat, but disabled)
 const VPS_WORKER_HEARTBEAT_KEY = 'worker_heartbeat';
 const VPS_WORKER_ALIVE_THRESHOLD_SEC = 60;
 
@@ -137,13 +137,40 @@ async function sendChatAction(chatId: number): Promise<void> {
 // ============================
 
 async function callZAI(messages: Array<{ role: string; content: any }>, maxTokens = 2500): Promise<string> {
-  // Provider chain: Z-AI → Pollinations → smart fallback
-  // Z-AI may be unreachable from Vercel (internal API), so we have fallbacks
+  // Provider chain: Pollinations (primary, works from Vercel) → Z-AI (fallback) → smart fallback
+  // Pollinations is free, public, and reliable from any server.
 
-  // === Provider 1: Z-AI (try, but tolerate failure) ===
+  // === Provider 1: Pollinations (PRIMARY — works from Vercel) ===
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    const pollRes = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Referer': 'moodchat-vercel',
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: 'openai',
+        messages,
+        temperature: 0.7,
+        max_tokens: maxTokens,
+        stream: false,
+      }),
+    });
+    clearTimeout(timeout);
+    if (pollRes.ok) {
+      const pollData = await pollRes.json();
+      const pollReply = pollData?.choices?.[0]?.message?.content?.trim();
+      if (pollReply) return pollReply;
+    }
+  } catch {}
+
+  // === Provider 2: Z-AI (fallback — may work from some Vercel regions) ===
+  try {
+    const controller2 = new AbortController();
+    const timeout2 = setTimeout(() => controller2.abort(), 8000);
     const res = await fetch(`${ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -154,7 +181,7 @@ async function callZAI(messages: Array<{ role: string; content: any }>, maxToken
         'X-User-Id': ZAI_USER_ID,
         'X-Token': ZAI_TOKEN,
       },
-      signal: controller.signal,
+      signal: controller2.signal,
       body: JSON.stringify({
         messages,
         temperature: 0.7,
@@ -162,7 +189,7 @@ async function callZAI(messages: Array<{ role: string; content: any }>, maxToken
         thinking: { type: 'disabled' },
       }),
     });
-    clearTimeout(timeout);
+    clearTimeout(timeout2);
     if (res.ok) {
       const data = await res.json();
       const reply = data?.choices?.[0]?.message?.content?.trim();
@@ -170,30 +197,7 @@ async function callZAI(messages: Array<{ role: string; content: any }>, maxToken
     }
   } catch {}
 
-  // === Provider 2: Pollinations (public, works from Vercel) ===
-  try {
-    const controller2 = new AbortController();
-    const timeout2 = setTimeout(() => controller2.abort(), 15000);
-    const pollRes = await fetch('https://text.pollinations.ai/openai/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller2.signal,
-      body: JSON.stringify({
-        messages,
-        model: 'openai',
-        temperature: 0.7,
-        max_tokens: maxTokens,
-      }),
-    });
-    clearTimeout(timeout2);
-    if (pollRes.ok) {
-      const pollData = await pollRes.json();
-      const pollReply = pollData?.choices?.[0]?.message?.content?.trim();
-      if (pollReply) return pollReply;
-    }
-  } catch {}
-
-  // === Provider 3: Smart fallback ===
+  // === Provider 3: Smart fallback (last resort) ===
   const lastUser = messages.filter(m => m.role === 'user').pop();
   const userText = typeof lastUser?.content === 'string' ? lastUser.content : '';
   if (/^(hi|hello|hey|مرحبا|هلا|السلام|سلام)/i.test(userText.trim())) {
@@ -353,25 +357,22 @@ async function handleRequest(req: NextRequest): Promise<NextResponse> {
       });
     }
 
-    // AUTO-STOP: yield to VPS worker if it's alive
-    const vpsAlive = await isVpsWorkerAlive();
-    if (vpsAlive) {
-      return NextResponse.json({
-        ok: true,
-        message: 'VPS worker is alive. Auto-processor yielding.',
-        vpsWorkerAlive: true,
-        durationMs: Date.now() - startTime,
-      });
-    }
+    // AUTO-STOP disabled — Vercel cron is now the PRIMARY processor
+    // (VPS worker is no longer used — Vercel handles all messages 24/7)
+    // const vpsAlive = await isVpsWorkerAlive();
+    // if (vpsAlive) { ... yield ... }
+    const vpsAlive = false;
 
     await updateAutoProcHeartbeat();
 
-    const pending = await db.message.findFirst({
+    // Process up to 3 messages per cron invocation (within 60s limit)
+    const pending = await db.message.findMany({
       where: { status: 'pending', chatId: { not: null } },
       orderBy: { timestamp: 'asc' },
+      take: 3,
     });
 
-    if (!pending) {
+    if (!pending || pending.length === 0) {
       return NextResponse.json({
         ok: true,
         processed: 0,
@@ -381,15 +382,26 @@ async function handleRequest(req: NextRequest): Promise<NextResponse> {
       });
     }
 
-    const result = await processOneMessage(pending);
+    let successful = 0;
+    let failed = 0;
+    const errors: string[] = [];
+    for (const msg of pending) {
+      // Stop early if approaching 50s (avoid timeout)
+      if (Date.now() - startTime > 50000) break;
+      const result = await processOneMessage(msg);
+      if (result.ok) successful++;
+      else {
+        failed++;
+        if (result.error) errors.push(result.error);
+      }
+    }
 
     return NextResponse.json({
       ok: true,
-      processed: 1,
-      successful: result.ok ? 1 : 0,
-      failed: result.ok ? 0 : 1,
-      messageId: pending.id,
-      error: result.error,
+      processed: pending.length,
+      successful,
+      failed,
+      errors: errors.slice(0, 3),
       vpsWorkerAlive: false,
       durationMs: Date.now() - startTime,
     });
